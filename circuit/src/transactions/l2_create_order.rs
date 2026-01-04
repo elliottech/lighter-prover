@@ -266,6 +266,11 @@ impl Verify for L2CreateOrderTxTarget {
         self.is_perps_market =
             builder.is_equal_constant(tx_state.market.market_type, MARKET_TYPE_PERPS);
         let is_spot_market = builder.not(self.is_perps_market);
+        let treasury_account_index = builder.constant_usize(TREASURY_ACCOUNT_INDEX);
+        let is_treasury = builder.is_equal(self.account_index, treasury_account_index);
+        // Treasury can only create spot orders
+        let treasury_flag = builder.and(is_enabled, is_treasury);
+        builder.conditional_assert_true(treasury_flag, is_spot_market);
 
         self.next_order_nonce = get_next_order_nonce(builder, &tx_state.market, self.is_ask);
         self.next_order_index =

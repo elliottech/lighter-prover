@@ -59,7 +59,7 @@ impl UninterleaveToU32Gate {
     }
 
     pub fn routed_wires_per_op() -> usize {
-        3
+        4
     }
 
     // These could be consts, but let's make them as functions so we can more easily
@@ -80,7 +80,11 @@ impl UninterleaveToU32Gate {
         Self::routed_wires_per_op() * i + 2
     }
 
-    pub const START_BITS: usize = 3;
+    pub fn wire_ith_inverse(&self, i: usize) -> usize {
+        debug_assert!(i < self.num_ops);
+        Self::routed_wires_per_op() * i + 3
+    }
+
     // A more general solution would be to parameterize NUM_BITS, but we only care
     // about 32 bit operations for sha256, as well as keccak for now
     pub const NUM_BITS: usize = 64;
@@ -112,14 +116,38 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for UninterleaveTo
             let x_interleaved = vars.local_wires[self.wire_ith_x_interleaved(i)];
             let bits = vars.local_wires[self.wires_ith_bit_decomposition(i)].to_vec();
 
-            // Check 1: Ensure that the decomposition matches the input
-            // Remember that the bits are big-endian. The reduce_with_powers function takes a little-endian representation, so we reverse the input.
-            // The function just reverses it back again when it does the computation but it's cleaner to re-use the existing code, this isn't a bottleneck
-            let computed_x_interleaved = reduce_with_powers(
-                bits.iter().rev(),
+            let bits_le = bits.iter().rev();
+            let output_high = reduce_with_powers(
+                bits_le.clone().skip(32),
                 F::Extension::from_canonical_usize(Self::B),
             );
-            constraints.push(computed_x_interleaved - x_interleaved);
+            let output_low = reduce_with_powers(
+                bits_le.take(32),
+                F::Extension::from_canonical_usize(Self::B),
+            );
+            let inverse = vars.local_wires[self.wire_ith_inverse(i)];
+
+            // Check canonicity of combined_output = output_high * 2^32 + output_low
+            let combined_output = {
+                let base = F::Extension::from_canonical_u64(1 << 32u64);
+                let one = F::Extension::ONE;
+                let u32_max = F::Extension::from_canonical_u32(u32::MAX);
+
+                // This is zero if and only if the high limb is `u32::MAX`.
+                // u32::MAX - output_high
+                let diff = u32_max - output_high;
+                // If this is zero, the diff is invertible, so the high limb is not `u32::MAX`.
+                // inverse * diff - 1
+                let hi_not_max = inverse * diff - one;
+                // If this is zero, either the high limb is not `u32::MAX`, or the low limb is zero.
+                // hi_not_max * limb_0_u32
+                let hi_not_max_or_lo_zero = hi_not_max * output_low;
+
+                constraints.push(hi_not_max_or_lo_zero);
+
+                output_high * base + output_low
+            };
+            constraints.push(combined_output - x_interleaved);
 
             // Check 2: Ensure that the even-index bits in the decomposition match the x_evens value, same for odds
             let x_evens = vars.local_wires[self.wire_ith_x_evens(i)];
@@ -164,14 +192,33 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for UninterleaveTo
         for i in 0..self.num_ops {
             let x_interleaved = vars.local_wires[self.wire_ith_x_interleaved(i)];
             let bits = vars.local_wires[self.wires_ith_bit_decomposition(i)].to_vec();
-            let bits_reversed: Vec<ExtensionTarget<D>> = bits.clone().into_iter().rev().collect();
+            let bits_le: Vec<ExtensionTarget<D>> = bits.clone().into_iter().rev().collect();
+            let bits_le_low32 = bits_le[..32].to_vec();
+            let bits_le_high32 = bits_le[32..].to_vec();
 
-            // Check 1: Ensure that the decomposition matches the input
-            // Remember that the bits are big-endian. The reduce_with_powers function takes a little-endian representation, so we reverse the input.
-            // The function just reverses it back again when it does the computation but it's cleaner to re-use the existing code, this isn't a bottleneck
-            let computed_x_interleaved =
-                reduce_with_powers_ext_circuit(builder, &bits_reversed, base);
-            constraints.push(builder.sub_extension(computed_x_interleaved, x_interleaved));
+            let output_high = reduce_with_powers_ext_circuit(builder, &bits_le_high32, base);
+            let output_low = reduce_with_powers_ext_circuit(builder, &bits_le_low32, base);
+            let inverse = vars.local_wires[self.wire_ith_inverse(i)];
+            // Check canonicity of combined_output = output_high * 2^32 + output_low
+            let combined_output = {
+                let base: F::Extension = F::from_canonical_u64(1 << 32u64).into();
+                let base_target = builder.constant_extension(base);
+                let one = builder.one_extension();
+                let u32_max =
+                    builder.constant_extension(F::Extension::from_canonical_u32(u32::MAX));
+
+                // This is zero if and only if the high limb is `u32::MAX`.
+                let diff = builder.sub_extension(u32_max, output_high);
+                // If this is zero, the diff is invertible, so the high limb is not `u32::MAX`.
+                let hi_not_max = builder.mul_sub_extension(inverse, diff, one);
+                // If this is zero, either the high limb is not `u32::MAX`, or the low limb is zero.
+                let hi_not_max_or_lo_zero = builder.mul_extension(hi_not_max, output_low);
+
+                constraints.push(hi_not_max_or_lo_zero);
+
+                builder.mul_add_extension(output_high, base_target, output_low)
+            };
+            constraints.push(builder.sub_extension(combined_output, x_interleaved));
 
             // Check 2: Ensure that the even-index bits in the decomposition match the x_evens value, same for odds
             let x_evens = vars.local_wires[self.wire_ith_x_evens(i)];
@@ -250,11 +297,11 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for UninterleaveTo
     }
 
     fn degree(&self) -> usize {
-        Self::B
+        3
     }
 
     fn num_constraints(&self) -> usize {
-        self.num_ops * (Self::NUM_BITS + 1 + 2)
+        self.num_ops * (Self::NUM_BITS + 1 + 2 + 1)
     }
 
     fn serialize(
@@ -289,12 +336,36 @@ impl<F: RichField + Extendable<D>, const D: usize> PackedEvaluableBase<F, D>
             let x_interleaved = vars.local_wires[self.wire_ith_x_interleaved(i)];
             let bits = vars.local_wires.view(self.wires_ith_bit_decomposition(i));
 
-            // Check 1: Ensure that the decomposition matches the input
-            // Remember that the bits are big-endian. The reduce_with_powers function takes a little-endian representation, so we reverse the input.
-            // The function just reverses it back again when it does the computation but it's cleaner to re-use the existing code, this isn't a bottleneck
-            let computed_x_interleaved =
-                reduce_with_powers(bits.iter().rev(), F::from_canonical_usize(Self::B));
-            yield_constr.one(computed_x_interleaved - x_interleaved);
+            let mut output_low = P::ZEROS;
+            let mut output_high = P::ZEROS;
+            let alpha = F::from_canonical_usize(Self::B);
+            for &term in bits.into_iter().skip(32) {
+                output_low = output_low * alpha + term;
+            }
+            for &term in bits.into_iter().take(32) {
+                output_high = output_high * alpha + term;
+            }
+            let inverse = vars.local_wires[self.wire_ith_inverse(i)];
+            let combined_output = {
+                let base = P::from(F::from_canonical_u64(1 << 32u64));
+                let one = P::ONES;
+                let u32_max = P::from(F::from_canonical_u32(u32::MAX));
+
+                // This is zero if and only if the high limb is `u32::MAX`.
+                // u32::MAX - output_high
+                let diff = u32_max - output_high;
+                // If this is zero, the diff is invertible, so the high limb is not `u32::MAX`.
+                // inverse * diff - 1
+                let hi_not_max = inverse * diff - one;
+                // If this is zero, either the high limb is not `u32::MAX`, or the low limb is zero.
+                // hi_not_max * limb_0_u32
+                let hi_not_max_or_lo_zero = hi_not_max * output_low;
+
+                yield_constr.one(hi_not_max_or_lo_zero);
+
+                output_high * base + output_low
+            };
+            yield_constr.one(combined_output - x_interleaved);
 
             // Check 2: Ensure that the even-index bits in the decomposition match the x_evens value
             let x_evens = vars.local_wires[self.wire_ith_x_evens(i)];
@@ -358,6 +429,17 @@ impl<F: RichField + Extendable<D>, const D: usize> SimpleGenerator<F, D>
         // Reminder: treat x as big-endian
         let x_interleaved =
             get_local_wire(self.gate.wire_ith_x_interleaved(self.i)).to_canonical_u64();
+
+        let x_interleaved_high_u64 = x_interleaved >> 32;
+        let diff = u32::MAX as u64 - x_interleaved_high_u64;
+        let inverse = if diff == 0 {
+            F::ZERO
+        } else {
+            F::from_canonical_u64(diff).inverse()
+        };
+        let inverse_wire = local_wire(self.gate.wire_ith_inverse(self.i));
+        out_buffer.set_wire(inverse_wire, inverse)?;
+
         let mut x_evens = 0u64;
         let mut x_odds = 0u64;
 

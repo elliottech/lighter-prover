@@ -385,7 +385,14 @@ impl TxTypeTargets {
         // If transaction initiator is the treasury, only L2 withdrawals are allowed.
         let treasury_index = builder.constant_usize(TREASURY_ACCOUNT_INDEX);
         let is_treasury = builder.is_equal(verify_inputs.account.account_index, treasury_index);
-        let is_valid_treasury_tx = builder.multi_or(&[self.is_l2_withdraw]);
+        let is_valid_treasury_tx = builder.multi_or(&[
+            self.is_l2_transfer,
+            self.is_l2_withdraw,
+            self.is_l2_create_order,
+            self.is_l2_cancel_order,
+            self.is_l2_cancel_all_orders,
+            self.is_l2_modify_order,
+        ]);
         let check_treasury_tx = builder.and(is_treasury, self.is_layer2);
         builder.conditional_assert_true(check_treasury_tx, is_valid_treasury_tx);
 

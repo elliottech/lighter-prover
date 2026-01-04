@@ -11,6 +11,7 @@ use plonky2::iop::target::{BoolTarget, Target};
 use plonky2::iop::witness::Witness;
 
 use super::base_field::PartialWitnessQuinticExt;
+use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::builder::Builder;
 use crate::eddsa::curve::curve::{ECgFp5Point, WeierstrassPoint};
 use crate::eddsa::curve::scalar_field::ECgFp5Scalar;
@@ -367,7 +368,7 @@ macro_rules! impl_circuit_builder_for_extension_degree {
                 // we check this by asserting that delta_is_sqrt OR w == 0.
                 let w_is_zero = self.is_equal_quintic_ext(w, zero_quintic_ext);
                 let delta_is_sqrt_or_w_is_zero = self.or(delta_is_sqrt, w_is_zero);
-                self.assert_bool(delta_is_sqrt_or_w_is_zero);
+                self.assert_true(delta_is_sqrt_or_w_is_zero);
 
                 let mut x1 = self.add_quintic_ext(e, r);
                 x1 = self.div_const_quintic_ext(x1, QuinticExtension::<F>::TWO);

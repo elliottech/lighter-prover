@@ -680,7 +680,7 @@ macro_rules! impl_circuit_builder_for_extension_degree {
             ) -> (QuinticExtensionTarget, BoolTarget) {
                 let zero = self.zero_quintic_ext();
                 let root_x = self.add_virtual_quintic_ext_target();
-                let is_sqrt = self.add_virtual_bool_target_unsafe();
+                let is_sqrt = self.add_virtual_bool_target_safe();
                 self.add_simple_generator(QuinticSqrtGenerator::new(x, root_x, is_sqrt));
 
                 let should_be_x_or_zero = self.square_quintic_ext(root_x);
