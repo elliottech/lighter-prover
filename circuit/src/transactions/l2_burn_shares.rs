@@ -53,7 +53,7 @@ pub struct L2BurnSharesTxTarget {
 
     pub shares_to_burn: Target,
     pub shares_to_burn_usdc_value: Target,
-    pub old_entry_quote: Target,
+    pub old_principal_amount: Target,
 
     pub operator_fee_share: Target,
 
@@ -75,7 +75,7 @@ impl L2BurnSharesTxTarget {
 
             shares_to_burn: builder.zero(),
             shares_to_burn_usdc_value: builder.zero(),
-            old_entry_quote: builder.zero(),
+            old_principal_amount: builder.zero(),
 
             operator_fee_share: builder.zero(),
 
@@ -161,7 +161,7 @@ impl Verify for L2BurnSharesTxTarget {
             tx_state.accounts[SUB_ACCOUNT_ID].master_account_index,
         );
 
-        self.old_entry_quote = tx_state.public_pool_share.entry_usdc; // To be used in apply
+        self.old_principal_amount = tx_state.public_pool_share.principal_amount; // To be used in apply
 
         self.account_shares = builder.select(
             self.is_operator,
@@ -221,7 +221,7 @@ impl Verify for L2BurnSharesTxTarget {
         {
             let big_usdc_to_collateral_multiplier =
                 builder.constant_biguint(&BigUint::from(USDC_TO_COLLATERAL_MULTIPLIER));
-            let big_entry_usdc = builder.target_to_biguint(self.old_entry_quote);
+            let big_entry_usdc = builder.target_to_biguint(self.old_principal_amount);
             let big_share_amount = builder.target_to_biguint(self.share_amount);
             let big_owned_share_amount = builder.target_to_biguint(self.account_shares);
             let entry_usdc_mul_share_amount =
@@ -384,27 +384,30 @@ impl Apply for L2BurnSharesTxTarget {
 
             // entry usdc
             // let entry_usdc_delta = entry usdc * total_burned / share amount
-            let big_entry_usdc = builder.target_to_biguint(self.old_entry_quote);
+            let big_entry_usdc = builder.target_to_biguint(self.old_principal_amount);
             let big_total_burnt_shares = builder.target_to_biguint(total_burned_shares);
             let big_owner_shares = builder.target_to_biguint(self.account_shares);
             let big_entry_mul_total_burnt =
                 builder.mul_biguint(&big_entry_usdc, &big_total_burnt_shares);
-            let big_entry_quote_delta =
+            let big_principal_amount_delta =
                 builder.div_biguint(&big_entry_mul_total_burnt, &big_owner_shares);
-            let entry_quote_delta = builder.biguint_to_target_unsafe(&big_entry_quote_delta);
+            let principal_amount_delta =
+                builder.biguint_to_target_unsafe(&big_principal_amount_delta);
 
-            let new_total_shares =
+            let new_share_amount =
                 builder.sub(tx_state.public_pool_share.share_amount, total_burned_shares);
-            let new_entry_usdc =
-                builder.sub(tx_state.public_pool_share.entry_usdc, entry_quote_delta);
-            tx_state.public_pool_share.entry_usdc = builder.select(
+            let new_principal_amount = builder.sub(
+                tx_state.public_pool_share.principal_amount,
+                principal_amount_delta,
+            );
+            tx_state.public_pool_share.principal_amount = builder.select(
                 non_operator_success,
-                new_entry_usdc,
-                tx_state.public_pool_share.entry_usdc,
+                new_principal_amount,
+                tx_state.public_pool_share.principal_amount,
             );
             tx_state.public_pool_share.share_amount = builder.select(
                 non_operator_success,
-                new_total_shares,
+                new_share_amount,
                 tx_state.public_pool_share.share_amount,
             );
             tx_state.apply_pool_share_delta_flag =

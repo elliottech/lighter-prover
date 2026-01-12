@@ -542,13 +542,13 @@ impl AccountTarget {
 
             let new_share_amount = builder.add(new_pool_shares[i].share_amount, share_delta);
             new_share_amounts.push(new_share_amount);
-            let new_entry_usdc = builder.add(new_pool_shares[i].entry_usdc, entry_usdc_delta);
+            let new_entry_usdc = builder.add(new_pool_shares[i].principal_amount, entry_usdc_delta);
             new_entry_usdcs.push(new_entry_usdc);
 
             new_pool_shares[i].share_amount =
                 builder.select(update, new_share_amount, new_pool_shares[i].share_amount);
-            new_pool_shares[i].entry_usdc =
-                builder.select(update, new_entry_usdc, new_pool_shares[i].entry_usdc);
+            new_pool_shares[i].principal_amount =
+                builder.select(update, new_entry_usdc, new_pool_shares[i].principal_amount);
 
             set_new_entry_usdc = builder.select(update, new_entry_usdc, set_new_entry_usdc);
 
@@ -566,13 +566,19 @@ impl AccountTarget {
                 new_share_amounts[i],
                 new_pool_shares[i].share_amount,
             );
-            new_pool_shares[i].entry_usdc =
-                builder.select(update, new_entry_usdcs[i], new_pool_shares[i].entry_usdc);
+            new_pool_shares[i].principal_amount = builder.select(
+                update,
+                new_entry_usdcs[i],
+                new_pool_shares[i].principal_amount,
+            );
             new_pool_shares[i].public_pool_index =
                 builder.select(update, pool_index, new_pool_shares[i].public_pool_index);
 
-            set_new_entry_usdc =
-                builder.select(update, new_pool_shares[i].entry_usdc, set_new_entry_usdc);
+            set_new_entry_usdc = builder.select(
+                update,
+                new_pool_shares[i].principal_amount,
+                set_new_entry_usdc,
+            );
 
             success = builder.or(success, update);
         }
@@ -598,7 +604,7 @@ impl AccountTarget {
         }
 
         // check if set_new_entry_usdc is less than the maximum allowed entry usdc
-        let max_entry_usdc = builder.constant_u64(MAX_POOL_ENTRY_USDC);
+        let max_entry_usdc = builder.constant_u64(MAX_POOL_PRINCIPAL_AMOUNT);
         let valid_entry_usdc = builder.is_lte(set_new_entry_usdc, max_entry_usdc, 64);
         success = builder.and(success, valid_entry_usdc);
         let update_state = builder.and(success, is_enabled);
@@ -634,18 +640,20 @@ impl AccountTarget {
 
             let new_share_amount =
                 builder.sub(self.public_pool_shares[i].share_amount, share_delta);
-            let new_entry_usdc =
-                builder.sub(self.public_pool_shares[i].entry_usdc, entry_usdc_delta);
+            let new_entry_usdc = builder.sub(
+                self.public_pool_shares[i].principal_amount,
+                entry_usdc_delta,
+            );
 
             self.public_pool_shares[i].share_amount = builder.select(
                 update,
                 new_share_amount,
                 self.public_pool_shares[i].share_amount,
             );
-            self.public_pool_shares[i].entry_usdc = builder.select(
+            self.public_pool_shares[i].principal_amount = builder.select(
                 update,
                 new_entry_usdc,
-                self.public_pool_shares[i].entry_usdc,
+                self.public_pool_shares[i].principal_amount,
             );
 
             success = builder.or(success, update);
@@ -689,7 +697,7 @@ impl AccountTarget {
         let new_pool_shares_for_empty = PublicPoolShareTarget {
             public_pool_index: pool_index,
             share_amount: share_delta,
-            entry_usdc: entry_usdc_delta,
+            principal_amount: entry_usdc_delta,
         };
         let empty_pool_share = PublicPoolShareTarget::empty(builder, zero);
         let is_share_delta_non_zero = builder.is_not_zero(share_delta);
@@ -744,8 +752,10 @@ impl AccountTarget {
             let add_to_entry_usdc = builder.mul_bool(apply_delta, entry_usdc_delta);
             self.public_pool_shares[i].share_amount =
                 builder.add(self.public_pool_shares[i].share_amount, add_to_share_amount);
-            self.public_pool_shares[i].entry_usdc =
-                builder.add(self.public_pool_shares[i].entry_usdc, add_to_entry_usdc);
+            self.public_pool_shares[i].principal_amount = builder.add(
+                self.public_pool_shares[i].principal_amount,
+                add_to_entry_usdc,
+            );
 
             let is_new_share_amount_empty =
                 builder.is_zero(self.public_pool_shares[i].share_amount);

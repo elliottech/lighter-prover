@@ -26,7 +26,7 @@ use crate::utils::CircuitBuilderUtils;
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct L1DepositTx {
-    #[serde(rename = "i")]
+    #[serde(rename = "i", default)]
     pub account_index: i64,
 
     #[serde(rename = "l")]
@@ -190,7 +190,7 @@ impl Verify for L1DepositTxTarget {
         builder.conditional_assert_false(asset_existence_check, is_asset_empty);
 
         // If sequencer accepted non-zero amount for perps route, margin mode has to be enabled for the asset
-        let is_perps = builder.is_equal_constant(self.route_type, ROUTE_TYPE_PERPS as u64);
+        let is_perps = builder.is_equal_constant(self.route_type, ROUTE_TYPE_PERPS);
         let margin_mode_check =
             builder.multi_and(&[is_accepted_amount_non_zero, self.is_enabled, is_perps]);
         builder.conditional_assert_eq_constant(
@@ -217,7 +217,7 @@ impl Verify for L1DepositTxTarget {
 
 impl Apply for L1DepositTxTarget {
     fn apply(&mut self, builder: &mut Builder, tx_state: &mut TxState) -> BoolTarget {
-        let is_perps = builder.is_equal_constant(self.route_type, ROUTE_TYPE_PERPS as u64);
+        let is_perps = builder.is_equal_constant(self.route_type, ROUTE_TYPE_PERPS);
 
         let source_balance = {
             let balance_bigint = builder

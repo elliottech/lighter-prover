@@ -10,6 +10,7 @@ use crate::bigint::biguint::{BigUintTarget, CircuitBuilderBiguint};
 use crate::bigint::comparison::CircuitBuilderBiguintSubtractiveComparison;
 use crate::bigint::div_rem::CircuitBuilderBiguintDivRem;
 use crate::types::account::AccountTarget;
+use crate::types::account_asset::AccountAssetTarget;
 use crate::types::account_position::AccountPositionTarget;
 use crate::types::config::{
     BIG_U64_LIMBS, BIG_U96_LIMBS, BIG_U128_LIMBS, BIGU16_U64_LIMBS, Builder,
@@ -234,6 +235,39 @@ pub fn get_available_collateral(
     builder.min_biguint(&available_collateral, &collateral_with_funding.abs)
 }
 
+pub fn get_shares_asset_value(
+    builder: &mut Builder,
+    account: &AccountTarget,
+    asset_balance: &BigUintTarget,
+    asset_extension_multiplier: &BigUintTarget,
+    share_amount: Target,
+) -> Target {
+    let is_total_shares_zero = builder.is_zero(account.public_pool_info.total_shares);
+
+    let big_share_amount = builder.target_to_biguint(share_amount);
+    let big_initial_pool_share_value =
+        builder.constant_biguint(&BigUint::from(INITIAL_POOL_SHARE_VALUE));
+    let default_usdc_value = builder.mul_biguint(&big_share_amount, &big_initial_pool_share_value);
+
+    let share_amount_mul_total_account_value =
+        builder.mul_biguint(&big_share_amount, asset_balance);
+    let big_old_total_shares = builder.target_to_biguint(account.public_pool_info.total_shares);
+    let old_total_shares_mul_usdc_to_collateral_multiplier =
+        builder.mul_biguint(&big_old_total_shares, asset_extension_multiplier);
+    let c_big_usdc_to_mint_shares = builder.div_biguint(
+        &share_amount_mul_total_account_value,
+        &old_total_shares_mul_usdc_to_collateral_multiplier,
+    );
+
+    let big_usdc_to_mint_shares = builder.select_biguint(
+        is_total_shares_zero,
+        &default_usdc_value,
+        &c_big_usdc_to_mint_shares,
+    );
+
+    builder.biguint_to_target_safe(&big_usdc_to_mint_shares)
+}
+
 pub fn get_shares_usdc_value(
     builder: &mut Builder,
     risk_info: &RiskParametersTarget,
@@ -272,15 +306,31 @@ pub fn get_shares_usdc_value(
 pub fn get_available_shares_to_burn(
     builder: &mut Builder,
     risk_info: &RiskParametersTarget,
-    account: &AccountTarget,
+    pool_account: &AccountTarget,
 ) -> Target {
     let available_collateral = get_available_collateral(builder, risk_info);
-    let big_total_shares = builder.target_to_biguint(account.public_pool_info.total_shares);
+    let big_total_shares = builder.target_to_biguint(pool_account.public_pool_info.total_shares);
     let available_collateral_mul_total_shares =
         builder.mul_biguint(&available_collateral, &big_total_shares);
     let big_available_shares = builder.div_biguint(
         &available_collateral_mul_total_shares,
         &risk_info.total_account_value.abs,
     ); // since total account value is always bigger than the available collateral, result should be <= total shares
+    builder.biguint_to_target_unsafe(&big_available_shares)
+}
+
+pub fn get_available_shares_to_burn_for_staking_pool(
+    builder: &mut Builder,
+    total_shares: Target,
+    pool_asset_info: &AccountAssetTarget,
+) -> Target {
+    let available_asset_balance = pool_asset_info.get_available_balance(builder);
+    let big_total_shares = builder.target_to_biguint(total_shares);
+    let available_balance_mul_total_shares =
+        builder.mul_biguint(&available_asset_balance, &big_total_shares);
+    let big_available_shares = builder.div_biguint(
+        &available_balance_mul_total_shares,
+        &pool_asset_info.balance,
+    );
     builder.biguint_to_target_unsafe(&big_available_shares)
 }

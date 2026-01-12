@@ -8,23 +8,23 @@ use plonky2::iop::target::{BoolTarget, Target};
 use plonky2::iop::witness::Witness;
 use serde::Deserialize;
 
-use crate::bigint::bigint::{BigIntTarget, SignTarget};
 use crate::bigint::biguint::{BigUintTarget, CircuitBuilderBiguint};
 use crate::bigint::comparison::CircuitBuilderBiguintSubtractiveComparison;
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::eddsa::gadgets::base_field::QuinticExtensionTarget;
 use crate::eddsa::schnorr::hash_to_quintic_extension_circuit;
-use crate::liquidation::{get_available_collateral, get_shares_usdc_value};
+use crate::liquidation::get_shares_asset_value;
 use crate::tx_interface::{Apply, TxHash, Verify};
 use crate::types::config::{BIG_U96_LIMBS, Builder, F};
 use crate::types::constants::*;
 use crate::types::tx_state::TxState;
 use crate::types::tx_type::TxTypeTargets;
+use crate::uint::u32::gadgets::arithmetic_u32::CircuitBuilderU32;
 use crate::utils::CircuitBuilderUtils;
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
-pub struct L2MintSharesTx {
+pub struct L2StakeAssetsTx {
     #[serde(rename = "ai", default)]
     pub account_index: i64,
 
@@ -32,44 +32,44 @@ pub struct L2MintSharesTx {
     pub api_key_index: u8,
 
     #[serde(rename = "p", default)]
-    pub public_pool_index: i64,
+    pub staking_pool_index: i64,
 
     #[serde(rename = "s", default)]
     pub share_amount: i64,
 }
 
 #[derive(Debug)]
-pub struct L2MintSharesTxTarget {
+pub struct L2StakeAssetsTxTarget {
     pub account_index: Target,
     pub api_key_index: Target,
-    pub public_pool_index: Target,
+    pub staking_pool_index: Target,
     pub share_amount: Target,
 
     // Helper
     is_operator: BoolTarget,
-    principal_amount: Target,
+    lit_amount: Target,
     new_total_shares: Target,
     new_principal_amount: Target,
-    collateral_to_mint_shares: BigUintTarget,
+    balance_to_mint_shares: BigUintTarget,
 
     // Output
     success: BoolTarget,
 }
 
-impl L2MintSharesTxTarget {
+impl L2StakeAssetsTxTarget {
     pub fn new(builder: &mut Builder) -> Self {
-        L2MintSharesTxTarget {
+        L2StakeAssetsTxTarget {
             account_index: builder.add_virtual_target(),
             api_key_index: builder.add_virtual_target(),
-            public_pool_index: builder.add_virtual_target(),
+            staking_pool_index: builder.add_virtual_target(),
             share_amount: builder.add_virtual_target(),
 
             // Helper
             is_operator: builder._false(),
-            principal_amount: builder.zero(),
+            lit_amount: builder.zero(),
             new_total_shares: builder.zero(),
             new_principal_amount: builder.zero(),
-            collateral_to_mint_shares: builder.zero_biguint(),
+            balance_to_mint_shares: builder.zero_biguint(),
 
             // Output
             success: BoolTarget::default(),
@@ -77,7 +77,7 @@ impl L2MintSharesTxTarget {
     }
 }
 
-impl TxHash for L2MintSharesTxTarget {
+impl TxHash for L2StakeAssetsTxTarget {
     fn hash(
         &self,
         builder: &mut Builder,
@@ -87,12 +87,12 @@ impl TxHash for L2MintSharesTxTarget {
     ) -> QuinticExtensionTarget {
         let elements = [
             builder.constant(F::from_canonical_u32(chain_id)),
-            builder.constant(F::from_canonical_u8(TX_TYPE_L2_MINT_SHARES)),
+            builder.constant(F::from_canonical_u8(TX_TYPE_L2_STAKE_ASSETS)),
             tx_nonce,
             tx_expired_at,
             self.account_index,
             self.api_key_index,
-            self.public_pool_index,
+            self.staking_pool_index,
             self.share_amount,
         ];
 
@@ -100,9 +100,9 @@ impl TxHash for L2MintSharesTxTarget {
     }
 }
 
-impl Verify for L2MintSharesTxTarget {
+impl Verify for L2StakeAssetsTxTarget {
     fn verify(&mut self, builder: &mut Builder, tx_type: &TxTypeTargets, tx_state: &TxState) {
-        let is_enabled = tx_type.is_l2_mint_shares;
+        let is_enabled = tx_type.is_l2_stake_assets;
         self.success = is_enabled;
 
         builder.conditional_assert_eq(
@@ -117,38 +117,39 @@ impl Verify for L2MintSharesTxTarget {
         );
         builder.conditional_assert_eq(
             is_enabled,
-            self.public_pool_index,
+            self.staking_pool_index,
             tx_state.accounts[SUB_ACCOUNT_ID].account_index,
         );
 
-        let big_shares_amount = builder.target_to_biguint(self.share_amount);
-        builder.range_check_biguint(
-            &big_shares_amount,
-            MAX_POOL_SHARES_TO_MINT_OR_BURN_USDC_BITS,
+        // Limit to lit
+        builder.conditional_assert_eq_constant(
+            is_enabled,
+            tx_state.asset_indices[TX_ASSET_ID],
+            LIT_ASSET_INDEX,
         );
+
+        // Assert share amount is within bounds
+        builder.register_range_check(self.share_amount, MAX_STAKING_SHARES_TO_MINT_OR_BURN_BITS);
         builder.conditional_assert_not_zero(is_enabled, self.share_amount);
 
-        let public_pool_account_type = builder.constant_from_u8(PUBLIC_POOL_ACCOUNT_TYPE);
-        let insurance_fund_account_type = builder.constant_from_u8(INSURANCE_FUND_ACCOUNT_TYPE);
-        let is_public_pool_account_type = builder.is_equal(
-            tx_state.accounts[SUB_ACCOUNT_ID].account_type,
-            public_pool_account_type,
-        );
-        let is_insurance_fund_account_type = builder.is_equal(
-            tx_state.accounts[SUB_ACCOUNT_ID].account_type,
-            insurance_fund_account_type,
-        );
-        let is_valid_account_type =
-            builder.or(is_public_pool_account_type, is_insurance_fund_account_type);
-        builder.conditional_assert_true(is_enabled, is_valid_account_type);
+        let is_asset_empty = tx_state.assets[TX_ASSET_ID].is_empty(builder);
+        builder.conditional_assert_false(is_enabled, is_asset_empty);
 
-        let active_public_pool = builder.constant_from_u8(ACTIVE_PUBLIC_POOL);
-        let is_active_public_pool = builder.is_equal(
+        // Assert sub account type
+        builder.conditional_assert_eq_constant(
+            is_enabled,
+            tx_state.accounts[SUB_ACCOUNT_ID].account_type,
+            LIGHTER_STAKING_POOL_ACCOUNT_TYPE as u64,
+        );
+
+        // Assert public pool is active
+        builder.conditional_assert_eq_constant(
+            is_enabled,
             tx_state.accounts[SUB_ACCOUNT_ID].public_pool_info.status,
-            active_public_pool,
+            ACTIVE_PUBLIC_POOL as u64,
         );
-        builder.conditional_assert_true(is_enabled, is_active_public_pool);
 
+        // If the share amount is greater than the maximum pool shares, fail the transaction
         self.new_total_shares = builder.add(
             tx_state.accounts[SUB_ACCOUNT_ID]
                 .public_pool_info
@@ -158,35 +159,32 @@ impl Verify for L2MintSharesTxTarget {
         let big_new_total_shares = builder.target_to_biguint(self.new_total_shares);
         builder.range_check_biguint(&big_new_total_shares, MAX_POOL_SHARES_BITS);
 
-        let available_collateral_to_mint_shares = get_available_collateral(
+        self.lit_amount = get_shares_asset_value(
             builder,
-            &tx_state.risk_infos[OWNER_ACCOUNT_ID].cross_risk_parameters,
-        );
-
-        self.principal_amount = get_shares_usdc_value(
-            builder,
-            &tx_state.risk_infos[SUB_ACCOUNT_ID].cross_risk_parameters,
             &tx_state.accounts[SUB_ACCOUNT_ID],
+            &tx_state.account_assets[SUB_ACCOUNT_ID][TX_ASSET_ID].balance,
+            &tx_state.assets[TX_ASSET_ID].extension_multiplier,
             self.share_amount,
         );
-        self.new_principal_amount = builder.add(
-            tx_state.public_pool_share.principal_amount,
-            self.principal_amount,
-        );
-        builder.register_range_check(self.new_principal_amount, MAX_POOL_PRINCIPAL_AMOUNT_BITS);
-        let usdc_to_collateral_multiplier =
-            builder.constant_biguint(&BigUint::from(USDC_TO_COLLATERAL_MULTIPLIER));
+        builder.register_range_check(self.lit_amount, MAX_POOL_SHARES_TO_MINT_OR_BURN_ASSET_BITS);
 
-        let big_usdc_amount = builder.target_to_biguint(self.principal_amount);
-        self.collateral_to_mint_shares = builder.mul_biguint_non_carry(
-            &big_usdc_amount,
-            &usdc_to_collateral_multiplier,
+        // Check if the entry asset amount fits in the pool share entry asset limit
+        self.new_principal_amount =
+            builder.add(tx_state.public_pool_share.principal_amount, self.lit_amount);
+        builder.register_range_check(self.new_principal_amount, MAX_POOL_PRINCIPAL_AMOUNT_BITS);
+
+        let big_asset_amount = builder.target_to_biguint(self.lit_amount);
+        self.balance_to_mint_shares = builder.mul_biguint_non_carry(
+            &big_asset_amount,
+            &tx_state.assets[TX_ASSET_ID].extension_multiplier,
             BIG_U96_LIMBS,
         );
+        let asset_balance =
+            tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID].get_available_balance(builder);
         builder.conditional_assert_lte_biguint(
             is_enabled,
-            &self.collateral_to_mint_shares,
-            &available_collateral_to_mint_shares,
+            &self.balance_to_mint_shares,
+            &asset_balance,
         );
 
         self.is_operator = builder.is_equal(
@@ -194,10 +192,10 @@ impl Verify for L2MintSharesTxTarget {
             tx_state.accounts[SUB_ACCOUNT_ID].master_account_index,
         );
 
-        // If minter is not the operator, then check if the minimum share rate is still
+        // If staker is not the operator, then check if the minimum share rate is still
         // going to be satisfied for the pool operator
         {
-            // If operator shares drops below the minimum operator share rate, fail the transaction
+            // If operator shares drop below the minimum operator share rate, fail the transaction
             let big_min_operator_share_rate = builder.target_to_biguint(
                 tx_state.accounts[SUB_ACCOUNT_ID]
                     .public_pool_info
@@ -217,33 +215,29 @@ impl Verify for L2MintSharesTxTarget {
     }
 }
 
-impl Apply for L2MintSharesTxTarget {
+impl Apply for L2StakeAssetsTxTarget {
     fn apply(&mut self, builder: &mut Builder, tx_state: &mut TxState) -> BoolTarget {
-        let zero = builder.zero();
-        let one = builder.one();
-        let neg_one = builder.neg_one();
-
-        let is_big_collateral_amount_zero =
-            builder.is_zero_biguint(&self.collateral_to_mint_shares);
-        let add_sign = builder.select(is_big_collateral_amount_zero, zero, one);
-        let sub_sign = builder.select(is_big_collateral_amount_zero, zero, neg_one);
-
         // Collateral deltas
-        tx_state.accounts[OWNER_ACCOUNT_ID].apply_collateral_delta(
-            builder,
-            self.success,
-            BigIntTarget {
-                abs: self.collateral_to_mint_shares.clone(),
-                sign: SignTarget::new_unsafe(sub_sign),
-            },
+        let (new_owner_balance, fail) = builder.try_sub_biguint(
+            &tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID].balance,
+            &self.balance_to_mint_shares,
         );
-        tx_state.accounts[SUB_ACCOUNT_ID].apply_collateral_delta(
-            builder,
+        builder.conditional_assert_zero_u32(self.success, fail);
+        tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID].balance = builder.select_biguint(
             self.success,
-            BigIntTarget {
-                abs: self.collateral_to_mint_shares.clone(),
-                sign: SignTarget::new_unsafe(add_sign),
-            },
+            &new_owner_balance,
+            &tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID].balance,
+        );
+
+        let new_sub_account_balance = builder.add_biguint_non_carry(
+            &tx_state.account_assets[SUB_ACCOUNT_ID][TX_ASSET_ID].balance,
+            &self.balance_to_mint_shares,
+            BIG_U96_LIMBS,
+        );
+        tx_state.account_assets[SUB_ACCOUNT_ID][TX_ASSET_ID].balance = builder.select_biguint(
+            self.success,
+            &new_sub_account_balance,
+            &tx_state.account_assets[SUB_ACCOUNT_ID][TX_ASSET_ID].balance,
         );
 
         // Public pool total share
@@ -257,7 +251,7 @@ impl Apply for L2MintSharesTxTarget {
                 .total_shares,
         );
 
-        // Set pool shares - not operator
+        // Set pool assets - not operator
         {
             let is_success_and_not_operator = builder.and_not(self.success, self.is_operator);
 
@@ -278,10 +272,10 @@ impl Apply for L2MintSharesTxTarget {
                 tx_state.apply_pool_share_delta_flag,
             );
         }
-        // Set pool shares - is operator
+        // Set pool assets - is operator
         {
             let is_success_and_operator = builder.and(self.success, self.is_operator);
-            let new_operator_shares_for_operator = builder.add(
+            let new_operator_assets_for_operator = builder.add(
                 tx_state.accounts[SUB_ACCOUNT_ID]
                     .public_pool_info
                     .operator_shares,
@@ -291,7 +285,7 @@ impl Apply for L2MintSharesTxTarget {
                 .public_pool_info
                 .operator_shares = builder.select(
                 is_success_and_operator,
-                new_operator_shares_for_operator,
+                new_operator_assets_for_operator,
                 tx_state.accounts[SUB_ACCOUNT_ID]
                     .public_pool_info
                     .operator_shares,
@@ -302,25 +296,25 @@ impl Apply for L2MintSharesTxTarget {
     }
 }
 
-pub trait L2MintSharesTxTargetWitness<F: PrimeField64> {
-    fn set_l2_mint_shares_tx_target(
+pub trait L2StakeAssetsTxTargetWitness<F: PrimeField64> {
+    fn set_l2_stake_assets_tx_target(
         &mut self,
-        a: &L2MintSharesTxTarget,
-        b: &L2MintSharesTx,
+        a: &L2StakeAssetsTxTarget,
+        b: &L2StakeAssetsTx,
     ) -> Result<()>;
 }
 
-impl<T: Witness<F>, F: PrimeField64> L2MintSharesTxTargetWitness<F> for T {
-    fn set_l2_mint_shares_tx_target(
+impl<T: Witness<F>, F: PrimeField64> L2StakeAssetsTxTargetWitness<F> for T {
+    fn set_l2_stake_assets_tx_target(
         &mut self,
-        a: &L2MintSharesTxTarget,
-        b: &L2MintSharesTx,
+        a: &L2StakeAssetsTxTarget,
+        b: &L2StakeAssetsTx,
     ) -> Result<()> {
         self.set_target(a.account_index, F::from_canonical_i64(b.account_index))?;
         self.set_target(a.api_key_index, F::from_canonical_u8(b.api_key_index))?;
         self.set_target(
-            a.public_pool_index,
-            F::from_canonical_i64(b.public_pool_index),
+            a.staking_pool_index,
+            F::from_canonical_i64(b.staking_pool_index),
         )?;
         self.set_target(a.share_amount, F::from_canonical_i64(b.share_amount))?;
         Ok(())

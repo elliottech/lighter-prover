@@ -18,8 +18,8 @@ use crate::eddsa::gadgets::base_field::{
 use crate::tx_interface::{Apply, PriorityOperationsPubData, Verify};
 use crate::types::config::Builder;
 use crate::types::constants::{
-    MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX, NIL_API_KEY_INDEX, OWNER_ACCOUNT_ID,
-    PRIORITY_PUB_DATA_TYPE_L1_CHANGE_PUB_KEY,
+    LIGHTER_STAKING_POOL_ACCOUNT_TYPE, MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX,
+    NIL_API_KEY_INDEX, OWNER_ACCOUNT_ID, PRIORITY_PUB_DATA_TYPE_L1_CHANGE_PUB_KEY,
 };
 use crate::types::target_pub_data_helper::*;
 use crate::types::tx_state::TxState;
@@ -100,6 +100,12 @@ impl Verify for L1ChangePubKeyTxTarget {
             tx_state.accounts[OWNER_ACCOUNT_ID].master_account_index,
         );
         self.success = builder.and(self.success, is_master_index_equal);
+
+        let is_staking_pool = builder.is_equal_constant(
+            tx_state.accounts[OWNER_ACCOUNT_ID].account_type,
+            LIGHTER_STAKING_POOL_ACCOUNT_TYPE as u64,
+        );
+        self.success = builder.and_not(self.success, is_staking_pool);
     }
 }
 

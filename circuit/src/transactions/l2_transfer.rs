@@ -182,6 +182,8 @@ impl Verify for L2TransferTxTarget {
         let is_asset_empty = tx_state.assets[TX_ASSET_ID].is_empty(builder);
         builder.conditional_assert_false(is_enabled, is_asset_empty);
 
+        let lit_asset_index = builder.constant_u64(LIT_ASSET_INDEX);
+        let is_lit_asset = builder.is_equal(self.asset_index, lit_asset_index);
         // Fee asset either be USDC or empty depending on the main asset being USDC or not
         let usdc_asset_index = builder.constant_u64(USDC_ASSET_INDEX);
         let is_usdc_asset = builder.is_equal(self.asset_index, usdc_asset_index);
@@ -211,14 +213,33 @@ impl Verify for L2TransferTxTarget {
         let is_invalid_self_transfer = builder.and(is_same_account, is_same_route_type);
         builder.conditional_assert_false(is_enabled, is_invalid_self_transfer);
 
+        // Treasury account cannot transfer to non-treasury accounts
+        let is_sender_treasury_account = builder.is_equal_constant(
+            tx_state.accounts[SENDER_ACCOUNT_ID].master_account_index,
+            TREASURY_ACCOUNT_INDEX as u64,
+        );
+        let is_sender_and_receiver_same_master_account = builder.is_equal(
+            tx_state.accounts[SENDER_ACCOUNT_ID].master_account_index,
+            tx_state.accounts[RECEIVER_ACCOUNT_ID].master_account_index,
+        );
+        let is_sender_treasury_account_and_enabled =
+            builder.and(is_enabled, is_sender_treasury_account);
+        builder.conditional_assert_true(
+            is_sender_treasury_account_and_enabled,
+            is_sender_and_receiver_same_master_account,
+        );
+
         // For transfers between spot and perps, asset must be margin-enabled.
         let is_asset_margin_enabled = builder.is_equal_constant(
             tx_state.assets[TX_ASSET_ID].margin_mode,
             ASSET_MARGIN_MODE_ENABLED,
         );
-        let route_type_perps = builder.constant_usize(ROUTE_TYPE_PERPS);
+        let route_type_perps = builder.constant_u64(ROUTE_TYPE_PERPS);
+        let route_type_spot = builder.constant_u64(ROUTE_TYPE_SPOT);
         let is_from_perps = builder.is_equal(self.from_route_type, route_type_perps);
+        let is_from_spot = builder.is_equal(self.from_route_type, route_type_spot);
         let is_to_perps = builder.is_equal(self.to_route_type, route_type_perps);
+        let is_to_spot = builder.is_equal(self.to_route_type, route_type_spot);
         let is_perps = builder.or(is_from_perps, is_to_perps);
         let is_invalid_route_type = builder.and_not(is_perps, is_asset_margin_enabled);
         builder.conditional_assert_false(is_enabled, is_invalid_route_type);
@@ -230,7 +251,7 @@ impl Verify for L2TransferTxTarget {
         let is_receiver_new_account = tx_state.is_new_account[RECEIVER_ACCOUNT_ID];
         builder.conditional_assert_false(is_enabled, is_receiver_new_account);
 
-        // Verify receiver pool accounts
+        // Only allow usdc perps transfers to pools, and lit spot transfers to staking pools
         {
             let is_receiver_public_pool = builder.is_equal_constant(
                 tx_state.accounts[RECEIVER_ACCOUNT_ID].account_type,
@@ -255,6 +276,16 @@ impl Verify for L2TransferTxTarget {
             let is_invalid_pool_transfer =
                 builder.and_not(is_receiver_pool_account, is_valid_receiver_pool);
             builder.conditional_assert_false(is_enabled, is_invalid_pool_transfer);
+
+            let is_receiver_staking_pool = builder.is_equal_constant(
+                tx_state.accounts[RECEIVER_ACCOUNT_ID].account_type,
+                LIGHTER_STAKING_POOL_ACCOUNT_TYPE as u64,
+            );
+            let is_valid_receiver_staking_pool =
+                builder.multi_and(&[is_receiver_active_pool, is_to_spot, is_lit_asset]);
+            let is_invalid_staking_pool_transfer =
+                builder.and_not(is_receiver_staking_pool, is_valid_receiver_staking_pool);
+            builder.conditional_assert_false(is_enabled, is_invalid_staking_pool_transfer);
         }
 
         // Verify sender pool accounts
@@ -269,6 +300,10 @@ impl Verify for L2TransferTxTarget {
             );
             let is_sender_pool_account =
                 builder.or(is_sender_public_pool, is_sender_insurance_fund);
+            let is_sender_staking_pool = builder.is_equal_constant(
+                tx_state.accounts[SENDER_ACCOUNT_ID].account_type,
+                LIGHTER_STAKING_POOL_ACCOUNT_TYPE as u64,
+            );
 
             // Pool can transfer outside only when it's frozen with 0 shares only in Perps USDC
             let is_frozen_sender = builder.is_equal_constant(
@@ -289,6 +324,17 @@ impl Verify for L2TransferTxTarget {
             let is_invalid_pool_transfer =
                 builder.and_not(is_sender_pool_account, is_valid_sender_pool);
             builder.conditional_assert_false(is_enabled, is_invalid_pool_transfer);
+
+            // Staking pool can transfer outside only when it's frozen with 0 shares only in Lit Spot
+            let is_valid_sender_staking_pool = builder.multi_and(&[
+                is_frozen_sender,
+                zero_shares_pool,
+                is_from_spot,
+                is_lit_asset,
+            ]);
+            let is_invalid_staking_pool_transfer =
+                builder.and_not(is_sender_staking_pool, is_valid_sender_staking_pool);
+            builder.conditional_assert_false(is_enabled, is_invalid_staking_pool_transfer);
         }
 
         // Calculate helper fields

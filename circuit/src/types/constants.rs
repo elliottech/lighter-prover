@@ -24,7 +24,7 @@ pub const SPOT_MARKET_INDEX_BITS: usize = 12;
 pub const MARKET_TYPE_PERPS: u64 = 0;
 pub const MARKET_TYPE_SPOT: u64 = 1;
 
-pub const ROUTE_TYPE_PERPS: usize = 0;
+pub const ROUTE_TYPE_PERPS: u64 = 0;
 pub const ROUTE_TYPE_SPOT: u64 = 1;
 
 pub const MARKET_INDEX_BITS: usize = 12;
@@ -139,6 +139,10 @@ pub const TX_TYPE_L2_BURN_SHARES: u8 = 19;
 pub const TX_TYPE_L2_UPDATE_LEVERAGE: u8 = 20;
 pub const TX_TYPE_L2_CREATE_GROUPED_ORDERS: u8 = 28;
 pub const TX_TYPE_L2_UPDATE_MARGIN: u8 = 29;
+pub const TX_TYPE_L2_CREATE_STAKING_POOL: u8 = 33;
+// pub const TX_TYPE_L2_UPDATE_STAKING_POOL: u8 = 34;
+pub const TX_TYPE_L2_STAKE_ASSETS: u8 = 35;
+pub const TX_TYPE_L2_UNSTAKE_ASSETS: u8 = 36;
 
 // Internal
 pub const TX_TYPE_INTERNAL_CLAIM_ORDER: u8 = 21;
@@ -165,6 +169,7 @@ pub const PRIORITY_PUB_DATA_TYPE_L1_UPDATE_ASSET: u8 = 50;
 pub const ON_CHAIN_PUB_DATA_TYPE_WITHDRAW: u8 = 2;
 
 pub const USDC_TO_COLLATERAL_MULTIPLIER: u32 = 1_000_000;
+pub const LIT_EXTENSION_MULTIPLIER: u32 = 1_000_000;
 
 pub const MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX: usize = 100;
 pub const PRIORITY_OPERATIONS_PUB_DATA_BITS_PER_TX: usize =
@@ -177,6 +182,7 @@ pub const ON_CHAIN_OPERATIONS_PUB_DATA_BITS_SIZE: usize =
 pub const KECCAK_HASH_OUT_BIT_SIZE: usize = 256;
 pub const KECCAK_HASH_OUT_BYTE_SIZE: usize = KECCAK_HASH_OUT_BIT_SIZE / 8;
 
+pub const ONE_LIT: u64 = 100_000_000;
 pub const ONE_USDC: u64 = 1_000_000;
 pub const ONE_USDC_COLLATERAL: u64 = ONE_USDC * USDC_TO_COLLATERAL_MULTIPLIER as u64; // 1 USDC in collateral units ~ 40 bits
 pub const IMPACT_USDC_AMOUNT: u64 = 500 * ONE_USDC; // 500 USDC
@@ -234,25 +240,35 @@ pub const MASTER_ACCOUNT_TYPE: u8 = 0;
 pub const SUB_ACCOUNT_TYPE: u8 = 1;
 pub const PUBLIC_POOL_ACCOUNT_TYPE: u8 = 2;
 pub const INSURANCE_FUND_ACCOUNT_TYPE: u8 = 3; // Insurance Fund Public Pool
+pub const LIGHTER_STAKING_POOL_ACCOUNT_TYPE: u8 = 4; // Lighter Staking Pool
 
 // Public pool
 pub const INITIAL_POOL_SHARE_VALUE: u64 = 1_000; // 0.001 USDC
 pub const MIN_INITIAL_TOTAL_SHARES: u64 = 1_000 * (ONE_USDC / INITIAL_POOL_SHARE_VALUE);
 pub const MAX_INITIAL_TOTAL_SHARES: u64 = 1_000_000_000 * (ONE_USDC / INITIAL_POOL_SHARE_VALUE);
+pub const MIN_INITIAL_TOTAL_STAKING_SHARES: u64 = 100_000 * (ONE_LIT / INITIAL_POOL_SHARE_VALUE);
+pub const MAX_INITIAL_TOTAL_STAKING_SHARES: u64 =
+    1_000_000_000 * (ONE_LIT / INITIAL_POOL_SHARE_VALUE);
+pub const MIN_STAKING_SHARES_TO_MINT_OR_BURN: u64 = 1;
+pub const MAX_STAKING_SHARES_TO_MINT_OR_BURN: u64 =
+    (1 << MAX_STAKING_SHARES_TO_MINT_OR_BURN_BITS) - 1;
+pub const MAX_STAKING_SHARES_TO_MINT_OR_BURN_BITS: usize = 60;
 pub const ACTIVE_PUBLIC_POOL: u8 = 0;
 pub const FROZEN_PUBLIC_POOL: u8 = 1;
 pub const MAX_POOL_SHARES: u64 = (1 << 60) - 1;
 pub const MAX_POOL_SHARES_BITS: usize = 60;
 pub const MAX_POOL_SHARES_TO_MINT_OR_BURN_USDC: u64 = (1 << 60) - 1;
 pub const MAX_POOL_SHARES_TO_MINT_OR_BURN_USDC_BITS: usize = 60;
-pub const MAX_POOL_ENTRY_USDC: u64 = (1 << 56) - 1; // 2^56 - 1 max USDC to invest in a poo
-pub const MAX_POOL_ENTRY_USDC_BITS: usize = 56;
+pub const MAX_POOL_SHARES_TO_MINT_OR_BURN_ASSET_BITS: usize = 60;
+pub const MAX_POOL_PRINCIPAL_AMOUNT: u64 = (1 << 56) - 1; // 2^56 - 1 max USDC to invest in a poo
+pub const MAX_POOL_PRINCIPAL_AMOUNT_BITS: usize = 56;
 pub const MIN_POOL_SHARES_TO_MINT: u64 = 1;
 pub const MAX_POOL_SHARES_TO_MINT: u64 = MAX_POOL_SHARES;
 pub const MIN_POOL_SHARES_TO_BURN: u64 = 1;
 pub const MAX_POOL_SHARES_TO_BURN: u64 = MAX_POOL_SHARES;
 
 pub const INITIAL_TOTAL_SHARES_BITS: usize = 40;
+pub const INITIAL_TOTAL_STAKING_SHARES_BITS: usize = 48;
 
 // API key index
 pub const MIN_API_KEY_INDEX: u8 = 0;
@@ -277,6 +293,7 @@ pub const ASSET_LIST_SIZE_BITS: usize = 6;
 pub const ASSET_LIST_SIZE: usize = 1 << ASSET_LIST_SIZE_BITS; // first and last slots unused
 
 pub const NATIVE_ASSET_INDEX: u64 = 1;
+pub const LIT_ASSET_INDEX: u64 = 2;
 pub const USDC_ASSET_INDEX: u64 = 3;
 pub const MIN_ASSET_INDEX: u64 = 1;
 pub const MAX_ASSET_INDEX: u64 = 62;

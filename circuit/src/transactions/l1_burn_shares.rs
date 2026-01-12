@@ -124,6 +124,12 @@ impl Verify for L1BurnSharesTxTarget {
             builder.or(is_public_pool_account_type, is_insurance_fund_account_type);
         self.success = builder.and(self.success, is_valid_account_type);
 
+        let is_staking_pool = builder.is_equal_constant(
+            tx_state.accounts[OWNER_ACCOUNT_ID].account_type,
+            LIGHTER_STAKING_POOL_ACCOUNT_TYPE as u64,
+        );
+        self.success = builder.and_not(self.success, is_staking_pool);
+
         let is_pool_in_liquidation = tx_state.risk_infos[SUB_ACCOUNT_ID]
             .cross_risk_parameters
             .is_in_liquidation(builder);
@@ -134,7 +140,7 @@ impl Verify for L1BurnSharesTxTarget {
             tx_state.accounts[SUB_ACCOUNT_ID].master_account_index,
         );
 
-        self.old_entry_quote = tx_state.public_pool_share.entry_usdc;
+        self.old_entry_quote = tx_state.public_pool_share.principal_amount;
 
         self.account_shares = builder.select(
             self.is_operator,
@@ -390,12 +396,14 @@ impl Apply for L1BurnSharesTxTarget {
 
             let new_total_shares =
                 builder.sub(tx_state.public_pool_share.share_amount, total_burned_shares);
-            let new_entry_usdc =
-                builder.sub(tx_state.public_pool_share.entry_usdc, entry_quote_delta);
-            tx_state.public_pool_share.entry_usdc = builder.select(
+            let new_entry_usdc = builder.sub(
+                tx_state.public_pool_share.principal_amount,
+                entry_quote_delta,
+            );
+            tx_state.public_pool_share.principal_amount = builder.select(
                 nop_success,
                 new_entry_usdc,
-                tx_state.public_pool_share.entry_usdc,
+                tx_state.public_pool_share.principal_amount,
             );
             tx_state.public_pool_share.share_amount = builder.select(
                 nop_success,

@@ -165,7 +165,7 @@ impl Verify for L2WithdrawTxTarget {
             BIG_U96_LIMBS,
         );
 
-        let is_route_perps = builder.is_equal_constant(self.route_type, ROUTE_TYPE_PERPS as u64);
+        let is_route_perps = builder.is_equal_constant(self.route_type, ROUTE_TYPE_PERPS);
         // Balance checks: Route Type Spot
         {
             let flag = builder.and_not(is_enabled, is_route_perps);
@@ -198,7 +198,7 @@ impl Verify for L2WithdrawTxTarget {
 
 impl Apply for L2WithdrawTxTarget {
     fn apply(&mut self, builder: &mut Builder, state: &mut TxState) -> BoolTarget {
-        let is_route_perps = builder.is_equal_constant(self.route_type, ROUTE_TYPE_PERPS as u64);
+        let is_route_perps = builder.is_equal_constant(self.route_type, ROUTE_TYPE_PERPS);
         // Perps
         {
             let flag = builder.and(self.success, is_route_perps);

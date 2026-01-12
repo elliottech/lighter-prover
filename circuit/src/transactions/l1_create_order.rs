@@ -187,6 +187,12 @@ impl Verify for L1CreateOrderTxTarget {
         );
         self.success = builder.and(self.success, is_master_account_correct);
 
+        let is_staking_pool = builder.is_equal_constant(
+            tx_state.accounts[OWNER_ACCOUNT_ID].account_type,
+            LIGHTER_STAKING_POOL_ACCOUNT_TYPE as u64,
+        );
+        self.success = builder.and_not(self.success, is_staking_pool);
+
         // Active market
         let active_market_status = builder.constant_from_u8(MARKET_STATUS_ACTIVE);
         let is_order_book_active = builder.is_equal(tx_state.market.status, active_market_status);

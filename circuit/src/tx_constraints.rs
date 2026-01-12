@@ -95,12 +95,19 @@ use crate::transactions::l2_create_order::{L2CreateOrderTxTarget, L2CreateOrderT
 use crate::transactions::l2_create_public_pool::{
     L2CreatePublicPoolTxTarget, L2CreatePublicPoolTxTargetWitness,
 };
+use crate::transactions::l2_create_staking_pool::{
+    L2CreateStakingPoolTxTarget, L2CreateStakingPoolTxTargetWitness,
+};
 use crate::transactions::l2_create_sub_account::{
     L2CreateSubAccountTxTarget, L2CreateSubAccountTxTargetWitness,
 };
 use crate::transactions::l2_mint_shares::{L2MintSharesTxTarget, L2MintSharesTxTargetWitness};
 use crate::transactions::l2_modify_order::{L2ModifyOrderTxTarget, L2ModifyOrderTxTargetWitness};
+use crate::transactions::l2_stake_assets::{L2StakeAssetsTxTarget, L2StakeAssetsTxTargetWitness};
 use crate::transactions::l2_transfer::{L2TransferTxTarget, L2TransferTxTargetWitness};
+use crate::transactions::l2_unstake_assets::{
+    L2UnstakeAssetsTxTarget, L2UnstakeAssetsTxTargetWitness,
+};
 use crate::transactions::l2_update_leverage::{
     L2UpdateLeverageTxTarget, L2UpdateLeverageTxTargetWitness,
 };
@@ -173,6 +180,9 @@ pub struct TxTarget {
     pub l2_update_leverage_tx_target: TransactionTarget<L2UpdateLeverageTxTarget>,
     pub l2_create_grouped_orders_tx_target: TransactionTarget<L2CreateGroupedOrdersTxTarget>,
     pub l2_update_margin_tx_target: TransactionTarget<L2UpdateMarginTxTarget>,
+    pub l2_create_staking_pool_tx_target: TransactionTarget<L2CreateStakingPoolTxTarget>,
+    pub l2_stake_assets_tx_target: TransactionTarget<L2StakeAssetsTxTarget>,
+    pub l2_unstake_assets_tx_target: TransactionTarget<L2UnstakeAssetsTxTarget>,
 
     /*************************/
     /* Internal Transactions */
@@ -304,6 +314,13 @@ impl TxTarget {
                 L2CreateGroupedOrdersTxTarget::new(builder),
             ),
             l2_update_margin_tx_target: TransactionTarget::new(L2UpdateMarginTxTarget::new(
+                builder,
+            )),
+            l2_create_staking_pool_tx_target: TransactionTarget::new(
+                L2CreateStakingPoolTxTarget::new(builder),
+            ),
+            l2_stake_assets_tx_target: TransactionTarget::new(L2StakeAssetsTxTarget::new(builder)),
+            l2_unstake_assets_tx_target: TransactionTarget::new(L2UnstakeAssetsTxTarget::new(
                 builder,
             )),
 
@@ -872,8 +889,8 @@ impl TxTarget {
         );
 
         let entry_usdc_delta = builder.sub(
-            tx_state.public_pool_share.entry_usdc,
-            public_pool_share_before.entry_usdc,
+            tx_state.public_pool_share.principal_amount,
+            public_pool_share_before.principal_amount,
         );
         tx_state.accounts[OWNER_ACCOUNT_ID].apply_pool_share_delta(
             builder,
@@ -1416,10 +1433,14 @@ impl TxTarget {
     }
 
     fn verify_account_orders_merkle_proof(&self, builder: &mut Builder, tx_state: &mut TxState) {
-        let order_belongs_to_maker_account = builder.is_equal(
+        let is_account_order_index_nil =
+            builder.is_equal_constant(tx_state.account_order.index_0, NIL_ORDER_INDEX as u64);
+        let maker_index_eq_owner_index = builder.is_equal(
             self.accounts_before[MAKER_ACCOUNT_ID].account_index,
             tx_state.account_order.owner_account_index,
         );
+        let order_belongs_to_maker_account =
+            builder.and_not(maker_index_eq_owner_index, is_account_order_index_nil);
 
         // Verify that index_0 is either 0 or a valid order index
         let is_index_0_is_zero = builder.is_zero(self.account_order_before.index_0);
@@ -1763,6 +1784,36 @@ impl TxTarget {
             selected_hash,
         );
 
+        let l2_create_staking_pool_tx_hash = self.l2_create_staking_pool_tx_target.hash(
+            builder,
+            self.nonce,
+            self.expired_at,
+            chain_id,
+        );
+        selected_hash = builder.select_quintic_ext(
+            tx_type.is_l2_create_staking_pool,
+            l2_create_staking_pool_tx_hash,
+            selected_hash,
+        );
+
+        let l2_stake_assets_tx_hash =
+            self.l2_stake_assets_tx_target
+                .hash(builder, self.nonce, self.expired_at, chain_id);
+        selected_hash = builder.select_quintic_ext(
+            tx_type.is_l2_stake_assets,
+            l2_stake_assets_tx_hash,
+            selected_hash,
+        );
+
+        let l2_unstake_assets_tx_hash =
+            self.l2_unstake_assets_tx_target
+                .hash(builder, self.nonce, self.expired_at, chain_id);
+        selected_hash = builder.select_quintic_ext(
+            tx_type.is_l2_unstake_assets,
+            l2_unstake_assets_tx_hash,
+            selected_hash,
+        );
+
         selected_hash
     }
 
@@ -1860,6 +1911,12 @@ impl TxTarget {
         self.l2_create_grouped_orders_tx_target
             .verify(builder, tx_type, tx_state);
         self.l2_update_margin_tx_target
+            .verify(builder, tx_type, tx_state);
+        self.l2_create_staking_pool_tx_target
+            .verify(builder, tx_type, tx_state);
+        self.l2_stake_assets_tx_target
+            .verify(builder, tx_type, tx_state);
+        self.l2_unstake_assets_tx_target
             .verify(builder, tx_type, tx_state);
 
         /*************************/
@@ -2033,6 +2090,10 @@ impl TxTarget {
         self.l2_create_grouped_orders_tx_target
             .apply(builder, tx_state);
         self.l2_update_margin_tx_target.apply(builder, tx_state);
+        self.l2_create_staking_pool_tx_target
+            .apply(builder, tx_state);
+        self.l2_stake_assets_tx_target.apply(builder, tx_state);
+        self.l2_unstake_assets_tx_target.apply(builder, tx_state);
 
         /*************************/
         /* Internal Transactions */
@@ -2333,6 +2394,18 @@ impl<T: Witness<F> + PartialWitnessCurve<F>, F: PrimeField64 + Extendable<5> + R
         self.set_l2_update_margin_tx_target(
             &a.l2_update_margin_tx_target.inner,
             &b.l2_update_margin_tx,
+        )?;
+        self.set_l2_create_staking_pool_tx_target(
+            &a.l2_create_staking_pool_tx_target.inner,
+            &b.l2_create_staking_pool_tx,
+        )?;
+        self.set_l2_stake_assets_tx_target(
+            &a.l2_stake_assets_tx_target.inner,
+            &b.l2_stake_assets_tx,
+        )?;
+        self.set_l2_unstake_assets_tx_target(
+            &a.l2_unstake_assets_tx_target.inner,
+            &b.l2_unstake_assets_tx,
         )?;
 
         /*************************/

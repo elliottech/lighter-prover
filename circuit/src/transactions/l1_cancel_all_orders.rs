@@ -68,6 +68,12 @@ impl Verify for L1CancelAllOrdersTxTarget {
             tx_state.accounts[OWNER_ACCOUNT_ID].master_account_index,
         );
         self.success = builder.and(self.success, is_master_account_correct);
+
+        let is_staking_pool = builder.is_equal_constant(
+            tx_state.accounts[OWNER_ACCOUNT_ID].account_type,
+            LIGHTER_STAKING_POOL_ACCOUNT_TYPE as u64,
+        );
+        self.success = builder.and_not(self.success, is_staking_pool);
     }
 }
 

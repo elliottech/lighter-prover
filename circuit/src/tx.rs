@@ -35,10 +35,13 @@ use crate::transactions::l2_change_pubkey::L2ChangePubKeyTx;
 use crate::transactions::l2_create_grouped_orders::L2CreateGroupedOrdersTx;
 use crate::transactions::l2_create_order::L2CreateOrderTx;
 use crate::transactions::l2_create_public_pool::L2CreatePublicPoolTx;
+use crate::transactions::l2_create_staking_pool::L2CreateStakingPoolTx;
 use crate::transactions::l2_create_sub_account::L2CreateSubAccountTx;
 use crate::transactions::l2_mint_shares::L2MintSharesTx;
 use crate::transactions::l2_modify_order::L2ModifyOrderTx;
+use crate::transactions::l2_stake_assets::L2StakeAssetsTx;
 use crate::transactions::l2_transfer::L2TransferTx;
+use crate::transactions::l2_unstake_assets::L2UnstakeAssetsTx;
 use crate::transactions::l2_update_leverage::L2UpdateLeverageTx;
 use crate::transactions::l2_update_margin::L2UpdateMarginTx;
 use crate::transactions::l2_update_public_pool::L2UpdatePublicPoolTx;
@@ -56,7 +59,7 @@ use crate::types::order_book_node::OrderBookNode;
 
 #[serde_as]
 #[derive(Clone, Debug, Deserialize)]
-#[serde(bound = "")]
+#[serde(bound = "")] 
 pub struct Tx<F>
 where
     F: Field + Extendable<5> + RichField,
@@ -163,6 +166,18 @@ where
     #[serde(rename = "2um")]
     #[serde(default)]
     pub l2_update_margin_tx: L2UpdateMarginTx,
+
+    #[serde(rename = "2csp")]
+    #[serde(default)]
+    pub l2_create_staking_pool_tx: L2CreateStakingPoolTx,
+
+    #[serde(rename = "2sa")]
+    #[serde(default)]
+    pub l2_stake_assets_tx: L2StakeAssetsTx,
+
+    #[serde(rename = "2ua")]
+    #[serde(default)]
+    pub l2_unstake_assets_tx: L2UnstakeAssetsTx,
 
     #[serde(rename = "Ic")]
     #[serde(default)]

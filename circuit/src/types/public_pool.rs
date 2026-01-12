@@ -24,7 +24,7 @@ pub struct PublicPoolShare {
     pub share_amount: i64,
 
     #[serde(rename = "eu")]
-    pub entry_usdc: i64,
+    pub principal_amount: i64,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -50,7 +50,7 @@ pub struct PublicPoolInfo {
 pub struct PublicPoolShareTarget {
     pub public_pool_index: Target,
     pub share_amount: Target,
-    pub entry_usdc: Target,
+    pub principal_amount: Target,
 }
 
 const PUBLIC_POOL_SHARE_SIZE: usize = 3;
@@ -59,14 +59,14 @@ impl PublicPoolShareTarget {
         PublicPoolShareTarget {
             public_pool_index: builder.add_virtual_target(),
             share_amount: builder.add_virtual_target(),
-            entry_usdc: builder.add_virtual_target(),
+            principal_amount: builder.add_virtual_target(),
         }
     }
     pub fn new_public(builder: &mut Builder) -> Self {
         PublicPoolShareTarget {
             public_pool_index: builder.add_virtual_public_input(),
             share_amount: builder.add_virtual_public_input(),
-            entry_usdc: builder.add_virtual_public_input(),
+            principal_amount: builder.add_virtual_public_input(),
         }
     }
     pub fn from_public_inputs(pis: &[Target]) -> Self {
@@ -74,7 +74,7 @@ impl PublicPoolShareTarget {
         PublicPoolShareTarget {
             public_pool_index: pis[0],
             share_amount: pis[1],
-            entry_usdc: pis[2],
+            principal_amount: pis[2],
         }
     }
 
@@ -84,21 +84,21 @@ impl PublicPoolShareTarget {
             &format!("{}: public_pool_index", tag),
         );
         builder.println(self.share_amount, &format!("{}: share_amount", tag));
-        builder.println(self.entry_usdc, &format!("{}: entry_usdc", tag));
+        builder.println(self.principal_amount, &format!("{}: entry_usdc", tag));
     }
 
     pub fn empty(builder: &mut Builder, public_pool_index: Target) -> Self {
         PublicPoolShareTarget {
             public_pool_index,
             share_amount: builder.zero(),
-            entry_usdc: builder.zero(),
+            principal_amount: builder.zero(),
         }
     }
 
     pub fn is_empty_without_metadata(&self, builder: &mut Builder) -> BoolTarget {
         let assertions = [
             builder.is_zero(self.share_amount),
-            builder.is_zero(self.entry_usdc),
+            builder.is_zero(self.principal_amount),
         ];
 
         builder.multi_and(&assertions)
@@ -187,7 +187,7 @@ pub fn select_public_pool_share_target(
     PublicPoolShareTarget {
         public_pool_index: builder.select(flag, a.public_pool_index, b.public_pool_index),
         share_amount: builder.select(flag, a.share_amount, b.share_amount),
-        entry_usdc: builder.select(flag, a.entry_usdc, b.entry_usdc),
+        principal_amount: builder.select(flag, a.principal_amount, b.principal_amount),
     }
 }
 
@@ -210,7 +210,10 @@ impl<T: Witness<F>, F: PrimeField64 + Extendable<5> + RichField> PublicPoolShare
             F::from_canonical_i64(b.public_pool_index),
         )?;
         self.set_target(a.share_amount, F::from_canonical_i64(b.share_amount))?;
-        self.set_target(a.entry_usdc, F::from_canonical_i64(b.entry_usdc))?;
+        self.set_target(
+            a.principal_amount,
+            F::from_canonical_i64(b.principal_amount),
+        )?;
 
         Ok(())
     }

@@ -23,7 +23,7 @@ ON_CHAIN_OPERATIONS_LIMIT=1
 PRIORITY_OPERATIONS_LIMIT=1
 CHAIN_ID=${CHAIN_ID:-304} # Default to mainnet if not set
 SRS_FILE=${SRS_FILE:-"./srs_file"} # Path to the SRS file. Source: https://aztec-ignition.s3.amazonaws.com/
-DELTA_ACCOUNT_COUNT=245
+DELTA_ACCOUNT_COUNT=225
 
 echo "Using:"
 echo "TX_PER_PROOF: $TX_PER_PROOF"

@@ -104,7 +104,7 @@ impl AccountTarget {
                 &self
                     .public_pool_shares
                     .iter()
-                    .map(|pps| pps.entry_usdc)
+                    .map(|pps| pps.principal_amount)
                     .collect::<Vec<_>>(),
             );
             elements.extend_from_slice(&[
