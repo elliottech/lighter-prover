@@ -152,7 +152,7 @@ pub fn verify_schnorr_signature_conditional_circuit(
     sig_target: &SchnorrSigTarget,
 ) {
     // Decode Fp5 into an EC point (ECgFp5PointTarget consisting of 4 Fp5 elements)
-    let pk_target = builder.ecgfp5_point_decode(*pk_target);
+    let pk_target = builder.conditional_ecgfp5_point_decode(flag, *pk_target);
     let curve_generator = builder.ecgfp5_point_constant(ECgFp5Point::GENERATOR.to_weierstrass());
 
     // r_v = s*G + e*pk
