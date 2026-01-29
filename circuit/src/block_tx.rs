@@ -17,6 +17,7 @@ use crate::types::constants::{
 };
 use crate::types::market_details::{MARKET_DETAIL_SIZE, MarketDetails, MarketDetailsTarget};
 use crate::types::register::{REGISTER_INFO_SIZE, RegisterStack, RegisterStackTarget};
+use crate::types::system_config::{SYSTEM_CONFIG_SIZE, SystemConfig, SystemConfigTarget};
 use crate::types::transfer::{TRANSFER_PUBLIC_INPUTS_LEN, TransferMessage, TransferMessageTarget};
 use crate::uint::u8::U8Target;
 
@@ -26,6 +27,7 @@ where
 {
     pub created_at: i64,
 
+    pub old_system_config: SystemConfig,
     pub register_stack_before: RegisterStack,
     pub all_assets_before: [Asset; ASSET_LIST_SIZE],
     pub all_market_details_before: [MarketDetails; POSITION_LIST_SIZE],
@@ -44,6 +46,7 @@ pub struct BlockTxWitness<F>
 where
     F: Field + Extendable<5> + RichField,
 {
+    pub old_system_config: SystemConfig,
     pub register_stack_before: RegisterStack,
     pub all_assets_before: [Asset; ASSET_LIST_SIZE],
     pub all_market_details_before: [MarketDetails; POSITION_LIST_SIZE],
@@ -53,6 +56,7 @@ where
     pub old_market_tree_root: HashOut<F>,
     pub old_account_delta_tree_root: HashOut<F>,
 
+    pub new_system_config: SystemConfig,
     pub register_stack_after: RegisterStack,
     pub all_assets_after: [Asset; ASSET_LIST_SIZE],
     pub all_market_details_after: [MarketDetails; POSITION_LIST_SIZE],
@@ -85,7 +89,10 @@ where
         let old_market_details_end =
             old_market_details_start + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE;
 
-        let old_register_start = old_market_details_end;
+        let old_system_config_start = old_market_details_end;
+        let old_system_config_end = old_system_config_start + SYSTEM_CONFIG_SIZE;
+
+        let old_register_start = old_system_config_end;
         let old_register_end = old_register_start + REGISTER_INFO_SIZE;
 
         let assets_start = old_register_end + 16;
@@ -110,7 +117,10 @@ where
         let priority_pub_data_end =
             priority_pub_data_start + MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX;
 
-        let register_start = priority_pub_data_end;
+        let system_config_start = priority_pub_data_end;
+        let system_config_end = system_config_start + SYSTEM_CONFIG_SIZE;
+
+        let register_start = system_config_end;
         let register_end = register_start + REGISTER_INFO_SIZE;
 
         Self {
@@ -154,6 +164,9 @@ where
                 )
             }),
 
+            old_system_config: SystemConfig::from_public_inputs(
+                &public_inputs[old_system_config_start..old_system_config_end],
+            ),
             register_stack_before: RegisterStack::from_public_inputs(
                 &public_inputs[old_register_start..old_register_end],
             ),
@@ -215,6 +228,9 @@ where
                 public_inputs[priority_pub_data_start + index].to_canonical_u64() as u8
             }),
 
+            new_system_config: SystemConfig::from_public_inputs(
+                &public_inputs[system_config_start..system_config_end],
+            ),
             register_stack_after: RegisterStack::from_public_inputs(
                 &public_inputs[register_start..register_end],
             ),
@@ -225,6 +241,7 @@ where
 #[derive(Debug)]
 /// In circuit represantion of [`crate::block::BlockTxWitness`]
 pub struct BlockTxWitnessTarget {
+    pub old_system_config: SystemConfigTarget,
     pub register_stack_before: RegisterStackTarget,
     pub all_assets_before: [AssetTarget; ASSET_LIST_SIZE],
     pub all_market_details_before: [MarketDetailsTarget; POSITION_LIST_SIZE],
@@ -234,6 +251,7 @@ pub struct BlockTxWitnessTarget {
     pub old_account_delta_tree_root: HashOutTarget,
     pub old_market_tree_root: HashOutTarget,
 
+    pub new_system_config: SystemConfigTarget,
     pub register_stack_after: RegisterStackTarget,
     pub all_assets_after: [AssetTarget; ASSET_LIST_SIZE],
     pub all_market_details_after: [MarketDetailsTarget; POSITION_LIST_SIZE],
@@ -264,7 +282,10 @@ impl BlockTxWitnessTarget {
         let old_market_details_end =
             old_market_details_start + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE;
 
-        let old_register_start = old_market_details_end;
+        let old_system_config_start = old_market_details_end;
+        let old_system_config_end = old_system_config_start + SYSTEM_CONFIG_SIZE;
+
+        let old_register_start = old_system_config_end;
         let old_register_end = old_register_start + REGISTER_INFO_SIZE;
 
         let assets_start = old_register_end + 16;
@@ -287,7 +308,10 @@ impl BlockTxWitnessTarget {
         let priority_pub_data_end =
             priority_pub_data_start + MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX;
 
-        let register_start = priority_pub_data_end;
+        let system_config_start = priority_pub_data_end;
+        let system_config_end = system_config_start + SYSTEM_CONFIG_SIZE;
+
+        let register_start = system_config_end;
         let register_end = register_start + REGISTER_INFO_SIZE;
 
         assert_eq!(
@@ -318,6 +342,9 @@ impl BlockTxWitnessTarget {
                 )
             }),
 
+            old_system_config: SystemConfigTarget::from_public_inputs(
+                &pis[old_system_config_start..old_system_config_end],
+            ),
             register_stack_before: RegisterStackTarget::from_public_inputs(
                 &pis[old_register_start..old_register_end],
             ),
@@ -372,6 +399,9 @@ impl BlockTxWitnessTarget {
                 .try_into()
                 .unwrap(),
 
+            new_system_config: SystemConfigTarget::from_public_inputs(
+                &pis[system_config_start..system_config_end],
+            ),
             register_stack_after: RegisterStackTarget::from_public_inputs(
                 &pis[register_start..register_end],
             ),

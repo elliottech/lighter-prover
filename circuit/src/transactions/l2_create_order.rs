@@ -510,6 +510,7 @@ impl Verify for L2CreateOrderTxTarget {
             // Make sure user has enough available balance to lock for limit orders
             let (amount_to_lock, ask_asset_index) = get_locked_amount_and_ask_asset_index(
                 builder,
+                flag,
                 &tx_state.market,
                 self.calculated_base_amount,
                 self.price,

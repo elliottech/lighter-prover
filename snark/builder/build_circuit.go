@@ -10,6 +10,7 @@ import (
 	"github.com/consensys/gnark/constraint"
 	"github.com/consensys/gnark/frontend"
 	"github.com/consensys/gnark/frontend/cs/scs"
+	"github.com/elliottech/gnark-plonky2-verifier/fri"
 	gl "github.com/elliottech/gnark-plonky2-verifier/goldilocks"
 	"github.com/elliottech/gnark-plonky2-verifier/types"
 	"github.com/elliottech/gnark-plonky2-verifier/variables"
@@ -29,29 +30,6 @@ func PlaceHolderCommitPhaseMerkleCaps(capHeight uint64, numReductionArityBits in
 	return result
 }
 
-func numPreprocessedPolys(c *types.CommonCircuitData) uint64 {
-	sigmasRange := sigmasRange(c)
-	return sigmasRange[len(sigmasRange)-1]
-}
-
-// Range of the sigma polynomials in the `constants_sigmas_commitment`.
-func sigmasRange(c *types.CommonCircuitData) []uint64 {
-	returnArr := make([]uint64, 0)
-	for i := c.NumConstants; i <= c.NumConstants+c.Config.NumRoutedWires; i++ {
-		returnArr = append(returnArr, i)
-	}
-
-	return returnArr
-}
-
-func numZSPartialProductsPolys(c *types.CommonCircuitData) uint64 {
-	return c.Config.NumChallenges * (1 + c.NumPartialProducts)
-}
-
-func numQuotientPolys(c *types.CommonCircuitData) uint64 {
-	return c.Config.NumChallenges * c.QuotientDegreeFactor
-}
-
 func PlaceHolderQueryRoundProofs(circuitData types.CommonCircuitData) []variables.FriQueryRound {
 	numWires, friConfig, friParams := circuitData.Config.NumWires, circuitData.Config.FriConfig, circuitData.FriParams
 
@@ -67,10 +45,10 @@ func PlaceHolderQueryRoundProofs(circuitData types.CommonCircuitData) []variable
 
 		result[i] = variables.FriQueryRound{
 			InitialTreesProof: variables.NewFriInitialTreeProof([]variables.FriEvalProof{ // len equal to len(Oracles) = 4
-				variables.NewFriEvalProof(make([]gl.Variable, numPreprocessedPolys(&circuitData)), variables.NewFriMerkleProof(friParams.DegreeBits+friConfig.RateBits-friConfig.CapHeight)),
+				variables.NewFriEvalProof(make([]gl.Variable, fri.NumPreprocessedPolys(&circuitData)), variables.NewFriMerkleProof(friParams.DegreeBits+friConfig.RateBits-friConfig.CapHeight)),
 				variables.NewFriEvalProof(make([]gl.Variable, numWires), variables.NewFriMerkleProof(friParams.DegreeBits+friConfig.RateBits-friConfig.CapHeight)),
-				variables.NewFriEvalProof(make([]gl.Variable, numZSPartialProductsPolys(&circuitData)), variables.NewFriMerkleProof(friParams.DegreeBits+friConfig.RateBits-friConfig.CapHeight)),
-				variables.NewFriEvalProof(make([]gl.Variable, numQuotientPolys(&circuitData)), variables.NewFriMerkleProof(friParams.DegreeBits+friConfig.RateBits-friConfig.CapHeight)),
+				variables.NewFriEvalProof(make([]gl.Variable, fri.NumZSPartialProductsPolys(&circuitData)), variables.NewFriMerkleProof(friParams.DegreeBits+friConfig.RateBits-friConfig.CapHeight)),
+				variables.NewFriEvalProof(make([]gl.Variable, fri.NumQuotientPolys(&circuitData)), variables.NewFriMerkleProof(friParams.DegreeBits+friConfig.RateBits-friConfig.CapHeight)),
 			}),
 			Steps: steps,
 		}
@@ -84,7 +62,7 @@ func PlaceHolderProof(circuitData types.CommonCircuitData) (variables.Proof, []g
 		PlonkZsPartialProductsCap: variables.NewFriMerkleCap(circuitData.Config.FriConfig.CapHeight),
 		QuotientPolysCap:          variables.NewFriMerkleCap(circuitData.Config.FriConfig.CapHeight),
 		Openings: variables.OpeningSet{
-			Constants:       make([]gl.QuadraticExtensionVariable, circuitData.NumConstants), 			
+			Constants:       make([]gl.QuadraticExtensionVariable, circuitData.NumConstants),
 			PlonkSigmas:     make([]gl.QuadraticExtensionVariable, circuitData.Config.NumRoutedWires),
 			Wires:           make([]gl.QuadraticExtensionVariable, circuitData.Config.NumWires),
 			PlonkZs:         make([]gl.QuadraticExtensionVariable, circuitData.Config.NumChallenges),
@@ -116,7 +94,7 @@ func BuildCircuitPlaceHolder(commonCircuitDataPath, verifierCircuitDataPath stri
 		CommonCircuitData:       commonCircuitData,
 	}
 
-	builder := scs.NewBuilder
+	builder := scs.NewBuilder[constraint.U64]
 	r1cs, err := frontend.Compile(ecc.BN254.ScalarField(), builder, &circuit)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to compile circuit: %v", err)
@@ -140,7 +118,7 @@ func BuildCircuit(commonCircuitDataPath, verifierCircuitDataPath, proofPath stri
 		CommonCircuitData:       commonCircuitData,
 	}
 
-	builder := scs.NewBuilder
+	builder := scs.NewBuilder[constraint.U64]
 	r1cs, err := frontend.Compile(ecc.BN254.ScalarField(), builder, &circuit)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to compile circuit: %v", err)

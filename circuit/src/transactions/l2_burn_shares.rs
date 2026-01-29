@@ -161,14 +161,33 @@ impl Verify for L2BurnSharesTxTarget {
             tx_state.accounts[SUB_ACCOUNT_ID].master_account_index,
         );
 
-        self.old_principal_amount = tx_state.public_pool_share.principal_amount; // To be used in apply
+        // Enforce min burn period for llp
+        {
+            let is_not_operator = builder.not(self.is_operator);
+            let is_llp = builder.is_equal(
+                self.public_pool_index,
+                tx_state.system_config.liquidity_pool_index,
+            );
+            let earliest_burn_timestamp = builder.add(
+                tx_state.public_pool_shares[OWNER_ACCOUNT_ID].entry_timestamp,
+                tx_state.system_config.liquidity_pool_cooldown_period,
+            );
+            let burn_period_is_not_elapsed =
+                builder.is_lt(tx_state.block_timestamp, earliest_burn_timestamp, 64);
+
+            let should_be_false =
+                builder.multi_and(&[is_not_operator, is_llp, burn_period_is_not_elapsed]);
+            builder.conditional_assert_false(is_enabled, should_be_false);
+        }
+
+        self.old_principal_amount = tx_state.public_pool_shares[OWNER_ACCOUNT_ID].principal_amount; // To be used in apply
 
         self.account_shares = builder.select(
             self.is_operator,
             tx_state.accounts[SUB_ACCOUNT_ID]
                 .public_pool_info
                 .operator_shares,
-            tx_state.public_pool_share.share_amount,
+            tx_state.public_pool_shares[OWNER_ACCOUNT_ID].share_amount,
         );
 
         builder.conditional_assert_lte(is_enabled, self.share_amount, self.account_shares, 64);
@@ -186,6 +205,10 @@ impl Verify for L2BurnSharesTxTarget {
             &tx_state.risk_infos[SUB_ACCOUNT_ID].cross_risk_parameters,
             &tx_state.accounts[SUB_ACCOUNT_ID],
             self.share_amount,
+        );
+        builder.register_range_check(
+            self.shares_to_burn_usdc_value,
+            MAX_POOL_SHARES_TO_MINT_OR_BURN_USDC_BITS,
         );
 
         {
@@ -302,12 +325,12 @@ impl Apply for L2BurnSharesTxTarget {
         tx_state.accounts[OWNER_ACCOUNT_ID].apply_collateral_delta(
             builder,
             self.success,
-            positive_collateral_delta,
+            &positive_collateral_delta,
         );
         tx_state.accounts[SUB_ACCOUNT_ID].apply_collateral_delta(
             builder,
             self.success,
-            negative_collateral_delta,
+            &negative_collateral_delta,
         );
 
         {
@@ -394,24 +417,30 @@ impl Apply for L2BurnSharesTxTarget {
             let principal_amount_delta =
                 builder.biguint_to_target_unsafe(&big_principal_amount_delta);
 
-            let new_share_amount =
-                builder.sub(tx_state.public_pool_share.share_amount, total_burned_shares);
+            let new_share_amount = builder.sub(
+                tx_state.public_pool_shares[OWNER_ACCOUNT_ID].share_amount,
+                total_burned_shares,
+            );
             let new_principal_amount = builder.sub(
-                tx_state.public_pool_share.principal_amount,
+                tx_state.public_pool_shares[OWNER_ACCOUNT_ID].principal_amount,
                 principal_amount_delta,
             );
-            tx_state.public_pool_share.principal_amount = builder.select(
+            tx_state.public_pool_shares[OWNER_ACCOUNT_ID].principal_amount = builder.select(
                 non_operator_success,
                 new_principal_amount,
-                tx_state.public_pool_share.principal_amount,
+                tx_state.public_pool_shares[OWNER_ACCOUNT_ID].principal_amount,
             );
-            tx_state.public_pool_share.share_amount = builder.select(
+            tx_state.public_pool_shares[OWNER_ACCOUNT_ID].share_amount = builder.select(
                 non_operator_success,
                 new_share_amount,
-                tx_state.public_pool_share.share_amount,
+                tx_state.public_pool_shares[OWNER_ACCOUNT_ID].share_amount,
             );
-            tx_state.apply_pool_share_delta_flag =
-                builder.or(tx_state.apply_pool_share_delta_flag, non_operator_success);
+            let one = builder.one();
+            tx_state.apply_pool_share_delta_flag = builder.select(
+                non_operator_success,
+                one,
+                tx_state.apply_pool_share_delta_flag,
+            );
         }
 
         self.success

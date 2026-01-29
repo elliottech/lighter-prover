@@ -15,7 +15,7 @@ use crate::eddsa::gadgets::base_field::QuinticExtensionTarget;
 use crate::eddsa::schnorr::hash_to_quintic_extension_circuit;
 use crate::liquidation::get_shares_asset_value;
 use crate::tx_interface::{Apply, TxHash, Verify};
-use crate::types::config::{BIG_U96_LIMBS, Builder, F};
+use crate::types::config::{BIG_U64_LIMBS, BIG_U96_LIMBS, Builder, F};
 use crate::types::constants::*;
 use crate::types::tx_state::TxState;
 use crate::types::tx_type::TxTypeTargets;
@@ -47,7 +47,7 @@ pub struct L2StakeAssetsTxTarget {
 
     // Helper
     is_operator: BoolTarget,
-    lit_amount: Target,
+    lit_amount: BigUintTarget,
     new_total_shares: Target,
     new_principal_amount: Target,
     balance_to_mint_shares: BigUintTarget,
@@ -66,7 +66,7 @@ impl L2StakeAssetsTxTarget {
 
             // Helper
             is_operator: builder._false(),
-            lit_amount: builder.zero(),
+            lit_amount: builder.zero_biguint(),
             new_total_shares: builder.zero(),
             new_principal_amount: builder.zero(),
             balance_to_mint_shares: builder.zero_biguint(),
@@ -161,21 +161,26 @@ impl Verify for L2StakeAssetsTxTarget {
 
         self.lit_amount = get_shares_asset_value(
             builder,
-            &tx_state.accounts[SUB_ACCOUNT_ID],
+            tx_state.accounts[SUB_ACCOUNT_ID]
+                .public_pool_info
+                .total_shares,
             &tx_state.account_assets[SUB_ACCOUNT_ID][TX_ASSET_ID].balance,
             &tx_state.assets[TX_ASSET_ID].extension_multiplier,
             self.share_amount,
         );
-        builder.register_range_check(self.lit_amount, MAX_POOL_SHARES_TO_MINT_OR_BURN_ASSET_BITS);
+        builder.range_check_biguint(&self.lit_amount, MAX_POOL_SHARES_TO_MINT_OR_BURN_LIT_BITS);
+        (_, self.lit_amount) = builder.try_trim_biguint(&self.lit_amount, BIG_U64_LIMBS);
 
         // Check if the entry asset amount fits in the pool share entry asset limit
-        self.new_principal_amount =
-            builder.add(tx_state.public_pool_share.principal_amount, self.lit_amount);
+        let lit_amount_target = builder.biguint_to_target_safe(&self.lit_amount);
+        self.new_principal_amount = builder.add(
+            tx_state.public_pool_shares[OWNER_ACCOUNT_ID].principal_amount,
+            lit_amount_target,
+        );
         builder.register_range_check(self.new_principal_amount, MAX_POOL_PRINCIPAL_AMOUNT_BITS);
 
-        let big_asset_amount = builder.target_to_biguint(self.lit_amount);
         self.balance_to_mint_shares = builder.mul_biguint_non_carry(
-            &big_asset_amount,
+            &self.lit_amount,
             &tx_state.assets[TX_ASSET_ID].extension_multiplier,
             BIG_U96_LIMBS,
         );
@@ -255,20 +260,24 @@ impl Apply for L2StakeAssetsTxTarget {
         {
             let is_success_and_not_operator = builder.and_not(self.success, self.is_operator);
 
-            let new_share_amount =
-                builder.add(tx_state.public_pool_share.share_amount, self.share_amount);
-            tx_state.public_pool_share.principal_amount = builder.select(
+            let new_share_amount = builder.add(
+                tx_state.public_pool_shares[OWNER_ACCOUNT_ID].share_amount,
+                self.share_amount,
+            );
+            tx_state.public_pool_shares[OWNER_ACCOUNT_ID].principal_amount = builder.select(
                 is_success_and_not_operator,
                 self.new_principal_amount,
-                tx_state.public_pool_share.principal_amount,
+                tx_state.public_pool_shares[OWNER_ACCOUNT_ID].principal_amount,
             );
-            tx_state.public_pool_share.share_amount = builder.select(
+            tx_state.public_pool_shares[OWNER_ACCOUNT_ID].share_amount = builder.select(
                 is_success_and_not_operator,
                 new_share_amount,
-                tx_state.public_pool_share.share_amount,
+                tx_state.public_pool_shares[OWNER_ACCOUNT_ID].share_amount,
             );
-            tx_state.apply_pool_share_delta_flag = builder.or(
+            let one = builder.one();
+            tx_state.apply_pool_share_delta_flag = builder.select(
                 is_success_and_not_operator,
+                one,
                 tx_state.apply_pool_share_delta_flag,
             );
         }

@@ -131,7 +131,7 @@ impl Apply for InternalExitPositionTxTarget {
         tx_state.accounts[OWNER_ACCOUNT_ID].apply_collateral_delta(
             builder,
             self.success,
-            collateral_delta,
+            &collateral_delta,
         );
 
         // Update market details and order book

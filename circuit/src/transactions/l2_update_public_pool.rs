@@ -227,6 +227,27 @@ impl Apply for L2UpdatePublicPoolTxTarget {
             &tx_state.accounts[SUB_ACCOUNT_ID].public_pool_info,
         );
 
+        let is_insurance_fund = builder.is_equal_constant(
+            tx_state.accounts[SUB_ACCOUNT_ID].account_type,
+            INSURANCE_FUND_ACCOUNT_TYPE as u64,
+        );
+        let is_llp = builder.is_equal(
+            tx_state.accounts[SUB_ACCOUNT_ID].account_index,
+            tx_state.system_config.liquidity_pool_index,
+        );
+        let is_frozen = builder.is_equal_constant(
+            tx_state.accounts[SUB_ACCOUNT_ID].public_pool_info.status,
+            FROZEN_PUBLIC_POOL as u64,
+        );
+        let clear_llp_index_flag =
+            builder.multi_and(&[self.success, is_insurance_fund, is_llp, is_frozen]);
+        let nil_account_index = builder.constant_i64(NIL_ACCOUNT_INDEX);
+        tx_state.system_config.liquidity_pool_index = builder.select(
+            clear_llp_index_flag,
+            nil_account_index,
+            tx_state.system_config.liquidity_pool_index,
+        );
+
         self.success
     }
 }

@@ -18,6 +18,7 @@ use crate::transactions::internal_create_order::InternalCreateOrderTx;
 use crate::transactions::internal_deleverage::InternalDeleverageTx;
 use crate::transactions::internal_exit_position::InternalExitPositionTx;
 use crate::transactions::internal_liquidate_position::InternalLiquidatePositionTx;
+use crate::transactions::internal_pending_unlock::InternalPendingUnlockTx;
 use crate::transactions::l1_burn_shares::L1BurnSharesTx;
 use crate::transactions::l1_cancel_all_orders::L1CancelAllOrdersTx;
 use crate::transactions::l1_change_pubkey::L1ChangePubKeyTx;
@@ -25,6 +26,7 @@ use crate::transactions::l1_create_market::L1CreateMarketTx;
 use crate::transactions::l1_create_order::L1CreateOrderTx;
 use crate::transactions::l1_deposit::L1DepositTx;
 use crate::transactions::l1_register_asset::L1RegisterAssetTx;
+use crate::transactions::l1_set_system_config::L1SetSystemConfigTx;
 use crate::transactions::l1_update_asset::L1UpdateAssetTx;
 use crate::transactions::l1_update_market::L1UpdateMarketTx;
 use crate::transactions::l1_withdraw::L1WithdrawTx;
@@ -37,6 +39,7 @@ use crate::transactions::l2_create_order::L2CreateOrderTx;
 use crate::transactions::l2_create_public_pool::L2CreatePublicPoolTx;
 use crate::transactions::l2_create_staking_pool::L2CreateStakingPoolTx;
 use crate::transactions::l2_create_sub_account::L2CreateSubAccountTx;
+use crate::transactions::l2_force_burn_shares::L2ForceBurnSharesTx;
 use crate::transactions::l2_mint_shares::L2MintSharesTx;
 use crate::transactions::l2_modify_order::L2ModifyOrderTx;
 use crate::transactions::l2_stake_assets::L2StakeAssetsTx;
@@ -102,6 +105,10 @@ where
     #[serde(rename = "1ra")]
     #[serde(default)]
     pub l1_register_asset_tx: L1RegisterAssetTx,
+
+    #[serde(rename = "1ssc")]
+    #[serde(default)]
+    pub l1_set_system_config_tx: L1SetSystemConfigTx,
 
     #[serde(rename = "1ua")]
     #[serde(default)]
@@ -179,6 +186,10 @@ where
     #[serde(default)]
     pub l2_unstake_assets_tx: L2UnstakeAssetsTx,
 
+    #[serde(rename = "2fbs")]
+    #[serde(default)]
+    pub l2_force_burn_shares_tx: L2ForceBurnSharesTx,
+
     #[serde(rename = "Ic")]
     #[serde(default)]
     pub internal_claim_order_tx: InternalClaimOrderTx,
@@ -194,6 +205,10 @@ where
     #[serde(rename = "Iex")]
     #[serde(default)]
     pub internal_exit_position_tx: InternalExitPositionTx,
+
+    #[serde(rename = "Ipw")]
+    #[serde(default)]
+    pub internal_pending_unlock_tx: InternalPendingUnlockTx,
 
     #[serde(rename = "Ica")]
     #[serde(default)]

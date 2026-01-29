@@ -252,6 +252,7 @@ impl BlockTxChainCircuit {
             });
 
         // Calculate old validium and state roots
+        let system_config_hash = current_tx.old_system_config.hash(&mut self.builder);
         let register_stack_hash = current_tx.register_stack_before.hash(&mut self.builder);
         let all_assets_hash = all_assets_hash(&mut self.builder, &current_tx.all_assets_before);
         let all_market_details_hash =
@@ -267,6 +268,7 @@ impl BlockTxChainCircuit {
             all_assets_hash,
             all_market_details_hash,
             state_metadata_hash,
+            system_config_hash,
         ]);
 
         let state_root = self.builder.hash_n_to_one(&[
@@ -320,6 +322,7 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
         circuit.perform_sanity_checks(&block, &current_tx, state_metadata_hash);
 
         // Calculate new validium and state root
+        let system_config_hash = current_tx.new_system_config.hash(&mut circuit.builder);
         let register_stack_hash = current_tx.register_stack_after.hash(&mut circuit.builder);
         let all_assets_hash = all_assets_hash(&mut circuit.builder, &current_tx.all_assets_after);
         let all_market_details_hash =
@@ -336,6 +339,7 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
             all_assets_hash,
             all_market_details_hash,
             state_metadata_hash,
+            system_config_hash,
         ]);
 
         let state_root = circuit.builder.hash_n_to_one(&[
@@ -344,7 +348,7 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
             validium_root,
         ]);
 
-        // Treasury can't change, so zero account index means no change pub key or transfer message
+        // Treasury can't change pubkey via L2 transaction, so if account index is zero, then change_pub_key_message is empty
         let is_change_pub_key_message_exists = circuit
             .builder
             .is_not_zero(current_tx.change_pub_key_message.account_index);
@@ -359,6 +363,7 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
             &block.change_pub_key_message,
         );
 
+        // Treasury can call L2 transfer, but it can only transfer between its own (sub)accounts. So transfer_message is empty in that case
         let is_transfer_message_exists = circuit
             .builder
             .is_not_zero(current_tx.transfer_message.from_account_index);

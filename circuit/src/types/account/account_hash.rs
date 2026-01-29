@@ -104,7 +104,7 @@ impl AccountTarget {
                 &self
                     .public_pool_shares
                     .iter()
-                    .map(|pps| pps.principal_amount)
+                    .flat_map(|pps| [pps.principal_amount, pps.entry_timestamp])
                     .collect::<Vec<_>>(),
             );
             elements.extend_from_slice(&[
@@ -112,6 +112,22 @@ impl AccountTarget {
                 self.public_pool_info.min_operator_share_rate,
                 self.public_pool_info.operator_fee,
             ]);
+
+            let pending_unlocks_hash = builder.hash_n_to_hash_no_pad::<Poseidon2Hash>(
+                self.pending_unlocks
+                    .iter()
+                    .flat_map(|pw| {
+                        [
+                            pw.unlock_timestamp,
+                            pw.asset_index,
+                            pw.amount.limbs[0].0,
+                            pw.amount.limbs[1].0,
+                            pw.amount.limbs[2].0,
+                        ]
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            elements.extend_from_slice(&pending_unlocks_hash.elements);
         }
 
         [

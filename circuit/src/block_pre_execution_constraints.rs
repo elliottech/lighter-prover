@@ -36,6 +36,7 @@ use crate::types::register::{RegisterInfoTargetWitness, RegisterStackTarget};
 use crate::types::state_metadata::{
     StateMetadataTarget, StateMetadataTargetWitness, connect_state_metadata_target,
 };
+use crate::types::system_config::{SystemConfigTarget, SystemConfigTargetWitness};
 use crate::utils::{
     CircuitBuilderUtils, round_unix_timestamp_to_next_hour, round_unix_timestamp_to_previous_minute,
 };
@@ -81,6 +82,7 @@ pub struct BlockPreExecutionTarget {
     /***********************/
     /*  COMMON STATE DATA  */
     /***********************/
+    pub old_system_config: SystemConfigTarget,
     pub register_stack_before: RegisterStackTarget,
     pub all_assets_before: [AssetTarget; ASSET_LIST_SIZE],
     pub all_market_details_before: [MarketDetailsTarget; POSITION_LIST_SIZE],
@@ -158,6 +160,7 @@ impl Circuit<C, F, D> for BlockPreExecutionCircuit {
         )?;
 
         pw.set_register_info_target(&target.register_stack_before, &block.register_stack_before)?;
+        pw.set_system_config_target(&target.old_system_config, &block.old_system_config)?;
 
         target
             .all_assets_before
@@ -203,6 +206,7 @@ impl BlockPreExecutionCircuit {
                 block_number: builder.add_virtual_target(),
                 created_at: builder.add_virtual_target(),
 
+                old_system_config: SystemConfigTarget::new(&mut builder),
                 register_stack_before: RegisterStackTarget::new(&mut builder),
                 all_assets_before: (0..ASSET_LIST_SIZE)
                     .map(|_| AssetTarget::new(&mut builder))
@@ -271,6 +275,7 @@ impl BlockPreExecutionCircuit {
 
     /// Verify consistency of old tree roots and pre-execution register state
     fn define_block_state_data_checks(&mut self) {
+        let old_system_config_hash = self.target.old_system_config.hash(&mut self.builder);
         let old_register_stack_hash = self.target.register_stack_before.hash(&mut self.builder);
         let current_all_market_details = self.target.all_market_details_before.clone();
         self.target.all_assets_hash =
@@ -287,6 +292,7 @@ impl BlockPreExecutionCircuit {
             self.target.all_assets_hash,
             old_all_market_details_hash,
             old_state_metadata_hash,
+            old_system_config_hash,
         ]);
 
         let old_state_root = self.builder.hash_n_to_one(&[
@@ -644,6 +650,7 @@ impl BlockPreExecutionCircuit {
         all_market_details_after: &[MarketDetailsTarget; POSITION_LIST_SIZE],
         new_state_metadata: &StateMetadataTarget,
     ) {
+        let old_system_config_hash = self.target.old_system_config.hash(&mut self.builder);
         let old_register_stack_hash = self.target.register_stack_before.hash(&mut self.builder);
         let new_all_market_details_hash =
             all_market_details_hash(&mut self.builder, all_market_details_after);
@@ -657,6 +664,7 @@ impl BlockPreExecutionCircuit {
             self.target.all_assets_hash,
             new_all_market_details_hash,
             new_state_metadata_hash,
+            old_system_config_hash,
         ]);
 
         self.builder

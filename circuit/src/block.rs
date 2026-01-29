@@ -23,6 +23,7 @@ use crate::types::market_details::{MarketDetails, PublicMarketDetails};
 use crate::types::price_updates::PriceUpdates;
 use crate::types::register::RegisterStack;
 use crate::types::state_metadata::StateMetadata;
+use crate::types::system_config::SystemConfig;
 
 #[serde_as]
 #[derive(Clone, Debug, Deserialize)]
@@ -40,6 +41,9 @@ where
     #[serde(rename = "rb", default)]
     #[serde(deserialize_with = "deserializers::register_stack")]
     pub register_stack_before: RegisterStack,
+
+    #[serde(rename = "osc", default)]
+    pub old_system_config: SystemConfig,
 
     #[serde(rename = "mib")]
     #[serde_as(as = "[_; POSITION_LIST_SIZE]")]

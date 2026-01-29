@@ -14,6 +14,7 @@ use crate::types::market_details::{MARKET_DETAIL_SIZE, MarketDetails, MarketDeta
 use crate::types::price_updates::PriceUpdates;
 use crate::types::register::RegisterStack;
 use crate::types::state_metadata::{STATE_METADATA_SIZE, StateMetadata, StateMetadataTarget};
+use crate::types::system_config::SystemConfig;
 
 #[derive(Clone, Debug)]
 /// Public + Secret Witness for single block pre-exec
@@ -24,6 +25,7 @@ where
     pub created_at: i64,
     pub block_number: u64,
 
+    pub old_system_config: SystemConfig,
     pub register_stack_before: RegisterStack,
     pub all_assets: [Asset; ASSET_LIST_SIZE],
     pub all_market_details: [MarketDetails; POSITION_LIST_SIZE],
@@ -45,6 +47,7 @@ impl BlockPreExec<F> {
         Self {
             created_at: block.created_at,
             block_number: block.block_number,
+            old_system_config: block.old_system_config,
             register_stack_before: block.register_stack_before,
             all_assets: block.all_assets.clone(),
             all_market_details: block.all_market_details.clone(),

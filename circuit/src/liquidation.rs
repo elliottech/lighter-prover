@@ -237,12 +237,12 @@ pub fn get_available_collateral(
 
 pub fn get_shares_asset_value(
     builder: &mut Builder,
-    account: &AccountTarget,
+    total_shares: Target,
     asset_balance: &BigUintTarget,
     asset_extension_multiplier: &BigUintTarget,
     share_amount: Target,
-) -> Target {
-    let is_total_shares_zero = builder.is_zero(account.public_pool_info.total_shares);
+) -> BigUintTarget {
+    let is_total_shares_zero = builder.is_zero(total_shares);
 
     let big_share_amount = builder.target_to_biguint(share_amount);
     let big_initial_pool_share_value =
@@ -251,7 +251,7 @@ pub fn get_shares_asset_value(
 
     let share_amount_mul_total_account_value =
         builder.mul_biguint(&big_share_amount, asset_balance);
-    let big_old_total_shares = builder.target_to_biguint(account.public_pool_info.total_shares);
+    let big_old_total_shares = builder.target_to_biguint(total_shares);
     let old_total_shares_mul_usdc_to_collateral_multiplier =
         builder.mul_biguint(&big_old_total_shares, asset_extension_multiplier);
     let c_big_usdc_to_mint_shares = builder.div_biguint(
@@ -259,13 +259,11 @@ pub fn get_shares_asset_value(
         &old_total_shares_mul_usdc_to_collateral_multiplier,
     );
 
-    let big_usdc_to_mint_shares = builder.select_biguint(
+    builder.select_biguint(
         is_total_shares_zero,
         &default_usdc_value,
         &c_big_usdc_to_mint_shares,
-    );
-
-    builder.biguint_to_target_safe(&big_usdc_to_mint_shares)
+    )
 }
 
 pub fn get_shares_usdc_value(

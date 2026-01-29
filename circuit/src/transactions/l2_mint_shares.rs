@@ -14,7 +14,7 @@ use crate::bigint::comparison::CircuitBuilderBiguintSubtractiveComparison;
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::eddsa::gadgets::base_field::QuinticExtensionTarget;
 use crate::eddsa::schnorr::hash_to_quintic_extension_circuit;
-use crate::liquidation::{get_available_collateral, get_shares_usdc_value};
+use crate::liquidation::{get_available_collateral, get_shares_asset_value, get_shares_usdc_value};
 use crate::tx_interface::{Apply, TxHash, Verify};
 use crate::types::config::{BIG_U96_LIMBS, Builder, F};
 use crate::types::constants::*;
@@ -121,11 +121,24 @@ impl Verify for L2MintSharesTxTarget {
             tx_state.accounts[SUB_ACCOUNT_ID].account_index,
         );
 
-        let big_shares_amount = builder.target_to_biguint(self.share_amount);
-        builder.range_check_biguint(
-            &big_shares_amount,
-            MAX_POOL_SHARES_TO_MINT_OR_BURN_USDC_BITS,
+        let is_llp = builder.is_equal(
+            self.public_pool_index,
+            tx_state.system_config.liquidity_pool_index,
         );
+        let is_llp_flag = builder.and(is_enabled, is_llp);
+        builder.conditional_assert_eq(
+            is_llp_flag,
+            tx_state.accounts[SYSTEM_CONFIG_ACCOUNT_ID].account_index,
+            tx_state.system_config.staking_pool_index,
+        );
+        builder.conditional_assert_eq_constant(
+            is_llp_flag,
+            tx_state.asset_indices[TX_ASSET_ID],
+            LIT_ASSET_INDEX,
+        );
+
+        let big_shares_amount = builder.target_to_biguint(self.share_amount);
+        builder.range_check_biguint(&big_shares_amount, MAX_POOL_SHARES_BITS);
         builder.conditional_assert_not_zero(is_enabled, self.share_amount);
 
         let public_pool_account_type = builder.constant_from_u8(PUBLIC_POOL_ACCOUNT_TYPE);
@@ -169,17 +182,17 @@ impl Verify for L2MintSharesTxTarget {
             &tx_state.accounts[SUB_ACCOUNT_ID],
             self.share_amount,
         );
-        self.new_principal_amount = builder.add(
-            tx_state.public_pool_share.principal_amount,
-            self.principal_amount,
+        let big_principal_amount = builder.target_to_biguint(self.principal_amount);
+        builder.range_check_biguint(
+            &big_principal_amount,
+            MAX_POOL_SHARES_TO_MINT_OR_BURN_USDC_BITS,
         );
-        builder.register_range_check(self.new_principal_amount, MAX_POOL_PRINCIPAL_AMOUNT_BITS);
+
         let usdc_to_collateral_multiplier =
             builder.constant_biguint(&BigUint::from(USDC_TO_COLLATERAL_MULTIPLIER));
 
-        let big_usdc_amount = builder.target_to_biguint(self.principal_amount);
         self.collateral_to_mint_shares = builder.mul_biguint_non_carry(
-            &big_usdc_amount,
+            &big_principal_amount,
             &usdc_to_collateral_multiplier,
             BIG_U96_LIMBS,
         );
@@ -194,10 +207,11 @@ impl Verify for L2MintSharesTxTarget {
             tx_state.accounts[SUB_ACCOUNT_ID].master_account_index,
         );
 
-        // If minter is not the operator, then check if the minimum share rate is still
-        // going to be satisfied for the pool operator
+        // Not operator checks
         {
-            // If operator shares drops below the minimum operator share rate, fail the transaction
+            // If minter is not the operator, then check if the minimum share rate is still
+            // going to be satisfied for the pool operator. If operator shares drops below the
+            // minimum operator share rate, fail the transaction
             let big_min_operator_share_rate = builder.target_to_biguint(
                 tx_state.accounts[SUB_ACCOUNT_ID]
                     .public_pool_info
@@ -213,6 +227,73 @@ impl Verify for L2MintSharesTxTarget {
             let rhs = builder.mul_biguint(&big_operator_shares, &big_share_tick);
             let not_operator_and_enabled = builder.and_not(is_enabled, self.is_operator);
             builder.conditional_assert_lte_biguint(not_operator_and_enabled, &lhs, &rhs);
+
+            // Range check new principal amount only for non-operator
+            let new_principal_amount = builder.add(
+                tx_state.public_pool_shares[OWNER_ACCOUNT_ID].principal_amount,
+                self.principal_amount,
+            );
+            self.new_principal_amount =
+                builder.select_or_zero(not_operator_and_enabled, new_principal_amount);
+            builder.register_range_check(self.new_principal_amount, MAX_POOL_PRINCIPAL_AMOUNT_BITS);
+
+            // If staking pool exists, LIT asset registered, current pool is LLP and account is not staking
+            // pool operator or LLP operator, verify that the mint amount is within staked LIT limits.
+            // A third account must have been sent in this case.
+            let is_not_staking_pool_operator = builder.is_not_equal(
+                tx_state.accounts[OWNER_ACCOUNT_ID].account_index,
+                tx_state.accounts[SYSTEM_CONFIG_ACCOUNT_ID].master_account_index,
+            );
+            let is_lit_asset_empty = tx_state.assets[TX_ASSET_ID].is_empty(builder);
+            let is_lit_asset_not_empty = builder.not(is_lit_asset_empty);
+
+            let is_staking_pool_nil_account = builder.is_equal_constant(
+                tx_state.accounts[SYSTEM_CONFIG_ACCOUNT_ID].account_index,
+                NIL_ACCOUNT_INDEX as u64,
+            );
+            let is_staking_pool_not_nil_account = builder.not(is_staking_pool_nil_account);
+            let stake_limit_check_flag = builder.multi_and(&[
+                not_operator_and_enabled,
+                is_lit_asset_not_empty,
+                is_llp,
+                is_not_staking_pool_operator,
+                is_staking_pool_not_nil_account,
+            ]);
+
+            let depositor_staked_lit_shares = tx_state.accounts[OWNER_ACCOUNT_ID]
+                .get_public_pool_share(
+                    builder,
+                    tx_state.accounts[SYSTEM_CONFIG_ACCOUNT_ID].account_index,
+                )
+                .share_amount;
+
+            // stakedLitAmount is in base amount, needs to be divided by 10^lit_decimals to find how many LIT tokens are staked
+            let staked_lit_amount = get_shares_asset_value(
+                builder,
+                tx_state.accounts[SYSTEM_CONFIG_ACCOUNT_ID]
+                    .public_pool_info
+                    .total_shares,
+                &tx_state.account_assets[SYSTEM_CONFIG_ACCOUNT_ID][TX_ASSET_ID].balance,
+                &tx_state.assets[TX_ASSET_ID].extension_multiplier,
+                depositor_staked_lit_shares,
+            );
+
+            // Allow LIT_TO_MINT_SHARES_MULTIPLIER USDC per 1 LIT staked in the staking pool
+            let llp_to_mint_shares_multiplier =
+                builder.constant_biguint(&BigUint::from(LIT_TO_MINT_SHARES_MULTIPLIER));
+            let max_allowed_principal =
+                builder.mul_biguint(&llp_to_mint_shares_multiplier, &staked_lit_amount);
+            let usdc_to_lit_conversion_rate =
+                builder.constant_biguint(&BigUint::from(USDC_TO_LIT_CONVERSION_RATE));
+            let new_principal_amount_big = builder.target_to_biguint(self.new_principal_amount);
+            let new_principal_amount =
+                builder.mul_biguint(&new_principal_amount_big, &usdc_to_lit_conversion_rate);
+
+            builder.conditional_assert_lte_biguint(
+                stake_limit_check_flag,
+                &new_principal_amount,
+                &max_allowed_principal,
+            );
         }
     }
 }
@@ -232,7 +313,7 @@ impl Apply for L2MintSharesTxTarget {
         tx_state.accounts[OWNER_ACCOUNT_ID].apply_collateral_delta(
             builder,
             self.success,
-            BigIntTarget {
+            &BigIntTarget {
                 abs: self.collateral_to_mint_shares.clone(),
                 sign: SignTarget::new_unsafe(sub_sign),
             },
@@ -240,7 +321,7 @@ impl Apply for L2MintSharesTxTarget {
         tx_state.accounts[SUB_ACCOUNT_ID].apply_collateral_delta(
             builder,
             self.success,
-            BigIntTarget {
+            &BigIntTarget {
                 abs: self.collateral_to_mint_shares.clone(),
                 sign: SignTarget::new_unsafe(add_sign),
             },
@@ -261,20 +342,29 @@ impl Apply for L2MintSharesTxTarget {
         {
             let is_success_and_not_operator = builder.and_not(self.success, self.is_operator);
 
-            let new_share_amount =
-                builder.add(tx_state.public_pool_share.share_amount, self.share_amount);
-            tx_state.public_pool_share.principal_amount = builder.select(
+            let new_share_amount = builder.add(
+                tx_state.public_pool_shares[OWNER_ACCOUNT_ID].share_amount,
+                self.share_amount,
+            );
+            tx_state.public_pool_shares[OWNER_ACCOUNT_ID].principal_amount = builder.select(
                 is_success_and_not_operator,
                 self.new_principal_amount,
-                tx_state.public_pool_share.principal_amount,
+                tx_state.public_pool_shares[OWNER_ACCOUNT_ID].principal_amount,
             );
-            tx_state.public_pool_share.share_amount = builder.select(
+            tx_state.public_pool_shares[OWNER_ACCOUNT_ID].share_amount = builder.select(
                 is_success_and_not_operator,
                 new_share_amount,
-                tx_state.public_pool_share.share_amount,
+                tx_state.public_pool_shares[OWNER_ACCOUNT_ID].share_amount,
             );
-            tx_state.apply_pool_share_delta_flag = builder.or(
+            tx_state.public_pool_shares[OWNER_ACCOUNT_ID].entry_timestamp = builder.select(
                 is_success_and_not_operator,
+                tx_state.block_timestamp,
+                tx_state.public_pool_shares[OWNER_ACCOUNT_ID].entry_timestamp,
+            );
+            let one = builder.one();
+            tx_state.apply_pool_share_delta_flag = builder.select(
+                is_success_and_not_operator,
+                one,
                 tx_state.apply_pool_share_delta_flag,
             );
         }

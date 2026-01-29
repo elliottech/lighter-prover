@@ -25,6 +25,9 @@ pub struct PublicPoolShare {
 
     #[serde(rename = "eu")]
     pub principal_amount: i64,
+
+    #[serde(rename = "et")]
+    pub entry_timestamp: i64,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -51,15 +54,17 @@ pub struct PublicPoolShareTarget {
     pub public_pool_index: Target,
     pub share_amount: Target,
     pub principal_amount: Target,
+    pub entry_timestamp: Target,
 }
 
-const PUBLIC_POOL_SHARE_SIZE: usize = 3;
+const PUBLIC_POOL_SHARE_SIZE: usize = 4;
 impl PublicPoolShareTarget {
     pub fn new(builder: &mut Builder) -> Self {
         PublicPoolShareTarget {
             public_pool_index: builder.add_virtual_target(),
             share_amount: builder.add_virtual_target(),
             principal_amount: builder.add_virtual_target(),
+            entry_timestamp: builder.add_virtual_target(),
         }
     }
     pub fn new_public(builder: &mut Builder) -> Self {
@@ -67,6 +72,7 @@ impl PublicPoolShareTarget {
             public_pool_index: builder.add_virtual_public_input(),
             share_amount: builder.add_virtual_public_input(),
             principal_amount: builder.add_virtual_public_input(),
+            entry_timestamp: builder.add_virtual_public_input(),
         }
     }
     pub fn from_public_inputs(pis: &[Target]) -> Self {
@@ -75,6 +81,7 @@ impl PublicPoolShareTarget {
             public_pool_index: pis[0],
             share_amount: pis[1],
             principal_amount: pis[2],
+            entry_timestamp: pis[3],
         }
     }
 
@@ -85,6 +92,7 @@ impl PublicPoolShareTarget {
         );
         builder.println(self.share_amount, &format!("{}: share_amount", tag));
         builder.println(self.principal_amount, &format!("{}: entry_usdc", tag));
+        builder.println(self.entry_timestamp, &format!("{}: entry_timestamp", tag));
     }
 
     pub fn empty(builder: &mut Builder, public_pool_index: Target) -> Self {
@@ -92,6 +100,7 @@ impl PublicPoolShareTarget {
             public_pool_index,
             share_amount: builder.zero(),
             principal_amount: builder.zero(),
+            entry_timestamp: builder.zero(),
         }
     }
 
@@ -99,6 +108,7 @@ impl PublicPoolShareTarget {
         let assertions = [
             builder.is_zero(self.share_amount),
             builder.is_zero(self.principal_amount),
+            builder.is_zero(self.entry_timestamp),
         ];
 
         builder.multi_and(&assertions)
@@ -188,6 +198,7 @@ pub fn select_public_pool_share_target(
         public_pool_index: builder.select(flag, a.public_pool_index, b.public_pool_index),
         share_amount: builder.select(flag, a.share_amount, b.share_amount),
         principal_amount: builder.select(flag, a.principal_amount, b.principal_amount),
+        entry_timestamp: builder.select(flag, a.entry_timestamp, b.entry_timestamp),
     }
 }
 
@@ -214,6 +225,7 @@ impl<T: Witness<F>, F: PrimeField64 + Extendable<5> + RichField> PublicPoolShare
             a.principal_amount,
             F::from_canonical_i64(b.principal_amount),
         )?;
+        self.set_target(a.entry_timestamp, F::from_canonical_i64(b.entry_timestamp))?;
 
         Ok(())
     }

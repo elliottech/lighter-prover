@@ -102,10 +102,10 @@ pub const EMPTY_ORDER_BOOK_TREE_ROOT: HashOut<F> = const_hash_out([
 ]);
 
 pub const EMPTY_ACCOUNT_HASH: HashOut<F> = const_hash_out([
-    12951697728045964250,
-    8556426464902381850,
-    16687308006053818446,
-    13802340876593548223,
+    14083341044668769695,
+    15055170424628087844,
+    11256155421193779629,
+    13640430731253023330,
 ]);
 
 /// Tx Types
@@ -122,6 +122,8 @@ pub const TX_TYPE_L1_CREATE_ORDER: u8 = 7;
 pub const TX_TYPE_L1_BURN_SHARES: u8 = 30;
 pub const TX_TYPE_L1_REGISTER_ASSET: u8 = 31;
 pub const TX_TYPE_L1_UPDATE_ASSET: u8 = 32;
+pub const TX_TYPE_L1_UNSTAKE_ASSETS: u8 = 37;
+pub const TX_TYPE_L1_SET_SYSTEM_CONFIG: u8 = 38;
 
 // L2
 pub const TX_TYPE_L2_CHANGE_PUB_KEY: u8 = 8;
@@ -143,6 +145,7 @@ pub const TX_TYPE_L2_CREATE_STAKING_POOL: u8 = 33;
 // pub const TX_TYPE_L2_UPDATE_STAKING_POOL: u8 = 34;
 pub const TX_TYPE_L2_STAKE_ASSETS: u8 = 35;
 pub const TX_TYPE_L2_UNSTAKE_ASSETS: u8 = 36;
+pub const TX_TYPE_L2_FORCE_BURN_SHARES: u8 = 40;
 
 // Internal
 pub const TX_TYPE_INTERNAL_CLAIM_ORDER: u8 = 21;
@@ -152,6 +155,7 @@ pub const TX_TYPE_INTERNAL_EXIT_POSITION: u8 = 24;
 pub const TX_TYPE_INTERNAL_CANCEL_ALL_ORDERS: u8 = 25;
 pub const TX_TYPE_INTERNAL_LIQUIDATE_POSITION: u8 = 26;
 pub const TX_TYPE_INTERNAL_CREATE_ORDER: u8 = 27;
+pub const TX_TYPE_INTERNAL_PENDING_UNLOCK: u8 = 39;
 
 // Priority request pub data
 pub const PRIORITY_PUB_DATA_TYPE_L1_DEPOSIT: u8 = 41;
@@ -164,12 +168,17 @@ pub const PRIORITY_PUB_DATA_TYPE_L1_CREATE_ORDER: u8 = 47;
 pub const PRIORITY_PUB_DATA_TYPE_L1_BURN_SHARES: u8 = 48;
 pub const PRIORITY_PUB_DATA_TYPE_L1_REGISTER_ASSET: u8 = 49;
 pub const PRIORITY_PUB_DATA_TYPE_L1_UPDATE_ASSET: u8 = 50;
+pub const PRIORITY_PUB_DATA_TYPE_L1_UNSTAKE_ASSETS: u8 = 51;
+pub const PRIORITY_PUB_DATA_TYPE_L1_SET_SYSTEM_CONFIG: u8 = 52;
 
 // On Chain Log Pubdata
 pub const ON_CHAIN_PUB_DATA_TYPE_WITHDRAW: u8 = 2;
 
 pub const USDC_TO_COLLATERAL_MULTIPLIER: u32 = 1_000_000;
 pub const LIT_EXTENSION_MULTIPLIER: u32 = 1_000_000;
+
+pub const LIT_TO_MINT_SHARES_MULTIPLIER: u64 = 10;
+pub const USDC_TO_LIT_CONVERSION_RATE: u64 = ONE_LIT / ONE_USDC;
 
 pub const MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX: usize = 100;
 pub const PRIORITY_OPERATIONS_PUB_DATA_BITS_PER_TX: usize =
@@ -218,6 +227,7 @@ pub const MARKET_OPEN_INTEREST: u64 = (1 << MARKET_OPEN_INTEREST_BITS) - 1;
 pub const NB_ACCOUNTS_PER_TX: usize = 3;
 pub const NB_ACCOUNT_ORDERS_PATHS_PER_TX: usize = 3;
 pub const NB_ASSETS_PER_TX: usize = 2;
+pub const NB_POSSIBLE_POOL_SHARE_SLOTS: usize = 2;
 
 pub const TREASURY_ACCOUNT_INDEX: usize = 0;
 pub const INSURANCE_FUND_OPERATOR_ACCOUNT_INDEX: usize = 1;
@@ -234,6 +244,9 @@ pub const NIL_ACCOUNT_INDEX: i64 = 281474976710655; // 2^48 - 1
 pub const MAX_MASTER_ACCOUNT_INDEX: i64 = 140737488355327; // 2^47 - 1
 pub const MIN_SUB_ACCOUNT_INDEX: i64 = 140737488355328; // 2^47
 pub const NIL_MASTER_ACCOUNT_INDEX: i64 = 0;
+
+pub const MAX_LIQUIDITY_POOL_COOLDOWN_PERIOD: i64 = 1000 * 60 * 60 * 24 * 365; // 1 year
+pub const MAX_STAKING_POOL_LOCKUP_PERIOD: i64 = 1000 * 60 * 60 * 24 * 30; // 30 days
 
 // Account Type
 pub const MASTER_ACCOUNT_TYPE: u8 = 0;
@@ -257,15 +270,14 @@ pub const ACTIVE_PUBLIC_POOL: u8 = 0;
 pub const FROZEN_PUBLIC_POOL: u8 = 1;
 pub const MAX_POOL_SHARES: u64 = (1 << 60) - 1;
 pub const MAX_POOL_SHARES_BITS: usize = 60;
-pub const MAX_POOL_SHARES_TO_MINT_OR_BURN_USDC: u64 = (1 << 60) - 1;
+pub const MAX_POOL_SHARES_TO_MINT_OR_BURN_USDC: u64 =
+    (1 << MAX_POOL_SHARES_TO_MINT_OR_BURN_USDC_BITS) - 1;
 pub const MAX_POOL_SHARES_TO_MINT_OR_BURN_USDC_BITS: usize = 60;
-pub const MAX_POOL_SHARES_TO_MINT_OR_BURN_ASSET_BITS: usize = 60;
+pub const MAX_POOL_SHARES_TO_MINT_OR_BURN_LIT: u64 =
+    (1 << MAX_POOL_SHARES_TO_MINT_OR_BURN_LIT_BITS) - 1;
+pub const MAX_POOL_SHARES_TO_MINT_OR_BURN_LIT_BITS: usize = 60;
 pub const MAX_POOL_PRINCIPAL_AMOUNT: u64 = (1 << 56) - 1; // 2^56 - 1 max USDC to invest in a poo
 pub const MAX_POOL_PRINCIPAL_AMOUNT_BITS: usize = 56;
-pub const MIN_POOL_SHARES_TO_MINT: u64 = 1;
-pub const MAX_POOL_SHARES_TO_MINT: u64 = MAX_POOL_SHARES;
-pub const MIN_POOL_SHARES_TO_BURN: u64 = 1;
-pub const MAX_POOL_SHARES_TO_BURN: u64 = MAX_POOL_SHARES;
 
 pub const INITIAL_TOTAL_SHARES_BITS: usize = 40;
 pub const INITIAL_TOTAL_STAKING_SHARES_BITS: usize = 48;
@@ -288,6 +300,8 @@ pub const POSITION_HASH_BUCKET_COUNT: usize = 16;
 pub const POSITION_HASH_BUCKET_SIZE: usize = 16;
 pub const SHARES_LIST_SIZE: usize = 16;
 pub const SHARES_DELTA_LIST_SIZE: usize = SHARES_LIST_SIZE * 2;
+
+pub const MAX_PENDING_UNLOCKS: usize = 8;
 
 pub const ASSET_LIST_SIZE_BITS: usize = 6;
 pub const ASSET_LIST_SIZE: usize = 1 << ASSET_LIST_SIZE_BITS; // first and last slots unused
@@ -422,6 +436,12 @@ pub const BANKRUPTCY: u8 = 4;
 // Tx Account Ids
 pub const OWNER_ACCOUNT_ID: usize = 0;
 
+pub const LIQUIDITY_POOL_ACCOUNT_ID: usize = 0;
+pub const STAKING_POOL_ACCOUNT_ID: usize = 1;
+pub const SHARE_OWNER_ACCOUNT_ID: usize = 1;
+
+pub const SYSTEM_CONFIG_ACCOUNT_ID: usize = 2;
+
 pub const TAKER_ACCOUNT_ID: usize = 0;
 pub const MAKER_ACCOUNT_ID: usize = 1;
 pub const FEE_ACCOUNT_ID: usize = 2;
@@ -440,6 +460,9 @@ pub const FEE_ASSET_ID: usize = 1;
 
 pub const BASE_ASSET_ID: usize = 0;
 pub const QUOTE_ASSET_ID: usize = 1;
+
+pub const OWNER_OR_POOL_ACCOUNT_ID_1: usize = 0;
+pub const OWNER_OR_POOL_ACCOUNT_ID_2: usize = 1;
 
 // Margin Modes
 pub const CROSS_MARGIN: usize = 0;

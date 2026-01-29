@@ -27,6 +27,9 @@ use crate::types::account_position::{
 use crate::types::config::{BIG_U64_LIMBS, BIG_U96_LIMBS, BIG_U160_LIMBS, Builder, *};
 use crate::types::constants::{POSITION_LIST_SIZE, TIMESTAMP_BITS, *};
 use crate::types::market_details::MarketDetailsTarget;
+use crate::types::pending_unlock::{
+    PendingUnlock, PendingUnlockTarget, PendingUnlockWitness, select_pending_unlock_target,
+};
 use crate::types::public_pool::{
     PublicPoolInfo, PublicPoolInfoTarget, PublicPoolInfoWitness, PublicPoolShare,
     PublicPoolShareTarget, PublicPoolShareWitness, select_public_pool_share_target,
@@ -64,6 +67,9 @@ where
     #[serde(rename = "ap")]
     #[serde(deserialize_with = "deserializers::positions")]
     pub positions: [AccountPosition; POSITION_LIST_SIZE],
+
+    #[serde(rename = "pwi", default)]
+    pub pending_unlocks: [PendingUnlock; MAX_PENDING_UNLOCKS],
 
     #[serde(rename = "pps", default)]
     pub public_pool_shares: [PublicPoolShare; SHARES_LIST_SIZE],
@@ -119,6 +125,7 @@ where
             aggregated_balances: [BigInt::ZERO; NB_ASSETS_PER_TX],
             positions: array::from_fn(|_| AccountPosition::default()),
             public_pool_shares: array::from_fn(|_| PublicPoolShare::default()),
+            pending_unlocks: array::from_fn(|_| PendingUnlock::default()),
             public_pool_info: PublicPoolInfo::default(),
             total_order_count: 0,
             total_non_cross_order_count: 0,
@@ -144,6 +151,7 @@ pub struct AccountTarget {
     pub aggregated_balances: [BigIntTarget; NB_ASSETS_PER_TX],
     pub positions: [AccountPositionTarget; POSITION_LIST_SIZE],
 
+    pub pending_unlocks: [PendingUnlockTarget; MAX_PENDING_UNLOCKS],
     pub public_pool_shares: [PublicPoolShareTarget; SHARES_LIST_SIZE],
     pub public_pool_info: PublicPoolInfoTarget,
 
@@ -173,6 +181,7 @@ impl Default for AccountTarget {
 
             positions: array::from_fn(|_| AccountPositionTarget::default()),
 
+            pending_unlocks: array::from_fn(|_| PendingUnlockTarget::default()),
             public_pool_shares: array::from_fn(|_| PublicPoolShareTarget::default()),
             public_pool_info: PublicPoolInfoTarget::default(),
 
@@ -210,6 +219,7 @@ impl AccountTarget {
 
             positions: array::from_fn(|_| AccountPositionTarget::new(builder)),
 
+            pending_unlocks: array::from_fn(|_| PendingUnlockTarget::new(builder)),
             public_pool_shares: array::from_fn(|_| PublicPoolShareTarget::new(builder)),
             public_pool_info: PublicPoolInfoTarget::new(builder),
 
@@ -240,8 +250,10 @@ impl AccountTarget {
             }),
 
             positions: array::from_fn(|_| AccountPositionTarget::default()), // Unused for fee accounts
+
+            pending_unlocks: array::from_fn(|_| PendingUnlockTarget::new(builder)),
             public_pool_shares: array::from_fn(|_| PublicPoolShareTarget::default()),
-            public_pool_info: PublicPoolInfoTarget::default(),
+            public_pool_info: PublicPoolInfoTarget::new(builder),
 
             total_order_count: builder.add_virtual_target(),
             total_non_cross_order_count: builder.add_virtual_target(),
@@ -335,6 +347,61 @@ impl AccountTarget {
         };
 
         (base_position_notional_values, cross_position_notional_value)
+    }
+
+    pub fn pop_pending_unlock(
+        &mut self,
+        builder: &mut Builder,
+        is_enabled: BoolTarget,
+    ) -> PendingUnlockTarget {
+        let to_be_popped = self.pending_unlocks[0].clone();
+        for i in 0..MAX_PENDING_UNLOCKS - 1 {
+            self.pending_unlocks[i] = select_pending_unlock_target(
+                builder,
+                is_enabled,
+                &self.pending_unlocks[i + 1],
+                &self.pending_unlocks[i],
+            );
+        }
+        let empty_pending_unlock = PendingUnlockTarget::empty(builder);
+        self.pending_unlocks[MAX_PENDING_UNLOCKS - 1] = select_pending_unlock_target(
+            builder,
+            is_enabled,
+            &empty_pending_unlock,
+            &self.pending_unlocks[MAX_PENDING_UNLOCKS - 1],
+        );
+        to_be_popped
+    }
+
+    pub fn get_total_unlock_amount(&self, builder: &mut Builder) -> BigUintTarget {
+        let mut total_unlock_amount = builder.zero_biguint();
+        for pu in self.pending_unlocks.iter() {
+            total_unlock_amount =
+                builder.add_biguint_non_carry(&total_unlock_amount, &pu.amount, BIG_U96_LIMBS);
+        }
+        total_unlock_amount
+    }
+
+    pub fn add_pending_unlock(
+        &mut self,
+        builder: &mut Builder,
+        is_enabled: BoolTarget,
+        pending_unlock: &PendingUnlockTarget,
+    ) {
+        let mut appended = builder.not(is_enabled);
+        for i in 0..MAX_PENDING_UNLOCKS {
+            let is_slot_empty = builder.is_zero_biguint(&self.pending_unlocks[i].amount);
+            let flag = builder.and_not(is_slot_empty, appended);
+            appended = builder.or(appended, flag);
+
+            self.pending_unlocks[i] = select_pending_unlock_target(
+                builder,
+                flag,
+                pending_unlock,
+                &self.pending_unlocks[i],
+            );
+        }
+        builder.conditional_assert_true(is_enabled, appended);
     }
 
     pub fn get_cross_unrealized_funding(
@@ -483,10 +550,10 @@ impl AccountTarget {
         &mut self,
         builder: &mut Builder,
         is_enabled: BoolTarget,
-        collateral_delta: BigIntTarget,
+        collateral_delta: &BigIntTarget,
     ) {
         let new_collateral =
-            builder.add_bigint_non_carry(&self.collateral, &collateral_delta, BIG_U96_LIMBS);
+            builder.add_bigint_non_carry(&self.collateral, collateral_delta, BIG_U96_LIMBS);
         self.collateral = builder.select_bigint(is_enabled, &new_collateral, &self.collateral);
     }
 
@@ -513,172 +580,6 @@ impl AccountTarget {
         res
     }
 
-    pub fn mint_pool_shares(
-        &mut self,
-        builder: &mut Builder,
-        is_enabled: BoolTarget,
-        pool_index: Target,
-        share_delta: Target,
-        entry_usdc_delta: Target,
-    ) {
-        let zero = builder.zero();
-
-        // Clone old values to new variables
-        let mut new_pool_shares = self.public_pool_shares;
-
-        let mut success = builder._false();
-        let mut set_new_entry_usdc = builder.zero();
-
-        let mut new_share_amounts = vec![];
-        let mut new_entry_usdcs = vec![];
-
-        // Try to find the pool share that matches the pool index
-        // If found, update the share amount and entry usdc (new_pool_shares)
-        for i in 0..SHARES_LIST_SIZE {
-            let is_pool_index_equal =
-                builder.is_equal(new_pool_shares[i].public_pool_index, pool_index);
-            let is_enabled_and_matching = builder.and(is_enabled, is_pool_index_equal);
-            let update = builder.and_not(is_enabled_and_matching, success);
-
-            let new_share_amount = builder.add(new_pool_shares[i].share_amount, share_delta);
-            new_share_amounts.push(new_share_amount);
-            let new_entry_usdc = builder.add(new_pool_shares[i].principal_amount, entry_usdc_delta);
-            new_entry_usdcs.push(new_entry_usdc);
-
-            new_pool_shares[i].share_amount =
-                builder.select(update, new_share_amount, new_pool_shares[i].share_amount);
-            new_pool_shares[i].principal_amount =
-                builder.select(update, new_entry_usdc, new_pool_shares[i].principal_amount);
-
-            set_new_entry_usdc = builder.select(update, new_entry_usdc, set_new_entry_usdc);
-
-            success = builder.or(success, update);
-        }
-
-        // If not found, try to find an empty pool share
-        for i in 0..SHARES_LIST_SIZE {
-            let is_pool_share_empty = builder.is_zero(new_pool_shares[i].share_amount);
-            let is_enabled_and_empty = builder.and(is_enabled, is_pool_share_empty);
-            let update = builder.and_not(is_enabled_and_empty, success);
-
-            new_pool_shares[i].share_amount = builder.select(
-                update,
-                new_share_amounts[i],
-                new_pool_shares[i].share_amount,
-            );
-            new_pool_shares[i].principal_amount = builder.select(
-                update,
-                new_entry_usdcs[i],
-                new_pool_shares[i].principal_amount,
-            );
-            new_pool_shares[i].public_pool_index =
-                builder.select(update, pool_index, new_pool_shares[i].public_pool_index);
-
-            set_new_entry_usdc = builder.select(
-                update,
-                new_pool_shares[i].principal_amount,
-                set_new_entry_usdc,
-            );
-
-            success = builder.or(success, update);
-        }
-
-        // Fix the empty hole that might have been created in new_pool_shares, when a pool share is empty
-        // start overriding with the the next pool share
-        let mut use_next = builder._false();
-        let empty_pps = PublicPoolShareTarget::empty(builder, zero);
-        for i in 0..SHARES_LIST_SIZE {
-            let next_pool_share = if i < SHARES_LIST_SIZE - 1 {
-                new_pool_shares[i + 1]
-            } else {
-                empty_pps
-            };
-            let is_pool_share_empty = builder.is_zero(new_pool_shares[i].share_amount);
-            use_next = builder.or(use_next, is_pool_share_empty);
-            new_pool_shares[i] = select_public_pool_share_target(
-                builder,
-                use_next,
-                &next_pool_share,
-                &new_pool_shares[i],
-            );
-        }
-
-        // check if set_new_entry_usdc is less than the maximum allowed entry usdc
-        let max_entry_usdc = builder.constant_u64(MAX_POOL_PRINCIPAL_AMOUNT);
-        let valid_entry_usdc = builder.is_lte(set_new_entry_usdc, max_entry_usdc, 64);
-        success = builder.and(success, valid_entry_usdc);
-        let update_state = builder.and(success, is_enabled);
-        for i in 0..SHARES_LIST_SIZE {
-            self.public_pool_shares[i] = select_public_pool_share_target(
-                builder,
-                update_state,
-                &new_pool_shares[i],
-                &self.public_pool_shares[i],
-            );
-        }
-        builder.conditional_assert_true(is_enabled, success);
-    }
-
-    // Check account has corresponding pool index before calling this.
-    pub fn burn_pool_shares(
-        &mut self,
-        builder: &mut Builder,
-        is_enabled: BoolTarget,
-        pool_index: Target,
-        share_delta: Target,
-        entry_usdc_delta: Target,
-    ) {
-        let zero = builder.zero();
-
-        // Find the pool share that matches the pool index, update the share amount and entry usdc
-        let mut success = builder._false();
-        for i in 0..SHARES_LIST_SIZE {
-            let is_pool_index_equal =
-                builder.is_equal(self.public_pool_shares[i].public_pool_index, pool_index);
-            let is_enabled_and_matching = builder.and(is_enabled, is_pool_index_equal);
-            let update = builder.and_not(is_enabled_and_matching, success);
-
-            let new_share_amount =
-                builder.sub(self.public_pool_shares[i].share_amount, share_delta);
-            let new_entry_usdc = builder.sub(
-                self.public_pool_shares[i].principal_amount,
-                entry_usdc_delta,
-            );
-
-            self.public_pool_shares[i].share_amount = builder.select(
-                update,
-                new_share_amount,
-                self.public_pool_shares[i].share_amount,
-            );
-            self.public_pool_shares[i].principal_amount = builder.select(
-                update,
-                new_entry_usdc,
-                self.public_pool_shares[i].principal_amount,
-            );
-
-            success = builder.or(success, update);
-        }
-
-        // Fix the empty hole that might have been created in pool shares, should current share becomes 0 after burning
-        let mut use_next = builder._false();
-        let empty_pps = PublicPoolShareTarget::empty(builder, zero);
-        for i in 0..SHARES_LIST_SIZE {
-            let next_pool_share = if i < SHARES_LIST_SIZE - 1 {
-                self.public_pool_shares[i + 1]
-            } else {
-                empty_pps
-            };
-            let is_pool_share_empty = builder.is_zero(self.public_pool_shares[i].share_amount);
-            use_next = builder.or(use_next, is_pool_share_empty);
-            self.public_pool_shares[i] = select_public_pool_share_target(
-                builder,
-                use_next,
-                &next_pool_share,
-                &self.public_pool_shares[i],
-            );
-        }
-    }
-
     pub fn apply_pool_share_delta(
         &mut self,
         builder: &mut Builder,
@@ -686,6 +587,7 @@ impl AccountTarget {
         pool_index: Target,
         share_delta: Target,      // Can be negative for burns
         entry_usdc_delta: Target, // Can be negative for burns
+        entry_timestamp_delta: Target,
     ) {
         let zero = builder.zero();
         let old_pool_shares = self.public_pool_shares;
@@ -698,6 +600,7 @@ impl AccountTarget {
             public_pool_index: pool_index,
             share_amount: share_delta,
             principal_amount: entry_usdc_delta,
+            entry_timestamp: entry_timestamp_delta,
         };
         let empty_pool_share = PublicPoolShareTarget::empty(builder, zero);
         let is_share_delta_non_zero = builder.is_not_zero(share_delta);
@@ -750,11 +653,16 @@ impl AccountTarget {
 
             let add_to_share_amount = builder.mul_bool(apply_delta, share_delta);
             let add_to_entry_usdc = builder.mul_bool(apply_delta, entry_usdc_delta);
+            let add_to_entry_timestamp = builder.mul_bool(apply_delta, entry_timestamp_delta);
             self.public_pool_shares[i].share_amount =
                 builder.add(self.public_pool_shares[i].share_amount, add_to_share_amount);
             self.public_pool_shares[i].principal_amount = builder.add(
                 self.public_pool_shares[i].principal_amount,
                 add_to_entry_usdc,
+            );
+            self.public_pool_shares[i].entry_timestamp = builder.add(
+                self.public_pool_shares[i].entry_timestamp,
+                add_to_entry_timestamp,
             );
 
             let is_new_share_amount_empty =
@@ -828,7 +736,6 @@ impl<T: Witness<F> + PartialWitnessCurve<F>, F: PrimeField64 + Extendable<5> + R
         for i in 0..POSITION_LIST_SIZE {
             self.set_position_target(&a.positions[i], &b.positions[i])?;
         }
-        self.set_public_pool_info(&a.public_pool_info, &b.public_pool_info)?;
         for i in 0..b.public_pool_shares.len() {
             self.set_public_pool_share(&a.public_pool_shares[i], &b.public_pool_shares[i])?;
         }
@@ -865,10 +772,14 @@ impl<T: Witness<F> + PartialWitnessCurve<F>, F: PrimeField64 + Extendable<5> + R
             F::from_canonical_i64(b.total_non_cross_order_count),
         )?;
         self.set_target(a.cancel_all_time, F::from_canonical_i64(b.cancel_all_time))?;
+        self.set_public_pool_info(&a.public_pool_info, &b.public_pool_info)?;
         self.set_hash_target(a.api_key_root, b.api_key_root)?;
         self.set_hash_target(a.account_orders_root, b.account_orders_root)?;
         self.set_hash_target(a.asset_root, b.asset_root)?;
         self.set_hash_target(a.aggregated_balances_root, b.aggregated_balances_root)?;
+        for i in 0..b.pending_unlocks.len() {
+            self.set_pending_unlock(&a.pending_unlocks[i], &b.pending_unlocks[i])?;
+        }
 
         Ok(())
     }

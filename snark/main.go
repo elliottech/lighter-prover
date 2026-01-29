@@ -6,10 +6,12 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 
 	"github.com/consensys/gnark-crypto/ecc"
+	kzg_bn254 "github.com/consensys/gnark-crypto/ecc/bn254/kzg"
 	"github.com/consensys/gnark-crypto/kzg"
 	"github.com/consensys/gnark/backend/plonk"
 	"github.com/consensys/gnark/constraint"
@@ -71,9 +73,10 @@ func main() {
 		panic("srs path is required")
 	}
 
-	var srs kzg.SRS = kzg.NewSRS(ecc.BN254)
+	var srs = &kzg_bn254.SRS{}
+	var srsLagrange kzg.SRS = kzg.NewSRS(ecc.BN254)
 	if _, err := os.Stat(*srsPath); os.IsNotExist(err) {
-		trusted_setup.DownloadAndSaveAztecIgnitionSrs(174, *srsPath)
+		trusted_setup.DownloadAndSaveAztecIgnitionSrs(174, *srsPath, false)
 	}
 
 	if _, err := os.Stat(*srsPath); os.IsNotExist(err) {
@@ -84,14 +87,24 @@ func main() {
 		panic(fmt.Errorf("failed to open srs file: %v", err))
 	}
 	defer srsFile.Close()
-	_, err = srs.ReadFrom(srsFile)
+	_, err = builder.ReadFromSRSFile(srs, srsFile, false)
 	if err != nil {
 		panic(fmt.Errorf("failed to read srs file: %v", err))
 	}
+	_, err = srsFile.Seek(0, io.SeekStart)
+	if err != nil {
+		panic(fmt.Errorf("failed to seek srs file: %v", err))
+	}
+	_, err = builder.ReadFromSRSFile(srsLagrange.(*kzg_bn254.SRS), srsFile, false)
+	if err != nil {
+		panic(fmt.Errorf("failed to read srs lagrange file: %v", err))
+	}
+	// convert G1 points to lagrange form
+	srsLagrange = builder.ToLagrange(r1CS, srs)
 
 	var vk plonk.VerifyingKey
 	var pk plonk.ProvingKey
-	pk, vk, err = plonk.Setup(r1CS, srs)
+	pk, vk, err = plonk.Setup(r1CS, srs, srsLagrange)
 	if err != nil {
 		panic(fmt.Errorf("failed to setup plonk: %v", err))
 	}

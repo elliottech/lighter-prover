@@ -60,6 +60,9 @@ use crate::transactions::internal_exit_position::{
 use crate::transactions::internal_liquidate_position::{
     InternalLiquidatePositionTxTarget, InternalLiquidatePositionTxTargetWitness,
 };
+use crate::transactions::internal_pending_unlock::{
+    InternalPendingUnlockTxTarget, InternalPendingUnlockTxTargetWitness,
+};
 use crate::transactions::l1_burn_shares::{L1BurnSharesTxTarget, L1BurnSharesTxTargetWitness};
 use crate::transactions::l1_cancel_all_orders::{
     L1CancelAllOrdersTxTarget, L1CancelAllOrdersTxTargetWitness,
@@ -74,6 +77,9 @@ use crate::transactions::l1_create_order::{L1CreateOrderTxTarget, L1CreateOrderT
 use crate::transactions::l1_deposit::{L1DepositTxTarget, L1DepositTxTargetWitness};
 use crate::transactions::l1_register_asset::{
     L1RegisterAssetTxTarget, L1RegisterAssetTxTargetWitness,
+};
+use crate::transactions::l1_set_system_config::{
+    L1SetSystemConfigTxTarget, L1SetSystemConfigTxTargetWitness,
 };
 use crate::transactions::l1_update_asset::{L1UpdateAssetTxTarget, L1UpdateAssetTxTargetWitness};
 use crate::transactions::l1_update_market::{
@@ -100,6 +106,9 @@ use crate::transactions::l2_create_staking_pool::{
 };
 use crate::transactions::l2_create_sub_account::{
     L2CreateSubAccountTxTarget, L2CreateSubAccountTxTargetWitness,
+};
+use crate::transactions::l2_force_burn_shares::{
+    L2ForceBurnSharesTxTarget, L2ForceBurnSharesTxTargetWitness,
 };
 use crate::transactions::l2_mint_shares::{L2MintSharesTxTarget, L2MintSharesTxTargetWitness};
 use crate::transactions::l2_modify_order::{L2ModifyOrderTxTarget, L2ModifyOrderTxTargetWitness};
@@ -139,6 +148,7 @@ use crate::types::order_book_node::{OrderBookNodeTarget, OrderBookNodeTargetWitn
 use crate::types::public_pool::PublicPoolShareTarget;
 use crate::types::register::{BaseRegisterInfoTarget, RegisterStackTarget};
 use crate::types::risk_info::RiskInfoTarget;
+use crate::types::system_config::SystemConfigTarget;
 use crate::types::tx_state::TxState;
 use crate::types::tx_type::{TxTypeTargets, TxTypeVerifyTargets};
 use crate::uint::u8::{CircuitBuilderU8, U8Target};
@@ -161,6 +171,7 @@ pub struct TxTarget {
     pub l1_burn_shares_tx_target: TransactionTarget<L1BurnSharesTxTarget>,
     pub l1_register_asset_tx_target: TransactionTarget<L1RegisterAssetTxTarget>,
     pub l1_update_asset_tx_target: TransactionTarget<L1UpdateAssetTxTarget>,
+    pub l1_set_system_config_tx_target: TransactionTarget<L1SetSystemConfigTxTarget>,
 
     /***********************/
     /*   L2 Transactions   */
@@ -183,6 +194,7 @@ pub struct TxTarget {
     pub l2_create_staking_pool_tx_target: TransactionTarget<L2CreateStakingPoolTxTarget>,
     pub l2_stake_assets_tx_target: TransactionTarget<L2StakeAssetsTxTarget>,
     pub l2_unstake_assets_tx_target: TransactionTarget<L2UnstakeAssetsTxTarget>,
+    pub l2_force_burn_shares_tx_target: TransactionTarget<L2ForceBurnSharesTxTarget>,
 
     /*************************/
     /* Internal Transactions */
@@ -194,6 +206,7 @@ pub struct TxTarget {
     pub internal_cancel_all_orders_tx_target: TransactionTarget<InternalCancelAllOrdersTxTarget>,
     pub internal_liquidate_position_tx_target: TransactionTarget<InternalLiquidatePositionTxTarget>,
     pub internal_create_order_tx_target: TransactionTarget<InternalCreateOrderTxTarget>,
+    pub internal_pending_unlock_tx_target: TransactionTarget<InternalPendingUnlockTxTarget>,
 
     /***********************/
     /*  Transactions Data  */
@@ -281,6 +294,9 @@ impl TxTarget {
                 builder,
             )),
             l1_update_asset_tx_target: TransactionTarget::new(L1UpdateAssetTxTarget::new(builder)),
+            l1_set_system_config_tx_target: TransactionTarget::new(L1SetSystemConfigTxTarget::new(
+                builder,
+            )),
 
             /***********************/
             /*   L2 Transactions   */
@@ -323,6 +339,9 @@ impl TxTarget {
             l2_unstake_assets_tx_target: TransactionTarget::new(L2UnstakeAssetsTxTarget::new(
                 builder,
             )),
+            l2_force_burn_shares_tx_target: TransactionTarget::new(L2ForceBurnSharesTxTarget::new(
+                builder,
+            )),
 
             /*************************/
             /* Internal Transactions */
@@ -347,6 +366,9 @@ impl TxTarget {
             ),
             internal_create_order_tx_target: TransactionTarget::new(
                 InternalCreateOrderTxTarget::new(builder),
+            ),
+            internal_pending_unlock_tx_target: TransactionTarget::new(
+                InternalPendingUnlockTxTarget::new(builder),
             ),
 
             /***********************/
@@ -380,7 +402,7 @@ impl TxTarget {
             api_key_before: ApiKeyTarget::new(builder),
             account_order_before: AccountOrderTarget::new(builder),
             market_before: MarketTarget::new(builder),
-            order_before: OrderTarget::new(builder),
+            order_before: OrderTarget::new(builder), 
             asset_indices: core::array::from_fn(|_| builder.add_virtual_target()),
 
             /*****************************/
@@ -430,6 +452,7 @@ impl TxTarget {
         chain_id: u32,
         builder: &mut Builder,
         block_created_at: Target,
+        system_config_before: &SystemConfigTarget,
         register_stack_before: &RegisterStackTarget,
         all_assets_before: &[AssetTarget; ASSET_LIST_SIZE],
         all_market_details_before: &[MarketDetailsTarget; POSITION_LIST_SIZE],
@@ -442,6 +465,7 @@ impl TxTarget {
         BoolTarget,                                                // is there a priority operation
         [U8Target; ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE], // on chain operation's public data
         BoolTarget,                                          // is there a on chain operation
+        SystemConfigTarget,                                  // system config after
         RegisterStackTarget,                                 // register stack after
         [AssetTarget; ASSET_LIST_SIZE],                      // all assets after
         [MarketDetailsTarget; POSITION_LIST_SIZE],           // all market details after
@@ -501,9 +525,17 @@ impl TxTarget {
             self.order_before.price_index,
             self.order_before.nonce_index,
         );
-        let public_pool_share_before = self.accounts_before[OWNER_ACCOUNT_ID]
-            .get_public_pool_share(builder, self.accounts_before[SUB_ACCOUNT_ID].account_index);
 
+        let public_pool_shares_before: [PublicPoolShareTarget; NB_POSSIBLE_POOL_SHARE_SLOTS] = [
+            self.accounts_before[OWNER_OR_POOL_ACCOUNT_ID_1].get_public_pool_share(
+                builder,
+                self.accounts_before[OWNER_OR_POOL_ACCOUNT_ID_2].account_index,
+            ),
+            self.accounts_before[OWNER_OR_POOL_ACCOUNT_ID_2].get_public_pool_share(
+                builder,
+                self.accounts_before[OWNER_OR_POOL_ACCOUNT_ID_1].account_index,
+            ),
+        ];
         let (mut position_bucket_hashes, old_account_hashes, old_account_empty_infos) =
             self.get_old_account_hashes(builder);
         let old_account_asset_hashes = self.get_old_asset_hashes(builder);
@@ -517,6 +549,7 @@ impl TxTarget {
             new_instructions: [BaseRegisterInfoTarget::empty(builder); NEW_INSTRUCTIONS_MAX_SIZE],
             new_instructions_count: builder.zero(),
             register_stack: *register_stack_before,
+            system_config: *system_config_before,
             accounts: self.accounts_before.clone(),
             accounts_delta: self.accounts_delta_before.clone(),
             is_new_account: old_account_empty_infos,
@@ -550,8 +583,8 @@ impl TxTarget {
                 self.accounts_before[MAKER_ACCOUNT_ID].account_index,
             ),
             taker_client_order_proof: self.account_orders_tree_merkle_proof[2],
-            public_pool_share: public_pool_share_before,
-            apply_pool_share_delta_flag: builder._false(),
+            public_pool_shares: public_pool_shares_before,
+            apply_pool_share_delta_flag: builder.zero(),
         };
 
         self.validate_asset_indices(builder, tx_state);
@@ -587,7 +620,7 @@ impl TxTarget {
 
         self.apply_asset_deltas(builder, tx_state);
 
-        self.apply_public_pool_share_delta(builder, tx_state, &public_pool_share_before);
+        self.apply_public_pool_share_delta(builder, tx_state, &public_pool_shares_before);
 
         self.apply_pool_info_delta(builder, tx_state);
 
@@ -638,6 +671,7 @@ impl TxTarget {
             priority_operations_pub_data_exists,
             on_chain_operations_pub_data,
             on_chain_pub_data_exists,
+            tx_state.system_config,
             tx_state.register_stack,
             current_all_assets,
             current_all_market_details,
@@ -652,6 +686,7 @@ impl TxTarget {
         //     builder._false(),
         //     [builder.zero_u8(); ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE],
         //     builder._false(),
+        //     SystemConfigTarget::empty(builder),
         //     RegisterStackTarget::empty(builder),
         //     all_assets_before.clone(),
         //     all_market_details_before.clone(),
@@ -732,16 +767,32 @@ impl TxTarget {
 
     fn apply_asset_deltas(&self, builder: &mut Builder, tx_state: &mut TxState) {
         for i in 0..NB_ACCOUNTS_PER_TX {
+            let old_lit_unlock = self.accounts_before[i].get_total_unlock_amount(builder);
+            let new_lit_unlock = tx_state.accounts[i].get_total_unlock_amount(builder);
+
             for j in 0..NB_ASSETS_PER_TX {
-                let old_extended_balance =
-                    builder.biguint_to_bigint(&self.account_assets_before[i][j].balance);
+                let is_lit = builder.is_equal_constant(tx_state.asset_indices[j], LIT_ASSET_INDEX);
+
+                let add_to_old_balance = builder.mul_biguint_by_bool(&old_lit_unlock, is_lit);
+                let old_extended_balance = builder.add_biguint_non_carry(
+                    &self.account_assets_before[i][j].balance,
+                    &add_to_old_balance,
+                    BIG_U96_LIMBS,
+                );
+                let old_extended_balance = builder.biguint_to_bigint(&old_extended_balance);
                 let old_balance = builder.euclidian_div_by_biguint(
                     &old_extended_balance,
                     &tx_state.assets[j].extension_multiplier,
                     BIG_U96_LIMBS,
                 );
-                let new_extended_balance =
-                    builder.biguint_to_bigint(&tx_state.account_assets[i][j].balance);
+
+                let add_to_new_balance = builder.mul_biguint_by_bool(&new_lit_unlock, is_lit);
+                let new_extended_balance = builder.add_biguint_non_carry(
+                    &tx_state.account_assets[i][j].balance,
+                    &add_to_new_balance,
+                    BIG_U96_LIMBS,
+                );
+                let new_extended_balance = builder.biguint_to_bigint(&new_extended_balance);
                 let new_balance = builder.euclidian_div_by_biguint(
                     &new_extended_balance,
                     &tx_state.assets[j].extension_multiplier,
@@ -874,31 +925,41 @@ impl TxTarget {
         &self,
         builder: &mut Builder,
         tx_state: &mut TxState,
-        public_pool_share_before: &PublicPoolShareTarget,
+        public_pool_shares_before: &[PublicPoolShareTarget; NB_POSSIBLE_POOL_SHARE_SLOTS],
     ) {
-        let share_amount_delta = builder.sub(
-            tx_state.public_pool_share.share_amount,
-            public_pool_share_before.share_amount,
-        );
+        // Flag is 1 -> Owner is share owner and sub-account is pool
+        // Flag is 2 -> Sub-account is share owner and owner is pool
+        for id in [OWNER_ACCOUNT_ID, SUB_ACCOUNT_ID] {
+            let flag =
+                builder.is_equal_constant(tx_state.apply_pool_share_delta_flag, (id + 1) as u64);
 
-        tx_state.accounts_delta[OWNER_ACCOUNT_ID].apply_pool_pub_data_share_delta(
-            builder,
-            tx_state.apply_pool_share_delta_flag,
-            tx_state.public_pool_share.public_pool_index,
-            SignedTarget::new_unsafe(share_amount_delta),
-        );
-
-        let entry_usdc_delta = builder.sub(
-            tx_state.public_pool_share.principal_amount,
-            public_pool_share_before.principal_amount,
-        );
-        tx_state.accounts[OWNER_ACCOUNT_ID].apply_pool_share_delta(
-            builder,
-            tx_state.apply_pool_share_delta_flag,
-            tx_state.public_pool_share.public_pool_index,
-            share_amount_delta,
-            entry_usdc_delta,
-        );
+            let share_amount_delta = builder.sub(
+                tx_state.public_pool_shares[id].share_amount,
+                public_pool_shares_before[id].share_amount,
+            );
+            tx_state.accounts_delta[id].apply_pool_pub_data_share_delta(
+                builder,
+                flag,
+                tx_state.public_pool_shares[id].public_pool_index,
+                SignedTarget::new_unsafe(share_amount_delta),
+            );
+            let entry_usdc_delta = builder.sub(
+                tx_state.public_pool_shares[id].principal_amount,
+                public_pool_shares_before[id].principal_amount,
+            );
+            let entry_timestamp_delta = builder.sub(
+                tx_state.public_pool_shares[id].entry_timestamp,
+                public_pool_shares_before[id].entry_timestamp,
+            );
+            tx_state.accounts[id].apply_pool_share_delta(
+                builder,
+                flag,
+                tx_state.public_pool_shares[id].public_pool_index,
+                share_amount_delta,
+                entry_usdc_delta,
+                entry_timestamp_delta,
+            );
+        }
     }
 
     fn apply_pool_info_delta(&self, builder: &mut Builder, tx_state: &mut TxState) {
@@ -1814,6 +1875,18 @@ impl TxTarget {
             selected_hash,
         );
 
+        let l2_force_burn_shares_tx_hash = self.l2_force_burn_shares_tx_target.hash(
+            builder,
+            self.nonce,
+            self.expired_at,
+            chain_id,
+        );
+        selected_hash = builder.select_quintic_ext(
+            tx_type.is_l2_force_burn_shares,
+            l2_force_burn_shares_tx_hash,
+            selected_hash,
+        );
+
         selected_hash
     }
 
@@ -1878,6 +1951,8 @@ impl TxTarget {
             .verify(builder, tx_type, tx_state);
         self.l1_update_asset_tx_target
             .verify(builder, tx_type, tx_state);
+        self.l1_set_system_config_tx_target
+            .verify(builder, tx_type, tx_state);
 
         /***********************/
         /*   L2 Transactions   */
@@ -1918,6 +1993,8 @@ impl TxTarget {
             .verify(builder, tx_type, tx_state);
         self.l2_unstake_assets_tx_target
             .verify(builder, tx_type, tx_state);
+        self.l2_force_burn_shares_tx_target
+            .verify(builder, tx_type, tx_state);
 
         /*************************/
         /* Internal Transactions */
@@ -1935,6 +2012,8 @@ impl TxTarget {
         self.internal_liquidate_position_tx_target
             .verify(builder, tx_type, tx_state);
         self.internal_create_order_tx_target
+            .verify(builder, tx_type, tx_state);
+        self.internal_pending_unlock_tx_target
             .verify(builder, tx_type, tx_state);
     }
 
@@ -1997,6 +2076,11 @@ impl TxTarget {
             .l1_update_asset_tx_target
             .priority_operations_pub_data(builder);
         result = builder.select_arr_u8(exists, &l1_update_asset, &result);
+
+        let (exists, l1_set_system_config) = self
+            .l1_set_system_config_tx_target
+            .priority_operations_pub_data(builder);
+        result = builder.select_arr_u8(exists, &l1_set_system_config, &result);
 
         // Instead of taking ORs of `exists` values, we can use `tx_type.is_layer1` because every l1 tx has priority operation pub data
         (tx_type.is_layer1, result)
@@ -2067,6 +2151,7 @@ impl TxTarget {
         self.l1_burn_shares_tx_target.apply(builder, tx_state);
         self.l1_register_asset_tx_target.apply(builder, tx_state);
         self.l1_update_asset_tx_target.apply(builder, tx_state);
+        self.l1_set_system_config_tx_target.apply(builder, tx_state);
 
         /***********************/
         /*   L2 Transactions   */
@@ -2094,6 +2179,7 @@ impl TxTarget {
             .apply(builder, tx_state);
         self.l2_stake_assets_tx_target.apply(builder, tx_state);
         self.l2_unstake_assets_tx_target.apply(builder, tx_state);
+        self.l2_force_burn_shares_tx_target.apply(builder, tx_state);
 
         /*************************/
         /* Internal Transactions */
@@ -2109,6 +2195,8 @@ impl TxTarget {
         self.internal_liquidate_position_tx_target
             .apply(builder, tx_state);
         self.internal_create_order_tx_target
+            .apply(builder, tx_state);
+        self.internal_pending_unlock_tx_target
             .apply(builder, tx_state);
 
         // Increase ApiKey Nonce for all Layer2 transactions
@@ -2344,6 +2432,11 @@ impl<T: Witness<F> + PartialWitnessCurve<F>, F: PrimeField64 + Extendable<5> + R
             &b.l1_update_asset_tx,
         )?;
 
+        self.set_l1_set_system_config_tx_target(
+            &a.l1_set_system_config_tx_target.inner,
+            &b.l1_set_system_config_tx,
+        )?;
+
         /***********************/
         /*   L2 Transactions   */
         /***********************/
@@ -2407,6 +2500,10 @@ impl<T: Witness<F> + PartialWitnessCurve<F>, F: PrimeField64 + Extendable<5> + R
             &a.l2_unstake_assets_tx_target.inner,
             &b.l2_unstake_assets_tx,
         )?;
+        self.set_l2_force_burn_shares_tx_target(
+            &a.l2_force_burn_shares_tx_target.inner,
+            &b.l2_force_burn_shares_tx,
+        )?;
 
         /*************************/
         /* Internal Transactions */
@@ -2438,6 +2535,10 @@ impl<T: Witness<F> + PartialWitnessCurve<F>, F: PrimeField64 + Extendable<5> + R
         self.set_internal_create_order_tx_target(
             &a.internal_create_order_tx_target.inner,
             &b.internal_create_order_tx,
+        )?;
+        self.set_internal_pending_unlock_tx_target(
+            &a.internal_pending_unlock_tx_target.inner,
+            &b.internal_pending_unlock_tx,
         )?;
 
         /***********************/

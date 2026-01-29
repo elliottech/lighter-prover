@@ -240,7 +240,7 @@ impl Apply for L1WithdrawTxTarget {
         tx_state.accounts[OWNER_ACCOUNT_ID].apply_collateral_delta(
             builder,
             perps_flag,
-            collateral_delta,
+            &collateral_delta,
         );
 
         self.success

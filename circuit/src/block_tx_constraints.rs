@@ -31,6 +31,7 @@ use crate::types::market_details::{
     MarketDetailsTarget, MarketDetailsWitness, connect_market_details,
 };
 use crate::types::register::{RegisterInfoTargetWitness, RegisterStackTarget};
+use crate::types::system_config::{SystemConfigTarget, SystemConfigTargetWitness};
 use crate::types::transfer::TransferMessageTarget;
 use crate::uint::u8::{CircuitBuilderU8, U8Target};
 
@@ -70,6 +71,7 @@ pub struct BlockTxTarget {
     /***********************/
     /*  COMMON STATE DATA  */
     /***********************/
+    pub old_system_config: SystemConfigTarget,
     pub register_stack_before: RegisterStackTarget,
     pub all_assets_before: [AssetTarget; ASSET_LIST_SIZE],
     pub all_market_details_before: [MarketDetailsTarget; POSITION_LIST_SIZE],
@@ -84,6 +86,7 @@ pub struct BlockTxTarget {
     /***************************/
     /*  NEW COMMON STATE DATA  */
     /***************************/
+    pub new_system_config: SystemConfigTarget,
     pub register_stack_after: RegisterStackTarget,
     pub all_assets_after: [AssetTarget; ASSET_LIST_SIZE],
     pub all_market_details_after: [MarketDetailsTarget; POSITION_LIST_SIZE],
@@ -128,6 +131,7 @@ impl Circuit<C, F, D> for BlockTxCircuit {
             on_chain_operations_pub_data,
             priority_operations_count,
             priority_operations_pub_data,
+            new_system_config,
             register_stack_after,
             all_assets_after,
             all_market_details_after,
@@ -143,6 +147,7 @@ impl Circuit<C, F, D> for BlockTxCircuit {
             account_pub_data_tree_root_after,
             account_delta_tree_root_after,
             market_tree_root_after,
+            &new_system_config,
             &register_stack_after,
             &all_assets_after,
             &all_market_details_after,
@@ -180,6 +185,7 @@ impl Circuit<C, F, D> for BlockTxCircuit {
 
         pw.set_target(target.created_at, F::from_canonical_i64(block.created_at))?;
 
+        pw.set_system_config_target(&target.old_system_config, &block.old_system_config)?;
         pw.set_register_info_target(&target.register_stack_before, &block.register_stack_before)?;
         target
             .all_assets_before
@@ -222,6 +228,7 @@ impl BlockTxCircuit {
             target: BlockTxTarget {
                 created_at: builder.add_virtual_target(),
 
+                old_system_config: SystemConfigTarget::new(&mut builder),
                 register_stack_before: RegisterStackTarget::new(&mut builder),
                 all_assets_before: (0..ASSET_LIST_SIZE)
                     .map(|_| AssetTarget::new(&mut builder))
@@ -239,6 +246,7 @@ impl BlockTxCircuit {
                 old_account_delta_tree_root: builder.add_virtual_hash(),
                 old_market_tree_root: builder.add_virtual_hash(),
 
+                new_system_config: SystemConfigTarget::new(&mut builder),
                 register_stack_after: RegisterStackTarget::new(&mut builder),
                 all_assets_after: (0..ASSET_LIST_SIZE)
                     .map(|_| AssetTarget::new(&mut builder))
@@ -300,6 +308,11 @@ impl BlockTxCircuit {
                 market.register_public_input(&mut self.builder);
             });
 
+        // Old system config
+        self.target
+            .old_system_config
+            .register_public_input(&mut self.builder);
+
         // Old register stack
         self.target
             .register_stack_before
@@ -355,6 +368,11 @@ impl BlockTxCircuit {
                 self.builder.register_public_u8_input(byte);
             });
 
+        // New system config
+        self.target
+            .new_system_config
+            .register_public_input(&mut self.builder);
+
         // New register stack
         self.target
             .register_stack_after
@@ -370,6 +388,7 @@ impl BlockTxCircuit {
         [U8Target; ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE], // on chain operations public data
         Target,                                              // priority operations count
         [U8Target; MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX], // priority operations public data
+        SystemConfigTarget,                                        // new system config
         RegisterStackTarget,                                       // new register stack
         [AssetTarget; ASSET_LIST_SIZE],                            // new assets
         [MarketDetailsTarget; POSITION_LIST_SIZE],                 // new market details
@@ -392,6 +411,7 @@ impl BlockTxCircuit {
         let mut priority_operations_pub_data =
             [self.builder.zero_u8(); MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX];
 
+        let mut current_system_config = self.target.old_system_config;
         let mut current_register_stack = self.target.register_stack_before;
         let mut current_all_assets = self.target.all_assets_before.clone();
         let mut current_all_market_details = self.target.all_market_details_before.clone();
@@ -409,6 +429,7 @@ impl BlockTxCircuit {
                 priority_operations_pub_data_exists,
                 tx_on_chain_operations_pub_data,
                 on_chain_pub_data_exists,
+                new_system_config,
                 register_stack_after,
                 all_assets_after,
                 all_market_details_after,
@@ -421,6 +442,7 @@ impl BlockTxCircuit {
                 chain_id,
                 &mut self.builder,
                 self.target.created_at,
+                &current_system_config,
                 &current_register_stack,
                 &current_all_assets,
                 &current_all_market_details,
@@ -430,6 +452,7 @@ impl BlockTxCircuit {
                 current_market_tree_root,
             );
 
+            current_system_config = new_system_config;
             current_register_stack = register_stack_after;
             current_all_assets = all_assets_after;
             current_all_market_details = all_market_details_after;
@@ -463,6 +486,7 @@ impl BlockTxCircuit {
             on_chain_operations_pub_data,
             priority_operations_count,
             priority_operations_pub_data,
+            current_system_config,
             current_register_stack,
             current_all_assets,
             current_all_market_details,
@@ -480,6 +504,7 @@ impl BlockTxCircuit {
         new_account_pub_data_tree_root: HashOutTarget,
         new_account_delta_tree_root: HashOutTarget,
         new_market_tree_root: HashOutTarget,
+        new_system_config: &SystemConfigTarget,
         register_stack_after: &RegisterStackTarget,
         all_assets_after: &[AssetTarget; ASSET_LIST_SIZE],
         all_market_details_after: &[MarketDetailsTarget; POSITION_LIST_SIZE],
@@ -511,7 +536,10 @@ impl BlockTxCircuit {
             self.target.new_account_delta_tree_root,
         );
 
-        // Connect new register stack and market details to block witness
+        // Connect new register stack, new system config and new market details to block witness
+        self.target
+            .new_system_config
+            .connect(&mut self.builder, new_system_config);
         self.target
             .register_stack_after
             .connect(&mut self.builder, register_stack_after);

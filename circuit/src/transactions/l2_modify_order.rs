@@ -411,12 +411,11 @@ impl Verify for L2ModifyOrderTxTarget {
 
         // Spot balance check
         {
-            let flag = builder.and_not(self.success, self.is_perps_market);
+            let spot_success_flag = builder.and_not(self.success, self.is_perps_market);
 
             // Check if the new base amount will exceed the matched base amount (initial - remaining)
             // If so, we calculate old and new locked balances and see if the available asset balance
             // allows that to happen.
-
             let matched_base_amount = builder.sub(
                 tx_state.account_order.initial_base_amount,
                 tx_state.account_order.remaining_base_amount,
@@ -426,9 +425,11 @@ impl Verify for L2ModifyOrderTxTarget {
                 matched_base_amount,
                 ORDER_BASE_AMOUNT_BITS,
             );
+            let flag = builder.and(spot_success_flag, new_base_amount_gt_matched_amount);
 
             let (old_locked_amount, ask_asset_index) = get_locked_amount_and_ask_asset_index(
                 builder,
+                flag,
                 &tx_state.market,
                 tx_state.account_order.remaining_base_amount,
                 tx_state.account_order.price,
@@ -438,6 +439,7 @@ impl Verify for L2ModifyOrderTxTarget {
             let new_remaining_base_amount = builder.sub(self.base_amount, matched_base_amount);
             let (new_locked_amount, _) = get_locked_amount_and_ask_asset_index(
                 builder,
+                flag,
                 &tx_state.market,
                 new_remaining_base_amount,
                 self.price,
@@ -465,12 +467,8 @@ impl Verify for L2ModifyOrderTxTarget {
             let not_enough_available_balance =
                 builder.is_lt_biguint(&available_balance, &locked_amount_delta);
 
-            let should_be_false = builder.multi_and(&[
-                flag,
-                new_base_amount_gt_matched_amount,
-                new_locked_gte_old,
-                not_enough_available_balance,
-            ]);
+            let should_be_false =
+                builder.multi_and(&[flag, new_locked_gte_old, not_enough_available_balance]);
 
             builder.conditional_assert_false(self.success, should_be_false);
         }

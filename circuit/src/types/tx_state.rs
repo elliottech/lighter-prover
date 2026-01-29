@@ -21,7 +21,8 @@ use crate::types::account_position::AccountPositionTarget;
 use crate::types::asset::AssetTarget;
 use crate::types::config::BIG_U96_LIMBS;
 use crate::types::constants::{
-    NB_ACCOUNTS_PER_TX, NB_ASSETS_PER_TX, ORDER_BASE_AMOUNT_BITS, ORDER_BOOK_MERKLE_LEVELS,
+    NB_ACCOUNTS_PER_TX, NB_ASSETS_PER_TX, NB_POSSIBLE_POOL_SHARE_SLOTS, ORDER_BASE_AMOUNT_BITS,
+    ORDER_BOOK_MERKLE_LEVELS,
 };
 use crate::types::market::MarketTarget;
 use crate::types::market_details::MarketDetailsTarget;
@@ -30,12 +31,14 @@ use crate::types::order_book_node::OrderBookNodeTarget;
 use crate::types::public_pool::PublicPoolShareTarget;
 use crate::types::register::BaseRegisterInfoTarget;
 use crate::types::risk_info::RiskInfoTarget;
+use crate::types::system_config::SystemConfigTarget;
 
 pub struct TxState {
     /****************/
     /* State Leaves */
     /****************/
     pub new_instructions: [BaseRegisterInfoTarget; NEW_INSTRUCTIONS_MAX_SIZE],
+    pub system_config: SystemConfigTarget,
     pub new_instructions_count: Target,
     pub register_stack: RegisterStackTarget,
     pub api_key: ApiKeyTarget,
@@ -66,13 +69,16 @@ pub struct TxState {
     pub fee_account_is_taker: BoolTarget,
     pub fee_account_is_maker: BoolTarget,
     pub taker_client_order_proof: [HashOutTarget; ACCOUNT_ORDERS_MERKLE_LEVELS],
-    pub public_pool_share: PublicPoolShareTarget,
-    pub apply_pool_share_delta_flag: BoolTarget,
+    // public_pool_shares[0] is the pool share of the first account into second account,
+    // public_pool_shares[1] is the pool share of the second account into first account, if either account is a pool
+    pub public_pool_shares: [PublicPoolShareTarget; NB_POSSIBLE_POOL_SHARE_SLOTS],
+    pub apply_pool_share_delta_flag: Target, // for when pool share comes from the second account instead of the first
 }
 
 impl Default for TxState {
     fn default() -> Self {
         Self {
+            system_config: SystemConfigTarget::default(),
             new_instructions: [BaseRegisterInfoTarget::default(); NEW_INSTRUCTIONS_MAX_SIZE],
             new_instructions_count: Target::default(),
             register_stack: RegisterStackTarget::default(),
@@ -104,8 +110,8 @@ impl Default for TxState {
             taker_client_order_proof: core::array::from_fn(|_| HashOutTarget {
                 elements: core::array::from_fn(|_| Target::default()),
             }),
-            public_pool_share: PublicPoolShareTarget::default(),
-            apply_pool_share_delta_flag: BoolTarget::default(),
+            public_pool_shares: core::array::from_fn(|_| PublicPoolShareTarget::default()),
+            apply_pool_share_delta_flag: Target::default(),
         }
     }
 }

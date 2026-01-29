@@ -1688,6 +1688,7 @@ pub fn decrement_order_count_in_place(
 
 pub fn get_locked_amount_and_ask_asset_index(
     builder: &mut Builder,
+    is_enabled: BoolTarget,
     market: &MarketTarget,
     base_amount: Target,
     price: Target,
@@ -1699,18 +1700,18 @@ pub fn get_locked_amount_and_ask_asset_index(
             let quote_extension_multiplier_big =
                 builder.target_to_biguint(market.quote_extension_multiplier);
             let price_big = builder.target_to_biguint_single_limb_unsafe(price);
-            builder.mul_biguint_non_carry(
-                &price_big,
-                &quote_extension_multiplier_big,
-                BIG_U96_LIMBS,
-            )
+            builder.mul_biguint(&price_big, &quote_extension_multiplier_big)
         };
         builder.select_biguint(is_ask, &ask_multiplier, &bid_multiplier)
     };
     let base_amount_big = builder.target_to_biguint(base_amount);
 
+    let locked_amount = builder.mul_biguint(&base_amount_big, &multiplier);
+    let (success, locked_amount) = builder.try_trim_biguint(&locked_amount, BIG_U96_LIMBS);
+    builder.conditional_assert_true(is_enabled, success);
+
     (
-        builder.mul_biguint(&base_amount_big, &multiplier),
+        locked_amount,
         builder.select(is_ask, market.base_asset_id, market.quote_asset_id),
     )
 }
@@ -1724,6 +1725,7 @@ pub fn increment_locked_balance_for_order(
 ) {
     let (locked_amount, ask_asset_index) = get_locked_amount_and_ask_asset_index(
         builder,
+        is_enabled,
         market,
         account_order.remaining_base_amount,
         account_order.price,
@@ -1757,8 +1759,14 @@ fn decrement_locked_balance_for_partial_order(
     price: Target,
     account_assets: &mut [AccountAssetTarget; NB_ASSETS_PER_TX],
 ) {
-    let (locked_amount, ask_asset_index) =
-        get_locked_amount_and_ask_asset_index(builder, market, base_amount, price, is_ask);
+    let (locked_amount, ask_asset_index) = get_locked_amount_and_ask_asset_index(
+        builder,
+        is_enabled,
+        market,
+        base_amount,
+        price,
+        is_ask,
+    );
     let mut asset_found = builder._false();
 
     for asset in account_assets.iter_mut() {
@@ -1787,6 +1795,7 @@ pub fn decrement_locked_balance_for_order(
     let mut asset_found = builder._false();
     let (locked_amount, ask_asset_index) = get_locked_amount_and_ask_asset_index(
         builder,
+        is_enabled,
         market,
         account_order.remaining_base_amount,
         account_order.price,

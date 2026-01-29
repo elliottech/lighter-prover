@@ -13,6 +13,7 @@
 #![allow(clippy::just_underscores_and_digits)]
 #![allow(clippy::manual_is_multiple_of)]
 #![allow(clippy::manual_div_ceil)]
+#![allow(clippy::get_first)]
 
 #[macro_use(
     read_gate_impl,
