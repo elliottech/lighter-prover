@@ -7,11 +7,13 @@ use plonky2::iop::target::{BoolTarget, Target};
 use plonky2::iop::witness::Witness;
 use serde::Deserialize;
 
+use crate::bigint::bigint::CircuitBuilderBigInt;
 use crate::bigint::biguint::CircuitBuilderBiguint;
 use crate::bigint::comparison::CircuitBuilderBiguintSubtractiveComparison;
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::comparison::CircuitBuilderSubtractiveComparison;
 use crate::tx_interface::{Apply, Verify};
+use crate::types::account::AccountTarget;
 use crate::types::config::{BIG_U96_LIMBS, Builder};
 use crate::types::constants::*;
 use crate::types::tx_state::TxState;
@@ -99,15 +101,17 @@ impl Apply for InternalPendingUnlockTxTarget {
     fn apply(&mut self, builder: &mut Builder, tx_state: &mut TxState) -> BoolTarget {
         let pending_unlock =
             tx_state.accounts[OWNER_ACCOUNT_ID].pop_pending_unlock(builder, self.success);
-        let new_extended_balance = builder.add_biguint_non_carry(
-            &tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID].balance,
-            &pending_unlock.amount,
-            BIG_U96_LIMBS,
-        );
-        tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID].balance = builder.select_biguint(
+        let asset_amount = builder.biguint_to_bigint(&pending_unlock.amount);
+
+        AccountTarget::apply_asset_delta_const(
+            builder,
             self.success,
-            &new_extended_balance,
-            &tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID].balance,
+            PRODUCT_TYPE_SPOT,
+            &mut tx_state.accounts[OWNER_ACCOUNT_ID],
+            Some(&mut tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID]),
+            tx_state.is_asset_used_as_margin[OWNER_ACCOUNT_ID][TX_ASSET_ID],
+            &asset_amount,
+            &mut tx_state.strategies[OWNER_ACCOUNT_ID],
         );
 
         self.success

@@ -8,13 +8,16 @@ use plonky2::iop::target::{BoolTarget, Target};
 use plonky2::iop::witness::Witness;
 use serde::Deserialize;
 
-use crate::bigint::bigint::{BigIntTarget, SignTarget};
-use crate::bigint::biguint::{BigUintTarget, CircuitBuilderBiguint};
+use crate::bigint::bigint::{BigIntTarget, CircuitBuilderBigInt};
+use crate::bigint::biguint::CircuitBuilderBiguint;
 use crate::bigint::comparison::CircuitBuilderBiguintSubtractiveComparison;
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::eddsa::gadgets::base_field::QuinticExtensionTarget;
 use crate::eddsa::schnorr::hash_to_quintic_extension_circuit;
-use crate::liquidation::{get_available_collateral, get_shares_asset_value, get_shares_usdc_value};
+use crate::liquidation::{
+    get_available_asset_balance_const, get_shares_asset_value_for_staking_pool,
+    get_shares_usdc_value_for_public_pool,
+};
 use crate::tx_interface::{Apply, TxHash, Verify};
 use crate::types::config::{BIG_U96_LIMBS, Builder, F};
 use crate::types::constants::*;
@@ -50,7 +53,7 @@ pub struct L2MintSharesTxTarget {
     principal_amount: Target,
     new_total_shares: Target,
     new_principal_amount: Target,
-    collateral_to_mint_shares: BigUintTarget,
+    collateral_to_mint_shares: BigIntTarget,
 
     // Output
     success: BoolTarget,
@@ -69,7 +72,7 @@ impl L2MintSharesTxTarget {
             principal_amount: builder.zero(),
             new_total_shares: builder.zero(),
             new_principal_amount: builder.zero(),
-            collateral_to_mint_shares: builder.zero_biguint(),
+            collateral_to_mint_shares: builder.zero_bigint(),
 
             // Output
             success: BoolTarget::default(),
@@ -121,6 +124,13 @@ impl Verify for L2MintSharesTxTarget {
             tx_state.accounts[SUB_ACCOUNT_ID].account_index,
         );
 
+        // First asset always has to be USDC for minting pool shares
+        builder.conditional_assert_eq_constant(
+            is_enabled,
+            tx_state.asset_indices[TX_ASSET_ID],
+            USDC_ASSET_INDEX,
+        );
+
         let is_llp = builder.is_equal(
             self.public_pool_index,
             tx_state.system_config.liquidity_pool_index,
@@ -133,7 +143,7 @@ impl Verify for L2MintSharesTxTarget {
         );
         builder.conditional_assert_eq_constant(
             is_llp_flag,
-            tx_state.asset_indices[TX_ASSET_ID],
+            tx_state.asset_indices[STAKE_ASSET_ID],
             LIT_ASSET_INDEX,
         );
 
@@ -171,12 +181,16 @@ impl Verify for L2MintSharesTxTarget {
         let big_new_total_shares = builder.target_to_biguint(self.new_total_shares);
         builder.range_check_biguint(&big_new_total_shares, MAX_POOL_SHARES_BITS);
 
-        let available_collateral_to_mint_shares = get_available_collateral(
+        let available_collateral_to_mint_shares = get_available_asset_balance_const(
             builder,
+            PRODUCT_TYPE_PERPS,
+            &tx_state.accounts[OWNER_ACCOUNT_ID],
+            &tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID], // usdc
+            tx_state.is_asset_used_as_margin[OWNER_ACCOUNT_ID][TX_ASSET_ID], // usdc
             &tx_state.risk_infos[OWNER_ACCOUNT_ID].cross_risk_parameters,
         );
 
-        self.principal_amount = get_shares_usdc_value(
+        self.principal_amount = get_shares_usdc_value_for_public_pool(
             builder,
             &tx_state.risk_infos[SUB_ACCOUNT_ID].cross_risk_parameters,
             &tx_state.accounts[SUB_ACCOUNT_ID],
@@ -191,16 +205,17 @@ impl Verify for L2MintSharesTxTarget {
         let usdc_to_collateral_multiplier =
             builder.constant_biguint(&BigUint::from(USDC_TO_COLLATERAL_MULTIPLIER));
 
-        self.collateral_to_mint_shares = builder.mul_biguint_non_carry(
+        let collateral_to_mint_shares = builder.mul_biguint_non_carry(
             &big_principal_amount,
             &usdc_to_collateral_multiplier,
             BIG_U96_LIMBS,
         );
         builder.conditional_assert_lte_biguint(
             is_enabled,
-            &self.collateral_to_mint_shares,
+            &collateral_to_mint_shares,
             &available_collateral_to_mint_shares,
         );
+        self.collateral_to_mint_shares = builder.biguint_to_bigint(&collateral_to_mint_shares);
 
         self.is_operator = builder.is_equal(
             tx_state.accounts[OWNER_ACCOUNT_ID].account_index,
@@ -230,7 +245,7 @@ impl Verify for L2MintSharesTxTarget {
 
             // Range check new principal amount only for non-operator
             let new_principal_amount = builder.add(
-                tx_state.public_pool_shares[OWNER_ACCOUNT_ID].principal_amount,
+                tx_state.public_pool_share.principal_amount,
                 self.principal_amount,
             );
             self.new_principal_amount =
@@ -244,7 +259,7 @@ impl Verify for L2MintSharesTxTarget {
                 tx_state.accounts[OWNER_ACCOUNT_ID].account_index,
                 tx_state.accounts[SYSTEM_CONFIG_ACCOUNT_ID].master_account_index,
             );
-            let is_lit_asset_empty = tx_state.assets[TX_ASSET_ID].is_empty(builder);
+            let is_lit_asset_empty = tx_state.assets[STAKE_ASSET_ID].is_empty(builder);
             let is_lit_asset_not_empty = builder.not(is_lit_asset_empty);
 
             let is_staking_pool_nil_account = builder.is_equal_constant(
@@ -268,13 +283,14 @@ impl Verify for L2MintSharesTxTarget {
                 .share_amount;
 
             // stakedLitAmount is in base amount, needs to be divided by 10^lit_decimals to find how many LIT tokens are staked
-            let staked_lit_amount = get_shares_asset_value(
+            let staked_lit_amount = get_shares_asset_value_for_staking_pool(
                 builder,
                 tx_state.accounts[SYSTEM_CONFIG_ACCOUNT_ID]
                     .public_pool_info
                     .total_shares,
-                &tx_state.account_assets[SYSTEM_CONFIG_ACCOUNT_ID][TX_ASSET_ID].balance,
-                &tx_state.assets[TX_ASSET_ID].extension_multiplier,
+                // Because LIT can't be used as margin, we can use asset balance directly without considering unified accounts
+                &tx_state.account_assets[SYSTEM_CONFIG_ACCOUNT_ID][STAKE_ASSET_ID].balance,
+                &tx_state.assets[STAKE_ASSET_ID].extension_multiplier,
                 depositor_staked_lit_shares,
             );
 
@@ -300,31 +316,19 @@ impl Verify for L2MintSharesTxTarget {
 
 impl Apply for L2MintSharesTxTarget {
     fn apply(&mut self, builder: &mut Builder, tx_state: &mut TxState) -> BoolTarget {
-        let zero = builder.zero();
-        let one = builder.one();
-        let neg_one = builder.neg_one();
-
-        let is_big_collateral_amount_zero =
-            builder.is_zero_biguint(&self.collateral_to_mint_shares);
-        let add_sign = builder.select(is_big_collateral_amount_zero, zero, one);
-        let sub_sign = builder.select(is_big_collateral_amount_zero, zero, neg_one);
-
-        // Collateral deltas
-        tx_state.accounts[OWNER_ACCOUNT_ID].apply_collateral_delta(
-            builder,
-            self.success,
-            &BigIntTarget {
-                abs: self.collateral_to_mint_shares.clone(),
-                sign: SignTarget::new_unsafe(sub_sign),
-            },
-        );
         tx_state.accounts[SUB_ACCOUNT_ID].apply_collateral_delta(
             builder,
             self.success,
-            &BigIntTarget {
-                abs: self.collateral_to_mint_shares.clone(),
-                sign: SignTarget::new_unsafe(add_sign),
-            },
+            &self.collateral_to_mint_shares,
+            &mut tx_state.strategies[SUB_ACCOUNT_ID],
+        );
+
+        let neg_collateral_delta = builder.neg_bigint(&self.collateral_to_mint_shares);
+        tx_state.accounts[OWNER_ACCOUNT_ID].apply_collateral_delta(
+            builder,
+            self.success,
+            &neg_collateral_delta,
+            &mut tx_state.strategies[OWNER_ACCOUNT_ID],
         );
 
         // Public pool total share
@@ -342,30 +346,26 @@ impl Apply for L2MintSharesTxTarget {
         {
             let is_success_and_not_operator = builder.and_not(self.success, self.is_operator);
 
-            let new_share_amount = builder.add(
-                tx_state.public_pool_shares[OWNER_ACCOUNT_ID].share_amount,
-                self.share_amount,
-            );
-            tx_state.public_pool_shares[OWNER_ACCOUNT_ID].principal_amount = builder.select(
+            let new_share_amount =
+                builder.add(tx_state.public_pool_share.share_amount, self.share_amount);
+            tx_state.public_pool_share.principal_amount = builder.select(
                 is_success_and_not_operator,
                 self.new_principal_amount,
-                tx_state.public_pool_shares[OWNER_ACCOUNT_ID].principal_amount,
+                tx_state.public_pool_share.principal_amount,
             );
-            tx_state.public_pool_shares[OWNER_ACCOUNT_ID].share_amount = builder.select(
+            tx_state.public_pool_share.share_amount = builder.select(
                 is_success_and_not_operator,
                 new_share_amount,
-                tx_state.public_pool_shares[OWNER_ACCOUNT_ID].share_amount,
+                tx_state.public_pool_share.share_amount,
             );
-            tx_state.public_pool_shares[OWNER_ACCOUNT_ID].entry_timestamp = builder.select(
+            tx_state.public_pool_share.entry_timestamp = builder.select(
                 is_success_and_not_operator,
                 tx_state.block_timestamp,
-                tx_state.public_pool_shares[OWNER_ACCOUNT_ID].entry_timestamp,
+                tx_state.public_pool_share.entry_timestamp,
             );
-            let one = builder.one();
-            tx_state.apply_pool_share_delta_flag = builder.select(
-                is_success_and_not_operator,
-                one,
+            tx_state.apply_pool_share_delta_flag = builder.or(
                 tx_state.apply_pool_share_delta_flag,
+                is_success_and_not_operator,
             );
         }
         // Set pool shares - is operator

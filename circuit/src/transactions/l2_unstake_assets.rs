@@ -15,7 +15,9 @@ use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::comparison::CircuitBuilderSubtractiveComparison;
 use crate::eddsa::gadgets::base_field::QuinticExtensionTarget;
 use crate::eddsa::schnorr::hash_to_quintic_extension_circuit;
-use crate::liquidation::{get_available_shares_to_burn_for_staking_pool, get_shares_asset_value};
+use crate::liquidation::{
+    get_available_shares_to_burn_for_staking_pool, get_shares_asset_value_for_staking_pool,
+};
 use crate::tx_interface::{Apply, TxHash, Verify};
 use crate::types::config::{BIG_U64_LIMBS, BIG_U96_LIMBS, Builder, F};
 use crate::types::constants::*;
@@ -174,7 +176,7 @@ impl Verify for L2UnstakeAssetsTxTarget {
             tx_state.accounts[SUB_ACCOUNT_ID]
                 .public_pool_info
                 .operator_shares,
-            tx_state.public_pool_shares[OWNER_ACCOUNT_ID].share_amount,
+            tx_state.public_pool_share.share_amount,
         );
         builder.conditional_assert_lte(is_enabled, self.share_amount, self.account_shares, 64);
 
@@ -187,7 +189,7 @@ impl Verify for L2UnstakeAssetsTxTarget {
             64,
         );
 
-        self.old_principal_amount = tx_state.public_pool_shares[OWNER_ACCOUNT_ID].principal_amount; // To be used in apply
+        self.old_principal_amount = tx_state.public_pool_share.principal_amount; // To be used in apply
 
         let available_shares_to_burn = get_available_shares_to_burn_for_staking_pool(
             builder,
@@ -198,11 +200,12 @@ impl Verify for L2UnstakeAssetsTxTarget {
         );
         builder.conditional_assert_lte(is_enabled, self.share_amount, available_shares_to_burn, 64);
 
-        let shares_to_unstake_lit = get_shares_asset_value(
+        let shares_to_unstake_lit = get_shares_asset_value_for_staking_pool(
             builder,
             tx_state.accounts[SUB_ACCOUNT_ID]
                 .public_pool_info
                 .total_shares,
+            // Because LIT can't be used as margin, we can use asset balance directly without considering unified accounts
             &tx_state.account_assets[SUB_ACCOUNT_ID][TX_ASSET_ID].balance,
             &tx_state.assets[TX_ASSET_ID].extension_multiplier,
             self.share_amount,
@@ -224,10 +227,8 @@ impl Verify for L2UnstakeAssetsTxTarget {
                 .total_shares,
             self.share_amount,
         );
-        self.new_share_amount = builder.sub(
-            tx_state.public_pool_shares[OWNER_ACCOUNT_ID].share_amount,
-            self.share_amount,
-        );
+        self.new_share_amount =
+            builder.sub(tx_state.public_pool_share.share_amount, self.share_amount);
 
         // Is operator
         {
@@ -282,6 +283,7 @@ impl Verify for L2UnstakeAssetsTxTarget {
                 is_llp_not_nil_account,
             ]);
 
+            // Because LIT can't be used as margin, we can use asset balance directly without considering unified accounts
             let (new_staking_pool_balance, fail) = builder.try_sub_biguint(
                 &tx_state.account_assets[SUB_ACCOUNT_ID][TX_ASSET_ID].balance,
                 &self.balance_diff,
@@ -289,7 +291,7 @@ impl Verify for L2UnstakeAssetsTxTarget {
             builder.conditional_assert_zero_u32(staked_limit_check_flag, fail);
 
             // Allow LIT_TO_MINT_SHARES_MULTIPLIER USDC minted per LIT staked, verify that remaining principal amount can sustain it.
-            let staked_lit_amount = get_shares_asset_value(
+            let staked_lit_amount = get_shares_asset_value_for_staking_pool(
                 builder,
                 self.new_total_shares,
                 &new_staking_pool_balance,
@@ -323,7 +325,9 @@ impl Verify for L2UnstakeAssetsTxTarget {
 
 impl Apply for L2UnstakeAssetsTxTarget {
     fn apply(&mut self, builder: &mut Builder, tx_state: &mut TxState) -> BoolTarget {
-        // Handle !is_pending_unlock
+        // Balance updates - Beacuse LIT can't be used as margin, we don't need to handle unified accounts here
+
+        // Handle !is_pending_unlock for owner
         {
             let not_pending_unlock_flag = builder.and_not(self.success, self.is_pending_unlock);
             let new_owner_balance = builder.add_biguint_non_carry(
@@ -339,7 +343,7 @@ impl Apply for L2UnstakeAssetsTxTarget {
                 );
         }
 
-        // Handle is_pending_unlock
+        // Handle is_pending_unlock for owner
         {
             let pending_unlock_flag = builder.and(self.success, self.is_pending_unlock);
             let unlock_timestamp = builder.add(
@@ -357,6 +361,7 @@ impl Apply for L2UnstakeAssetsTxTarget {
             );
         }
 
+        // Pool balance updates
         let (new_sub_account_balance, fail) = builder.try_sub_biguint(
             &tx_state.account_assets[SUB_ACCOUNT_ID][TX_ASSET_ID].balance,
             &self.balance_diff,
@@ -411,26 +416,22 @@ impl Apply for L2UnstakeAssetsTxTarget {
                 builder.biguint_to_target_unsafe(&big_principal_amount_delta);
 
             let new_principal_amount = builder.sub(
-                tx_state.public_pool_shares[OWNER_ACCOUNT_ID].principal_amount,
+                tx_state.public_pool_share.principal_amount,
                 principal_amount_delta,
             );
-            tx_state.public_pool_shares[OWNER_ACCOUNT_ID].principal_amount = builder.select(
+            tx_state.public_pool_share.principal_amount = builder.select(
                 non_operator_success,
                 new_principal_amount,
-                tx_state.public_pool_shares[OWNER_ACCOUNT_ID].principal_amount,
+                tx_state.public_pool_share.principal_amount,
             );
-            tx_state.public_pool_shares[OWNER_ACCOUNT_ID].share_amount = builder.select(
+            tx_state.public_pool_share.share_amount = builder.select(
                 non_operator_success,
                 self.new_share_amount,
-                tx_state.public_pool_shares[OWNER_ACCOUNT_ID].share_amount,
+                tx_state.public_pool_share.share_amount,
             );
 
-            let one = builder.one();
-            tx_state.apply_pool_share_delta_flag = builder.select(
-                non_operator_success,
-                one,
-                tx_state.apply_pool_share_delta_flag,
-            );
+            tx_state.apply_pool_share_delta_flag =
+                builder.or(tx_state.apply_pool_share_delta_flag, non_operator_success);
         }
 
         self.success

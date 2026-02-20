@@ -23,6 +23,7 @@ use crate::types::constants::*;
 use crate::types::market::MarketTarget;
 use crate::types::market_details::MarketDetailsTarget;
 use crate::types::risk_info::{RiskInfoTarget, RiskParametersTarget};
+use crate::types::tx_state::TxState;
 use crate::utils::CircuitBuilderUtils;
 
 pub struct ApplyTradeParams<'a> {
@@ -48,15 +49,18 @@ pub struct ApplySpotTradeParams<'a> {
 pub fn apply_spot_trade(
     builder: &mut Builder,
     is_enabled: BoolTarget,
+    tx_state: &TxState,
     input: &ApplyTradeParams,
     spot_input: &ApplySpotTradeParams,
 ) -> (
-    BigIntTarget, // new_taker_base_balance
-    BigIntTarget, // new_taker_quote_balance
-    BigIntTarget, // new_maker_base_balance
-    BigIntTarget, // new_maker_quote_balance
-    BigIntTarget, // new_fee_base_balance
-    BigIntTarget, // new_fee_quote_balance
+    BigIntTarget,   // taker_base_balance_delta
+    BigIntTarget,   // taker_quote_balance_delta
+    BigIntTarget,   // maker_base_balance_delta
+    BigIntTarget,   // maker_quote_balance_delta
+    BigIntTarget,   // fee_base_balance_delta
+    BigIntTarget,   // fee_quote_balance_delta
+    RiskInfoTarget, // new_taker_risk_info
+    RiskInfoTarget, // new_maker_risk_info
 ) {
     let zero = builder.zero();
 
@@ -127,38 +131,30 @@ pub fn apply_spot_trade(
 
     // Calculate new asset balances
     let [
-        new_taker_base_balance,
-        new_taker_quote_balance,
-        new_maker_base_balance,
-        new_maker_quote_balance,
+        taker_base_balance_delta,
+        taker_quote_balance_delta,
+        maker_base_balance_delta,
+        maker_quote_balance_delta,
     ] = [
         (
-            TAKER_ACCOUNT_ID,
-            BASE_ASSET_ID,
             &neg_ext_base_delta,
             &ext_base_delta_with_fee,
             &ext_fee_base_delta,
             spot_input.fee_account_is_taker,
         ),
         (
-            TAKER_ACCOUNT_ID,
-            QUOTE_ASSET_ID,
             &ext_quote_delta_with_fee,
             &neg_ext_quote_delta,
             &ext_fee_quote_delta,
             spot_input.fee_account_is_taker,
         ),
         (
-            MAKER_ACCOUNT_ID,
-            BASE_ASSET_ID,
             &ext_base_delta_with_fee,
             &neg_ext_base_delta,
             &ext_fee_base_delta,
             spot_input.fee_account_is_maker,
         ),
         (
-            MAKER_ACCOUNT_ID,
-            QUOTE_ASSET_ID,
             &neg_ext_quote_delta,
             &ext_quote_delta_with_fee,
             &ext_fee_quote_delta,
@@ -166,22 +162,16 @@ pub fn apply_spot_trade(
         ),
     ]
     .map(
-        |(account_id, asset_id, delta_if_ask, delta_if_bid, fee_delta, fee_account_is_taker)| {
-            let mut delta = builder.select_bigint(input.is_taker_ask, delta_if_ask, delta_if_bid);
+        |(delta_if_ask, delta_if_bid, fee_delta, fee_account_is_taker)| {
+            let delta = builder.select_bigint(input.is_taker_ask, delta_if_ask, delta_if_bid);
             let add_to_balance_if_fee_account = BigIntTarget {
                 abs: builder.mul_biguint_by_bool(&fee_delta.abs, fee_account_is_taker),
                 sign: SignTarget::new_unsafe(
                     builder.mul_bool(fee_account_is_taker, fee_delta.sign.target),
                 ),
             };
-            delta = builder.add_bigint_non_carry(
-                &delta,
-                &add_to_balance_if_fee_account,
-                BIG_U128_LIMBS,
-            );
-            let balance =
-                builder.biguint_to_bigint(&spot_input.account_assets[account_id][asset_id].balance);
-            builder.add_bigint_non_carry(&balance, &delta, BIG_U128_LIMBS)
+
+            builder.add_bigint_non_carry(&delta, &add_to_balance_if_fee_account, BIG_U128_LIMBS)
         },
     );
 
@@ -191,29 +181,140 @@ pub fn apply_spot_trade(
     );
     let fee_account_is_different = builder.not(fee_account_is_taker_or_maker);
 
-    let [new_fee_base_balance, new_fee_quote_balance] = [
-        (BASE_ASSET_ID, &ext_fee_base_delta),
-        (QUOTE_ASSET_ID, &ext_fee_quote_delta),
-    ]
-    .map(|(asset_id, ext_fee_delta)| {
-        let fee_balance =
-            builder.biguint_to_bigint(&spot_input.account_assets[FEE_ACCOUNT_ID][asset_id].balance);
-        let fee_delta = BigIntTarget {
+    let [fee_base_balance_delta, fee_quote_balance_delta] =
+        [(&ext_fee_base_delta), (&ext_fee_quote_delta)].map(|ext_fee_delta| BigIntTarget {
             abs: builder.mul_biguint_by_bool(&ext_fee_delta.abs, fee_account_is_different),
             sign: SignTarget::new_unsafe(
                 builder.mul_bool(fee_account_is_different, ext_fee_delta.sign.target),
             ),
-        };
-        builder.add_bigint_non_carry(&fee_balance, &fee_delta, BIG_U128_LIMBS)
-    });
+        });
+
+    // Update risk parameters for taker and maker
+    let is_taker_unified = builder.is_equal_constant(
+        tx_state.accounts[TAKER_ACCOUNT_ID].account_trading_mode,
+        ACCOUNT_ACCOUNT_TRADING_MODE_UNIFIED as u64,
+    );
+    let is_maker_unified = builder.is_equal_constant(
+        tx_state.accounts[MAKER_ACCOUNT_ID].account_trading_mode,
+        ACCOUNT_ACCOUNT_TRADING_MODE_UNIFIED as u64,
+    );
+
+    let is_taker_base_asset_unified_margin = builder.multi_and(&[
+        is_taker_unified,
+        tx_state.is_asset_used_as_margin[TAKER_ACCOUNT_ID][BASE_ASSET_ID],
+        is_enabled,
+    ]);
+    let is_taker_quote_asset_unified_margin = builder.multi_and(&[
+        is_taker_unified,
+        tx_state.is_asset_used_as_margin[TAKER_ACCOUNT_ID][QUOTE_ASSET_ID],
+        is_enabled,
+    ]);
+    let is_maker_base_asset_unified_margin = builder.multi_and(&[
+        is_maker_unified,
+        tx_state.is_asset_used_as_margin[MAKER_ACCOUNT_ID][BASE_ASSET_ID],
+        is_enabled,
+    ]);
+    let is_maker_quote_asset_unified_margin = builder.multi_and(&[
+        is_maker_unified,
+        tx_state.is_asset_used_as_margin[MAKER_ACCOUNT_ID][QUOTE_ASSET_ID],
+        is_enabled,
+    ]);
+
+    let taker_base_collateral_delta = builder.mul_bigint_by_bool(
+        &taker_base_balance_delta,
+        is_taker_base_asset_unified_margin,
+    );
+    let taker_quote_collateral_delta = builder.mul_bigint_by_bool(
+        &taker_quote_balance_delta,
+        is_taker_quote_asset_unified_margin,
+    );
+    let taker_collateral_delta = builder.add_bigint_non_carry(
+        &taker_base_collateral_delta,
+        &taker_quote_collateral_delta,
+        BIG_U96_LIMBS,
+    );
+
+    let maker_base_collateral_delta = builder.mul_bigint_by_bool(
+        &maker_base_balance_delta,
+        is_maker_base_asset_unified_margin,
+    );
+    let maker_quote_collateral_delta = builder.mul_bigint_by_bool(
+        &maker_quote_balance_delta,
+        is_maker_quote_asset_unified_margin,
+    );
+    let maker_collateral_delta = builder.add_bigint_non_carry(
+        &maker_base_collateral_delta,
+        &maker_quote_collateral_delta,
+        BIG_U96_LIMBS,
+    );
+
+    let new_taker_cross_risk_parameters = RiskParametersTarget {
+        collateral: builder.add_bigint_non_carry(
+            &taker_collateral_delta,
+            &input.taker_risk_info.cross_risk_parameters.collateral,
+            BIG_U96_LIMBS,
+        ),
+        collateral_with_funding: builder.add_bigint_non_carry(
+            &taker_collateral_delta,
+            &input
+                .taker_risk_info
+                .cross_risk_parameters
+                .collateral_with_funding,
+            BIG_U96_LIMBS,
+        ),
+        total_account_value: builder.add_bigint_non_carry(
+            &taker_collateral_delta,
+            &input
+                .taker_risk_info
+                .cross_risk_parameters
+                .total_account_value,
+            BIG_U96_LIMBS,
+        ),
+        ..input.taker_risk_info.cross_risk_parameters.clone()
+    };
+    let new_taker_risk_info = RiskInfoTarget {
+        cross_risk_parameters: new_taker_cross_risk_parameters.clone(),
+        current_risk_parameters: new_taker_cross_risk_parameters,
+    };
+
+    let new_maker_cross_risk_parameters = RiskParametersTarget {
+        collateral: builder.add_bigint_non_carry(
+            &maker_collateral_delta,
+            &input.maker_risk_info.cross_risk_parameters.collateral,
+            BIG_U96_LIMBS,
+        ),
+        collateral_with_funding: builder.add_bigint_non_carry(
+            &maker_collateral_delta,
+            &input
+                .maker_risk_info
+                .cross_risk_parameters
+                .collateral_with_funding,
+            BIG_U96_LIMBS,
+        ),
+        total_account_value: builder.add_bigint_non_carry(
+            &maker_collateral_delta,
+            &input
+                .maker_risk_info
+                .cross_risk_parameters
+                .total_account_value,
+            BIG_U96_LIMBS,
+        ),
+        ..input.maker_risk_info.cross_risk_parameters.clone()
+    };
+    let new_maker_risk_info = RiskInfoTarget {
+        cross_risk_parameters: new_maker_cross_risk_parameters.clone(),
+        current_risk_parameters: new_maker_cross_risk_parameters,
+    };
 
     (
-        new_taker_base_balance,
-        new_taker_quote_balance,
-        new_maker_base_balance,
-        new_maker_quote_balance,
-        new_fee_base_balance,
-        new_fee_quote_balance,
+        taker_base_balance_delta,
+        taker_quote_balance_delta,
+        maker_base_balance_delta,
+        maker_quote_balance_delta,
+        fee_base_balance_delta,
+        fee_quote_balance_delta,
+        new_taker_risk_info,
+        new_maker_risk_info,
     )
 }
 
@@ -259,24 +360,10 @@ pub fn apply_perps_trade(
         input.market_details,
     );
 
-    let taker_funding_cross_delta = BigIntTarget {
-        abs: builder.mul_biguint_by_bool(
-            &taker_funding_delta.abs,
-            is_taker_position_cross_and_enabled,
-        ),
-        sign: SignTarget::new_unsafe(builder.mul(
-            taker_funding_delta.sign.target,
-            is_taker_position_cross_and_enabled.target,
-        )),
-    };
-
+    let taker_funding_cross_delta =
+        builder.mul_bigint_by_bool(&taker_funding_delta, is_taker_position_cross_and_enabled);
     // We are always applying funding delta to current risk parameters, either cross or isolated.
-    let taker_funding_current_delta = BigIntTarget {
-        abs: builder.mul_biguint_by_bool(&taker_funding_delta.abs, is_enabled),
-        sign: SignTarget::new_unsafe(
-            builder.mul(taker_funding_delta.sign.target, is_enabled.target),
-        ),
-    };
+    let taker_funding_current_delta = builder.mul_bigint_by_bool(&taker_funding_delta, is_enabled);
 
     let new_taker_risk_info = RiskInfoTarget {
         cross_risk_parameters: RiskParametersTarget {
@@ -310,23 +397,10 @@ pub fn apply_perps_trade(
         input.market_details,
     );
 
-    let maker_funding_cross_delta = BigIntTarget {
-        abs: builder.mul_biguint_by_bool(
-            &maker_funding_delta.abs,
-            is_maker_position_cross_and_enabled,
-        ),
-        sign: SignTarget::new_unsafe(builder.mul(
-            maker_funding_delta.sign.target,
-            is_maker_position_cross_and_enabled.target,
-        )),
-    };
+    let maker_funding_cross_delta =
+        builder.mul_bigint_by_bool(&maker_funding_delta, is_maker_position_cross_and_enabled);
     // We are always applying funding delta to current risk parameters, either cross or isolated.
-    let maker_funding_current_delta = BigIntTarget {
-        abs: builder.mul_biguint_by_bool(&maker_funding_delta.abs, is_enabled),
-        sign: SignTarget::new_unsafe(
-            builder.mul(maker_funding_delta.sign.target, is_enabled.target),
-        ),
-    };
+    let maker_funding_current_delta = builder.mul_bigint_by_bool(&maker_funding_delta, is_enabled);
 
     let new_maker_risk_info = RiskInfoTarget {
         cross_risk_parameters: RiskParametersTarget {

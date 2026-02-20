@@ -13,7 +13,9 @@ use crate::bigint::comparison::CircuitBuilderBiguintSubtractiveComparison;
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::eddsa::gadgets::base_field::QuinticExtensionTarget;
 use crate::eddsa::schnorr::hash_to_quintic_extension_circuit;
-use crate::liquidation::get_shares_asset_value;
+use crate::liquidation::{
+    get_available_asset_balance_const, get_shares_asset_value_for_staking_pool,
+};
 use crate::tx_interface::{Apply, TxHash, Verify};
 use crate::types::config::{BIG_U64_LIMBS, BIG_U96_LIMBS, Builder, F};
 use crate::types::constants::*;
@@ -159,11 +161,12 @@ impl Verify for L2StakeAssetsTxTarget {
         let big_new_total_shares = builder.target_to_biguint(self.new_total_shares);
         builder.range_check_biguint(&big_new_total_shares, MAX_POOL_SHARES_BITS);
 
-        self.lit_amount = get_shares_asset_value(
+        self.lit_amount = get_shares_asset_value_for_staking_pool(
             builder,
             tx_state.accounts[SUB_ACCOUNT_ID]
                 .public_pool_info
                 .total_shares,
+            // Because LIT can't be used as margin, we can use asset balance directly without considering unified accounts
             &tx_state.account_assets[SUB_ACCOUNT_ID][TX_ASSET_ID].balance,
             &tx_state.assets[TX_ASSET_ID].extension_multiplier,
             self.share_amount,
@@ -174,7 +177,7 @@ impl Verify for L2StakeAssetsTxTarget {
         // Check if the entry asset amount fits in the pool share entry asset limit
         let lit_amount_target = builder.biguint_to_target_safe(&self.lit_amount);
         self.new_principal_amount = builder.add(
-            tx_state.public_pool_shares[OWNER_ACCOUNT_ID].principal_amount,
+            tx_state.public_pool_share.principal_amount,
             lit_amount_target,
         );
         builder.register_range_check(self.new_principal_amount, MAX_POOL_PRINCIPAL_AMOUNT_BITS);
@@ -184,8 +187,14 @@ impl Verify for L2StakeAssetsTxTarget {
             &tx_state.assets[TX_ASSET_ID].extension_multiplier,
             BIG_U96_LIMBS,
         );
-        let asset_balance =
-            tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID].get_available_balance(builder);
+        let asset_balance = get_available_asset_balance_const(
+            builder,
+            PRODUCT_TYPE_SPOT,
+            &tx_state.accounts[OWNER_ACCOUNT_ID],
+            &tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID],
+            tx_state.is_asset_used_as_margin[OWNER_ACCOUNT_ID][TX_ASSET_ID],
+            &tx_state.risk_infos[OWNER_ACCOUNT_ID].cross_risk_parameters,
+        );
         builder.conditional_assert_lte_biguint(
             is_enabled,
             &self.balance_to_mint_shares,
@@ -222,7 +231,7 @@ impl Verify for L2StakeAssetsTxTarget {
 
 impl Apply for L2StakeAssetsTxTarget {
     fn apply(&mut self, builder: &mut Builder, tx_state: &mut TxState) -> BoolTarget {
-        // Collateral deltas
+        // Asset Balance deltas - Because LIT asset can't be used as margin, we don't need to handle unified accounts here
         let (new_owner_balance, fail) = builder.try_sub_biguint(
             &tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID].balance,
             &self.balance_to_mint_shares,
@@ -260,25 +269,22 @@ impl Apply for L2StakeAssetsTxTarget {
         {
             let is_success_and_not_operator = builder.and_not(self.success, self.is_operator);
 
-            let new_share_amount = builder.add(
-                tx_state.public_pool_shares[OWNER_ACCOUNT_ID].share_amount,
-                self.share_amount,
-            );
-            tx_state.public_pool_shares[OWNER_ACCOUNT_ID].principal_amount = builder.select(
+            let new_share_amount =
+                builder.add(tx_state.public_pool_share.share_amount, self.share_amount);
+            tx_state.public_pool_share.principal_amount = builder.select(
                 is_success_and_not_operator,
                 self.new_principal_amount,
-                tx_state.public_pool_shares[OWNER_ACCOUNT_ID].principal_amount,
+                tx_state.public_pool_share.principal_amount,
             );
-            tx_state.public_pool_shares[OWNER_ACCOUNT_ID].share_amount = builder.select(
+            tx_state.public_pool_share.share_amount = builder.select(
                 is_success_and_not_operator,
                 new_share_amount,
-                tx_state.public_pool_shares[OWNER_ACCOUNT_ID].share_amount,
+                tx_state.public_pool_share.share_amount,
             );
-            let one = builder.one();
-            tx_state.apply_pool_share_delta_flag = builder.select(
-                is_success_and_not_operator,
-                one,
+
+            tx_state.apply_pool_share_delta_flag = builder.or(
                 tx_state.apply_pool_share_delta_flag,
+                is_success_and_not_operator,
             );
         }
         // Set pool assets - is operator

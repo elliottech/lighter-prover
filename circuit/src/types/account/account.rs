@@ -12,21 +12,20 @@ use plonky2::iop::target::{BoolTarget, Target};
 use plonky2::iop::witness::Witness;
 use serde::Deserialize;
 
-use crate::bigint::bigint::{BigIntTarget, CircuitBuilderBigInt, SignTarget, WitnessBigInt};
+use crate::bigint::bigint::{BigIntTarget, CircuitBuilderBigInt, WitnessBigInt};
 use crate::bigint::biguint::{BigUintTarget, CircuitBuilderBiguint, WitnessBigUint};
-use crate::bigint::unsafe_big::{CircuitBuilderUnsafeBig, UnsafeBigTarget};
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::circuit_logger::CircuitBuilderLogging;
 use crate::comparison::CircuitBuilderSubtractiveComparison;
 use crate::deserializers;
 use crate::eddsa::gadgets::curve::PartialWitnessCurve;
 use crate::hash_utils::CircuitBuilderHashUtils;
+use crate::types::account_asset::AccountAssetTarget;
 use crate::types::account_position::{
     AccountPosition, AccountPositionTarget, AccountPositionTargetWitness,
 };
-use crate::types::config::{BIG_U64_LIMBS, BIG_U96_LIMBS, BIG_U160_LIMBS, Builder, *};
-use crate::types::constants::{POSITION_LIST_SIZE, TIMESTAMP_BITS, *};
-use crate::types::market_details::MarketDetailsTarget;
+use crate::types::config::{BIG_U96_LIMBS, BIG_U160_LIMBS, Builder};
+use crate::types::constants::*;
 use crate::types::pending_unlock::{
     PendingUnlock, PendingUnlockTarget, PendingUnlockWitness, select_pending_unlock_target,
 };
@@ -34,7 +33,6 @@ use crate::types::public_pool::{
     PublicPoolInfo, PublicPoolInfoTarget, PublicPoolInfoWitness, PublicPoolShare,
     PublicPoolShareTarget, PublicPoolShareWitness, select_public_pool_share_target,
 };
-use crate::types::risk_info::position_base_notional;
 use crate::utils::CircuitBuilderUtils;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -55,6 +53,9 @@ where
 
     #[serde(rename = "at")]
     pub account_type: u8,
+
+    #[serde(rename = "bm", default)]
+    pub account_trading_mode: u8,
 
     #[serde(rename = "col")]
     #[serde(deserialize_with = "deserializers::int_to_bigint")]
@@ -121,6 +122,7 @@ where
             account_index: 0,
             l1_address: BigUint::ZERO,
             account_type: 0,
+            account_trading_mode: ACCOUNT_ACCOUNT_TRADING_MODE_SIMPLE,
             collateral: BigInt::ZERO,
             aggregated_balances: [BigInt::ZERO; NB_ASSETS_PER_TX],
             positions: array::from_fn(|_| AccountPosition::default()),
@@ -146,6 +148,7 @@ pub struct AccountTarget {
     pub account_index: Target,
     pub l1_address: BigUintTarget,
     pub account_type: Target,
+    pub account_trading_mode: Target,
 
     pub collateral: BigIntTarget,
     pub aggregated_balances: [BigIntTarget; NB_ASSETS_PER_TX],
@@ -175,6 +178,7 @@ impl Default for AccountTarget {
             account_index: Target::default(),
             l1_address: BigUintTarget::default(),
             account_type: Target::default(),
+            account_trading_mode: Target::default(),
 
             collateral: BigIntTarget::default(),
             aggregated_balances: array::from_fn(|_| BigIntTarget::default()),
@@ -211,6 +215,7 @@ impl AccountTarget {
             account_index: builder.add_virtual_target(),
             l1_address: builder.add_virtual_biguint_target_unsafe(BIG_U160_LIMBS), // safe because it is read from the state using merkle proofs
             account_type: builder.add_virtual_target(),
+            account_trading_mode: builder.add_virtual_target(),
 
             collateral: builder.add_virtual_bigint_target_unsafe(BIG_U96_LIMBS), // safe because it is read from the state using merkle proofs
             aggregated_balances: array::from_fn(|_| {
@@ -232,8 +237,9 @@ impl AccountTarget {
             aggregated_balances_root: builder.add_virtual_hash(),
             asset_root: builder.add_virtual_hash(),
 
-            partial_hash: builder.zero_hash_out(), // Unused for maker and taker accounts
-            partial_hash_for_pub_data: builder.zero_hash_out(), // Unused for maker and taker accounts
+            // Unused for maker and taker accounts.
+            partial_hash: builder.zero_hash_out(),
+            partial_hash_for_pub_data: builder.zero_hash_out(),
         }
     }
 
@@ -243,6 +249,7 @@ impl AccountTarget {
             account_index: builder.add_virtual_target(),
             l1_address: builder.add_virtual_biguint_target_unsafe(BIG_U160_LIMBS), // safe because it is read from the state using merkle proofs
             account_type: builder.add_virtual_target(),
+            account_trading_mode: builder.add_virtual_target(),
 
             collateral: builder.add_virtual_bigint_target_unsafe(BIG_U96_LIMBS), // safe because it is read from the state using merkle proofs
             aggregated_balances: array::from_fn(|_| {
@@ -282,71 +289,6 @@ impl AccountTarget {
             is_cancel_all_time_not_zero,
             is_cancel_all_time_lte_block_created_at,
         ])
-    }
-
-    pub fn get_cross_position_base_notional_values(
-        &self,
-        builder: &mut Builder,
-        all_market_details: &[MarketDetailsTarget; POSITION_LIST_SIZE],
-    ) -> ([BigUintTarget; POSITION_LIST_SIZE], BigIntTarget) {
-        let isolated_margin_mode = builder.constant_usize(ISOLATED_MARGIN);
-
-        let mut base_position_notional_values = core::array::from_fn(|_| builder.zero_biguint());
-
-        let mut cross_positive_tpv_sum = builder.zero();
-        let mut cross_negative_tpv_sum = builder.zero();
-
-        for market_index in 0..POSITION_LIST_SIZE {
-            let position = &self.positions[market_index];
-            let market_details = &all_market_details[market_index];
-
-            let is_isolated_position = builder.is_equal(position.margin_mode, isolated_margin_mode);
-            let is_cross_position = builder.not(is_isolated_position);
-
-            let (abs_position_notional, positive_tpv_component, negative_tpv_component) =
-                position_base_notional(builder, position, market_details);
-
-            // Accumulate cross margins
-            cross_positive_tpv_sum = builder.mul_add(
-                is_cross_position.target,
-                positive_tpv_component,
-                cross_positive_tpv_sum,
-            );
-            cross_negative_tpv_sum = builder.mul_add(
-                is_cross_position.target,
-                negative_tpv_component,
-                cross_negative_tpv_sum,
-            );
-
-            base_position_notional_values[market_index] =
-                builder.target_to_biguint(abs_position_notional);
-        }
-        // compute total position notional value from the positive and negative components
-        let zero = builder.zero();
-        let one = builder.one();
-
-        let cross_position_notional_value = {
-            let is_positive_tpv_sum_zero = builder.is_zero(cross_positive_tpv_sum);
-            let add_sign = builder.select(is_positive_tpv_sum_zero, zero, one);
-            let big_positive_tpv_sum = BigIntTarget {
-                abs: builder.target_to_biguint(cross_positive_tpv_sum),
-                sign: SignTarget::new_unsafe(add_sign),
-            };
-
-            let is_negative_tpv_sum_zero = builder.is_zero(cross_negative_tpv_sum);
-            let add_sign = builder.select(is_negative_tpv_sum_zero, zero, one);
-            let big_negative_tpv_sum = BigIntTarget {
-                abs: builder.target_to_biguint(cross_negative_tpv_sum),
-                sign: SignTarget::new_unsafe(add_sign),
-            };
-            builder.sub_bigint_non_carry(
-                &big_positive_tpv_sum,
-                &big_negative_tpv_sum,
-                BIG_U96_LIMBS,
-            )
-        };
-
-        (base_position_notional_values, cross_position_notional_value)
     }
 
     pub fn pop_pending_unlock(
@@ -404,157 +346,8 @@ impl AccountTarget {
         builder.conditional_assert_true(is_enabled, appended);
     }
 
-    pub fn get_cross_unrealized_funding(
-        &self,
-        builder: &mut Builder,
-        all_market_details: &[MarketDetailsTarget; POSITION_LIST_SIZE],
-    ) -> BigIntTarget {
-        let mut unsafe_unrealized_funding = UnsafeBigTarget {
-            limbs: vec![builder.zero(); BIGU16_U112_LIMBS],
-        };
-        for market_index in 0..POSITION_LIST_SIZE {
-            let market_details = all_market_details[market_index].clone();
-            let position = self.positions[market_index].clone();
-
-            let isolated_margin_mode = builder.constant_usize(ISOLATED_MARGIN);
-            let is_isolated_position = builder.is_equal(position.margin_mode, isolated_margin_mode);
-            let is_cross_position = builder.not(is_isolated_position);
-
-            let lhs = builder.sub_bigint_u16_unsafe(
-                &position.last_funding_rate_prefix_sum,
-                &market_details.funding_rate_prefix_sum,
-            ); // (-2^17, 2^17)
-
-            let rhs = builder.mul_bigint_u16_and_target_unsafe(
-                &position.position,
-                market_details.quote_multiplier,
-            ); // (-2^30, 2^30)
-
-            // Multiply the two unsafe bigints, where lhs and rhs each has 4 limbs.
-            // Limbwise multiplication is in (-2^47, 2^47) range.
-            // Resulting limbs will be at most sum of 4 different limbwise multiplications.
-            // Thus resulting limbs are in the range of (-2^49, 2^49).
-            let unsafe_position_unrealized_funding =
-                builder.mul_unsafe_big(&lhs, &rhs, BIGU16_U112_LIMBS); // (-2^49, 2^49)
-
-            // Accumulate the unrealized funding for at most 255 (2^8 - 1) cross positions
-            unsafe_unrealized_funding = builder.mul_add_unsafe_big(
-                &unsafe_position_unrealized_funding,
-                is_cross_position.target,
-                &unsafe_unrealized_funding,
-            ); // (-2^57, 2^57)
-        }
-        let unrealized_funding =
-            builder.unsafe_big16_to_bigint(&unsafe_unrealized_funding, BIGU16_U112_LIMBS);
-        BigIntTarget {
-            abs: builder.trim_biguint(&unrealized_funding.abs, BIG_U96_LIMBS),
-            sign: unrealized_funding.sign,
-        }
-    }
-
-    pub fn get_initial_margin_requirement(
-        &self,
-        builder: &mut Builder,
-        position_notional_values: &[BigUintTarget; POSITION_LIST_SIZE],
-        all_market_details: &[MarketDetailsTarget; POSITION_LIST_SIZE],
-    ) -> BigUintTarget {
-        let margin_fraction_multiplier =
-            builder.constant_biguint(&BigUint::from(MARGIN_FRACTION_MULTIPLIER));
-        let isolated_margin_mode = builder.constant_usize(ISOLATED_MARGIN);
-
-        let mut cross_value = UnsafeBigTarget {
-            limbs: vec![builder.zero(); BIG_U64_LIMBS],
-        };
-
-        for market_index in 0..POSITION_LIST_SIZE {
-            let position = self.positions[market_index].clone();
-            let is_isolated_position = builder.is_equal(position.margin_mode, isolated_margin_mode);
-            let is_cross_position = builder.not(is_isolated_position);
-            let margin_fraction = position.get_initial_margin_fraction(
-                builder,
-                all_market_details[market_index].default_initial_margin_fraction,
-                all_market_details[market_index].min_initial_margin_fraction,
-            );
-            let lhs = builder.unsafe_big_from_biguint(&position_notional_values[market_index]); // each limb 32 bit
-            let rhs = builder.mul(margin_fraction, is_cross_position.target); // 14 bits
-            cross_value = builder.mul_add_unsafe_big(&lhs, rhs, &cross_value); // each limb 46 bit + accumulating at most 255 markets = each limb 54 bit
-        }
-        let cross_value = builder.unsafe_big32_to_biguint(&cross_value, BIG_U96_LIMBS);
-
-        builder.mul_biguint_non_carry(&cross_value, &margin_fraction_multiplier, BIG_U96_LIMBS)
-    }
-
-    pub fn get_maintenance_margin_requirement(
-        &self,
-        builder: &mut Builder,
-        position_notional_values: &[BigUintTarget; POSITION_LIST_SIZE],
-        all_market_details: &[MarketDetailsTarget; POSITION_LIST_SIZE],
-    ) -> BigUintTarget {
-        let margin_fraction_multiplier =
-            builder.constant_biguint(&BigUint::from(MARGIN_FRACTION_MULTIPLIER));
-        let isolated_margin_mode = builder.constant_usize(ISOLATED_MARGIN);
-
-        let mut cross_value = UnsafeBigTarget {
-            limbs: vec![builder.zero(); BIG_U64_LIMBS],
-        };
-
-        for market_index in 0..POSITION_LIST_SIZE {
-            let position = self.positions[market_index].clone();
-            let is_isolated_position = builder.is_equal(position.margin_mode, isolated_margin_mode);
-            let is_cross_position = builder.not(is_isolated_position);
-            let lhs = builder.unsafe_big_from_biguint(&position_notional_values[market_index]); // each limb 32 bit
-            let rhs = builder.mul(
-                all_market_details[market_index].maintenance_margin_fraction,
-                is_cross_position.target,
-            ); // 14 bits
-            cross_value = builder.mul_add_unsafe_big(&lhs, rhs, &cross_value); // each limb 46 bit + accumulating at most 255 markets = each limb 54 bit
-        }
-        // Sum of cross_values where each cross_value is 42 bits and total 2^8 markets, so each limb is 50 bit
-        let cross_value = builder.unsafe_big32_to_biguint(&cross_value, BIG_U96_LIMBS);
-
-        builder.mul_biguint_non_carry(&cross_value, &margin_fraction_multiplier, BIG_U96_LIMBS)
-    }
-
-    pub fn get_close_out_margin_requirement(
-        &self,
-        builder: &mut Builder,
-        position_notional_values: &[BigUintTarget; POSITION_LIST_SIZE],
-        all_market_details: &[MarketDetailsTarget; POSITION_LIST_SIZE],
-    ) -> BigUintTarget {
-        let margin_fraction_multiplier =
-            builder.constant_biguint(&BigUint::from(MARGIN_FRACTION_MULTIPLIER));
-        let isolated_margin_mode = builder.constant_usize(ISOLATED_MARGIN);
-
-        let mut cross_value = UnsafeBigTarget {
-            limbs: vec![builder.zero(); BIG_U64_LIMBS],
-        };
-
-        for market_index in 0..POSITION_LIST_SIZE {
-            let position = self.positions[market_index].clone();
-            let is_isolated_position = builder.is_equal(position.margin_mode, isolated_margin_mode);
-            let is_cross_position = builder.not(is_isolated_position);
-            let lhs = builder.unsafe_big_from_biguint(&position_notional_values[market_index]); // each limb 32 bit
-            let rhs = builder.mul(
-                all_market_details[market_index].close_out_margin_fraction,
-                is_cross_position.target,
-            ); // 14 bits
-            cross_value = builder.mul_add_unsafe_big(&lhs, rhs, &cross_value); // each limb 46 bit + accumulating at most 255 markets = each limb 54 bit
-        }
-        // Sum of cross_values where each cross_value is 42 bits and total 2^8 markets, so each limb is 50 bit
-        let cross_value = builder.unsafe_big32_to_biguint(&cross_value, BIG_U96_LIMBS);
-
-        builder.mul_biguint_non_carry(&cross_value, &margin_fraction_multiplier, BIG_U96_LIMBS)
-    }
-
-    pub fn apply_collateral_delta(
-        &mut self,
-        builder: &mut Builder,
-        is_enabled: BoolTarget,
-        collateral_delta: &BigIntTarget,
-    ) {
-        let new_collateral =
-            builder.add_bigint_non_carry(&self.collateral, collateral_delta, BIG_U96_LIMBS);
-        self.collateral = builder.select_bigint(is_enabled, &new_collateral, &self.collateral);
+    pub fn is_unified_mode(&self) -> BoolTarget {
+        BoolTarget::new_unsafe(self.account_trading_mode)
     }
 
     pub fn get_public_pool_share(
@@ -688,6 +481,31 @@ impl AccountTarget {
         builder.conditional_assert_true(is_enabled, applied);
     }
 
+    pub fn are_assets_used_as_margin(
+        builder: &mut Builder,
+        account_assets: &[AccountAssetTarget; NB_ASSETS_PER_TX],
+    ) -> (BoolTarget, BoolTarget) {
+        let first_asset = &account_assets[0];
+        let is_first_asset_usdc = builder.is_equal_constant(first_asset.index_0, USDC_ASSET_INDEX);
+        let is_first_asset_used_as_margin =
+            builder.is_equal_constant(first_asset.margin_mode, ACCOUNT_ASSET_MARGIN_MODE_ENABLED);
+        let is_first_asset_used_as_collateral =
+            builder.or(is_first_asset_usdc, is_first_asset_used_as_margin);
+
+        let second_asset = &account_assets[1];
+        let is_second_asset_usdc =
+            builder.is_equal_constant(second_asset.index_0, USDC_ASSET_INDEX);
+        let is_second_asset_used_as_margin =
+            builder.is_equal_constant(second_asset.margin_mode, ACCOUNT_ASSET_MARGIN_MODE_ENABLED);
+        let is_second_asset_used_as_collateral =
+            builder.or(is_second_asset_usdc, is_second_asset_used_as_margin);
+
+        (
+            is_first_asset_used_as_collateral,
+            is_second_asset_used_as_collateral,
+        )
+    }
+
     pub fn print(&self, builder: &mut Builder, tag: &str) {
         builder.println(
             self.master_account_index,
@@ -701,6 +519,11 @@ impl AccountTarget {
             &self.aggregated_balances_root,
             &format!("{}: aggregated_balances_root", tag),
         );
+
+        for (i, agg_bal) in self.aggregated_balances.iter().enumerate() {
+            builder.println_bigint(agg_bal, &format!("{}: aggregated_balance_{}", tag, i));
+        }
+
         builder.println_hash_out(&self.asset_root, &format!("{}: asset_root", tag));
 
         builder.println(
@@ -712,11 +535,172 @@ impl AccountTarget {
             &format!("{}: total_non_cross_order_count", tag),
         );
         builder.println(self.cancel_all_time, &format!("{}: cancel_all_time", tag));
+        builder.println(
+            self.account_trading_mode,
+            &format!("{}: account_trading_mode", tag),
+        );
         builder.println_hash_out(&self.api_key_root, &format!("{}: api_key_root", tag));
         builder.println_hash_out(
             &self.account_orders_root,
             &format!("{}: account_orders_root", tag),
         );
+
+        self.public_pool_info.print(builder, tag);
+    }
+}
+
+impl AccountTarget {
+    /// Return cross or strategy collateral based on account type. Assumes `strategy_index` isn't nil.
+    pub fn get_relevant_collateral(
+        &self,
+        builder: &mut Builder,
+        strategy_index: Target,
+    ) -> BigIntTarget {
+        let strategy_balance = self
+            .public_pool_info
+            .get_strategy_balance(builder, strategy_index);
+        let is_insurance_fund =
+            builder.is_equal_constant(self.account_type, INSURANCE_FUND_ACCOUNT_TYPE as u64);
+        builder.select_bigint(is_insurance_fund, &strategy_balance, &self.collateral)
+    }
+
+    /// Short hand for Perps USDC delta update
+    pub fn apply_collateral_delta(
+        &mut self,
+        builder: &mut Builder,
+        is_enabled: BoolTarget,
+        collateral_delta: &BigIntTarget,
+        strategy_balance: &mut BigIntTarget,
+    ) {
+        let _true = builder._true();
+        AccountTarget::apply_asset_delta_const(
+            builder,
+            is_enabled,
+            PRODUCT_TYPE_PERPS,
+            self,
+            None,
+            _true,
+            collateral_delta,
+            strategy_balance,
+        );
+    }
+
+    pub fn apply_asset_delta_const(
+        builder: &mut Builder,
+        is_enabled: BoolTarget,
+        product_type: u64,
+        account: &mut AccountTarget,
+        account_asset: Option<&mut AccountAssetTarget>,
+        is_asset_used_as_margin: BoolTarget,
+        asset_delta: &BigIntTarget,
+        strategy_balance: &mut BigIntTarget,
+    ) {
+        let asset_delta = builder.mul_bigint_by_bool(asset_delta, is_enabled);
+
+        if product_type == PRODUCT_TYPE_PERPS {
+            account.collateral =
+                builder.add_bigint_non_carry(&account.collateral, &asset_delta, BIG_U96_LIMBS);
+            account.apply_strategy_delta(builder, is_enabled, strategy_balance, &asset_delta);
+            return;
+        }
+
+        let is_unified_and_asset_used_as_margin =
+            builder.and(account.is_unified_mode(), is_asset_used_as_margin);
+        let update_collateral = builder.and(is_enabled, is_unified_and_asset_used_as_margin);
+        let update_asset_balance = builder.and_not(is_enabled, update_collateral);
+
+        let account_asset =
+            account_asset.expect("account asset must be provided for non-perps products");
+        let account_asset_balance = builder.biguint_to_bigint(&account_asset.balance);
+
+        let new_asset_balance =
+            builder.add_bigint_non_carry(&account_asset_balance, &asset_delta, BIG_U96_LIMBS);
+        let is_new_asset_balance_negative = builder.is_sign_negative(new_asset_balance.sign);
+        builder.conditional_assert_false(update_asset_balance, is_new_asset_balance_negative); // Asset balance cannot be negative
+
+        account_asset.balance = builder.select_biguint(
+            update_asset_balance,
+            &new_asset_balance.abs,
+            &account_asset.balance,
+        );
+
+        let new_collateral =
+            builder.add_bigint_non_carry(&account.collateral, &asset_delta, BIG_U96_LIMBS);
+        account.collateral =
+            builder.select_bigint(update_collateral, &new_collateral, &account.collateral);
+        account.apply_strategy_delta(builder, update_collateral, strategy_balance, &asset_delta);
+    }
+
+    pub fn apply_asset_delta(
+        builder: &mut Builder,
+        is_enabled: BoolTarget,
+        product_type: Target,
+        account: &mut AccountTarget,
+        account_asset: &mut AccountAssetTarget,
+        is_asset_used_as_margin: BoolTarget,
+        asset_delta: &BigIntTarget,
+        strategy_balance: &mut BigIntTarget,
+    ) {
+        let asset_delta = builder.mul_bigint_by_bool(asset_delta, is_enabled);
+
+        let is_spot = BoolTarget::new_unsafe(product_type);
+
+        let is_account_isolated = builder.is_equal_constant(
+            account.account_trading_mode,
+            ACCOUNT_ACCOUNT_TRADING_MODE_SIMPLE as u64,
+        );
+        let is_asset_not_used_as_margin = builder.not(is_asset_used_as_margin);
+        let is_account_isolated_or_asset_not_used_as_margin =
+            builder.or(is_account_isolated, is_asset_not_used_as_margin);
+        let update_asset_balance = builder.multi_and(&[
+            is_enabled,
+            is_spot,
+            is_account_isolated_or_asset_not_used_as_margin,
+        ]);
+
+        let is_account_unified_and_asset_used_as_margin =
+            builder.not(is_account_isolated_or_asset_not_used_as_margin);
+        let is_perps_and_asset_used_as_margin = builder.and_not(is_asset_used_as_margin, is_spot);
+        let mut update_collateral = builder.or(
+            is_account_unified_and_asset_used_as_margin,
+            is_perps_and_asset_used_as_margin,
+        );
+        update_collateral = builder.and(update_collateral, is_enabled);
+
+        let account_asset_balance = builder.biguint_to_bigint(&account_asset.balance);
+
+        let new_asset_balance =
+            builder.add_bigint_non_carry(&account_asset_balance, &asset_delta, BIG_U96_LIMBS);
+        let is_new_asset_balance_negative = builder.is_sign_negative(new_asset_balance.sign);
+        builder.conditional_assert_false(update_asset_balance, is_new_asset_balance_negative); // Asset balance cannot be negative
+        account_asset.balance = builder.select_biguint(
+            update_asset_balance,
+            &new_asset_balance.abs,
+            &account_asset.balance,
+        );
+
+        let new_collateral =
+            builder.add_bigint_non_carry(&account.collateral, &asset_delta, BIG_U96_LIMBS);
+        account.collateral =
+            builder.select_bigint(update_collateral, &new_collateral, &account.collateral);
+        account.apply_strategy_delta(builder, update_collateral, strategy_balance, &asset_delta);
+    }
+
+    pub fn apply_strategy_delta(
+        &mut self,
+        builder: &mut Builder,
+        is_enabled: BoolTarget,
+        strategy_balance: &mut BigIntTarget,
+        delta: &BigIntTarget,
+    ) {
+        let is_insurance_fund =
+            builder.is_equal_constant(self.account_type, INSURANCE_FUND_ACCOUNT_TYPE as u64);
+        let flag = builder.and(is_enabled, is_insurance_fund);
+
+        let delta = builder.mul_bigint_by_bool(delta, flag);
+
+        let new_balance = builder.add_bigint_non_carry(strategy_balance, &delta, BIG_U96_LIMBS);
+        *strategy_balance = builder.select_bigint(flag, &new_balance, strategy_balance);
     }
 }
 
@@ -759,6 +743,10 @@ impl<T: Witness<F> + PartialWitnessCurve<F>, F: PrimeField64 + Extendable<5> + R
         )?;
         self.set_biguint_target(&a.l1_address, &b.l1_address)?;
         self.set_target(a.account_type, F::from_canonical_u8(b.account_type))?;
+        self.set_target(
+            a.account_trading_mode,
+            F::from_canonical_u8(b.account_trading_mode),
+        )?;
         self.set_bigint_target(&a.collateral, &b.collateral)?;
         for i in 0..NB_ASSETS_PER_TX {
             self.set_bigint_target(&a.aggregated_balances[i], &b.aggregated_balances[i])?;

@@ -16,7 +16,7 @@ use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::deserializers;
 use crate::eddsa::gadgets::base_field::QuinticExtensionTarget;
 use crate::eddsa::schnorr::hash_to_quintic_extension_circuit;
-use crate::liquidation::get_available_collateral;
+use crate::liquidation::{get_available_asset_balance_const, get_available_collateral};
 use crate::tx_interface::{Apply, TxHash, Verify};
 use crate::types::config::{BIG_U64_LIMBS, BIG_U96_LIMBS, Builder, F};
 use crate::types::constants::*;
@@ -130,6 +130,12 @@ impl Verify for L2UpdateMarginTxTarget {
             tx_state.market.perps_market_index,
         );
 
+        builder.conditional_assert_eq_constant(
+            is_enabled,
+            tx_state.asset_indices[TX_ASSET_ID],
+            USDC_ASSET_INDEX,
+        );
+
         // Valid values are 0(REMOVE_MARGIN) or 1(ADD_MARGIN)
         builder.assert_bool(BoolTarget::new_unsafe(self.direction));
 
@@ -169,8 +175,12 @@ impl Verify for L2UpdateMarginTxTarget {
             BIG_U96_LIMBS,
         );
 
-        let available_cross_collateral = get_available_collateral(
+        let available_cross_collateral = get_available_asset_balance_const(
             builder,
+            PRODUCT_TYPE_PERPS,
+            &tx_state.accounts[OWNER_ACCOUNT_ID],
+            &tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID],
+            tx_state.is_asset_used_as_margin[OWNER_ACCOUNT_ID][TX_ASSET_ID],
             &tx_state.risk_infos[OWNER_ACCOUNT_ID].cross_risk_parameters,
         );
         let available_isolated_collateral = get_available_collateral(
@@ -218,15 +228,12 @@ impl Apply for L2UpdateMarginTxTarget {
             &tx_state.positions[OWNER_ACCOUNT_ID].allocated_margin,
         );
 
-        let new_collateral = builder.sub_bigint_non_carry(
-            &tx_state.accounts[OWNER_ACCOUNT_ID].collateral,
-            &collateral_to_move_isolated,
-            BIG_U96_LIMBS,
-        );
-        tx_state.accounts[OWNER_ACCOUNT_ID].collateral = builder.select_bigint(
+        let collateral_diff = builder.neg_bigint(&collateral_to_move_isolated);
+        tx_state.accounts[OWNER_ACCOUNT_ID].apply_collateral_delta(
+            builder,
             self.success,
-            &new_collateral,
-            &tx_state.accounts[OWNER_ACCOUNT_ID].collateral,
+            &collateral_diff,
+            &mut tx_state.strategies[OWNER_ACCOUNT_ID],
         );
 
         self.success

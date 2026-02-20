@@ -1,5 +1,10 @@
 // Copyright (c) Elliot Technologies, Inc.
 // SPDX-License-Identifier: BUSL-1.1
+//
+// Proven statements in this circuit module:
+// 1. unified margin-enabled assets use cross-collateral minus locked balance.
+// 2. available balances are computed per product context.
+// 3. perps-route withdrawals require margin-enabled assets.
 
 use anyhow::Result;
 use num::BigUint;
@@ -8,14 +13,14 @@ use plonky2::iop::target::{BoolTarget, Target};
 use plonky2::iop::witness::Witness;
 use serde::Deserialize;
 
-use crate::bigint::bigint::CircuitBuilderBigInt;
 use crate::bigint::biguint::{BigUintTarget, CircuitBuilderBiguint, WitnessBigUint};
 use crate::bigint::comparison::CircuitBuilderBiguintSubtractiveComparison;
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::eddsa::gadgets::base_field::QuinticExtensionTarget;
 use crate::eddsa::schnorr::hash_to_quintic_extension_circuit;
-use crate::liquidation::get_available_collateral;
+use crate::liquidation::get_available_asset_balance;
 use crate::tx_interface::{Apply, OnChainPubData, TransactionTarget, TxHash, Verify};
+use crate::types::account::AccountTarget;
 use crate::types::asset::ensure_valid_asset_index;
 use crate::types::config::{BIG_U64_LIMBS, BIG_U96_LIMBS, Builder, F};
 use crate::types::constants::*;
@@ -166,66 +171,61 @@ impl Verify for L2WithdrawTxTarget {
         );
 
         let is_route_perps = builder.is_equal_constant(self.route_type, ROUTE_TYPE_PERPS);
-        // Balance checks: Route Type Spot
-        {
-            let flag = builder.and_not(is_enabled, is_route_perps);
-            let asset_balance = tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID]
-                .get_available_balance(builder);
-            builder.conditional_assert_lte_biguint(flag, &self.extended_amount, &asset_balance);
-        }
-        // Balance checks: Route Type Perps
-        {
-            let flag = builder.and(is_enabled, is_route_perps);
+        let is_route_spot = builder.not(is_route_perps);
+        let product_type =
+            builder.select_constant(is_route_spot, PRODUCT_TYPE_SPOT, PRODUCT_TYPE_PERPS);
 
-            let is_asset_margin_enabled = builder.is_equal_constant(
-                tx_state.assets[TX_ASSET_ID].margin_mode,
-                ASSET_MARGIN_MODE_ENABLED,
-            );
-            builder.conditional_assert_true(flag, is_asset_margin_enabled);
+        // =========================================
+        // statement 1: unified margin-enabled assets use cross-collateral minus locked balance.
+        // =========================================
+        let available_balance = get_available_asset_balance(
+            builder,
+            product_type,
+            &tx_state.accounts[OWNER_ACCOUNT_ID],
+            &tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID],
+            tx_state.is_asset_used_as_margin[OWNER_ACCOUNT_ID][TX_ASSET_ID],
+            &tx_state.risk_infos[OWNER_ACCOUNT_ID].cross_risk_parameters,
+        );
+        // === end of statement 1 ===
 
-            let available_collateral = get_available_collateral(
-                builder,
-                &tx_state.risk_infos[OWNER_ACCOUNT_ID].cross_risk_parameters,
-            );
-            builder.conditional_assert_lte_biguint(
-                flag,
-                &self.extended_amount,
-                &available_collateral,
-            );
-        }
+        // =========================================
+        // statement 2: available balances are computed per product context.
+        // =========================================
+        builder.conditional_assert_lte_biguint(
+            is_enabled,
+            &self.extended_amount,
+            &available_balance,
+        );
+        // === end of statement 2 ===
+
+        // =========================================
+        // statement 3: perps-route withdrawals require margin-enabled assets.
+        // =========================================
+        let perps_flag = builder.and(is_enabled, is_route_perps);
+        let is_asset_margin_enabled =
+            tx_state.is_asset_used_as_margin[OWNER_ACCOUNT_ID][TX_ASSET_ID];
+        builder.conditional_assert_true(perps_flag, is_asset_margin_enabled);
+        // === end of statement 3 ===
     }
 }
 
 impl Apply for L2WithdrawTxTarget {
-    fn apply(&mut self, builder: &mut Builder, state: &mut TxState) -> BoolTarget {
-        let is_route_perps = builder.is_equal_constant(self.route_type, ROUTE_TYPE_PERPS);
-        // Perps
-        {
-            let flag = builder.and(self.success, is_route_perps);
-            let collateral_delta = builder.negative_biguint(&self.extended_amount);
-            let collateral_after = builder.add_bigint_non_carry(
-                &state.accounts[OWNER_ACCOUNT_ID].collateral,
-                &collateral_delta,
-                BIG_U96_LIMBS,
-            );
-            state.accounts[OWNER_ACCOUNT_ID].collateral = builder.select_bigint(
-                flag,
-                &collateral_after,
-                &state.accounts[OWNER_ACCOUNT_ID].collateral,
-            );
-        }
-        // Spot
-        {
-            let flag = builder.and_not(self.success, is_route_perps);
-            let deduct_from_balance = builder.mul_biguint_by_bool(&self.extended_amount, flag);
-            (
-                state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID].balance,
-                _, // Verified above
-            ) = builder.try_sub_biguint(
-                &state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID].balance,
-                &deduct_from_balance,
-            );
-        }
+    fn apply(&mut self, builder: &mut Builder, tx_state: &mut TxState) -> BoolTarget {
+        let is_route_spot = builder.is_equal_constant(self.route_type, ROUTE_TYPE_SPOT);
+        let product_type =
+            builder.select_constant(is_route_spot, PRODUCT_TYPE_SPOT, PRODUCT_TYPE_PERPS);
+        let withdraw_delta = builder.negative_biguint(&self.extended_amount);
+
+        AccountTarget::apply_asset_delta(
+            builder,
+            self.success,
+            product_type,
+            &mut tx_state.accounts[OWNER_ACCOUNT_ID],
+            &mut tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID],
+            tx_state.is_asset_used_as_margin[OWNER_ACCOUNT_ID][TX_ASSET_ID],
+            &withdraw_delta,
+            &mut tx_state.strategies[OWNER_ACCOUNT_ID],
+        );
 
         self.success
     }

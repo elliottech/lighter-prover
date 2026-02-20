@@ -24,7 +24,7 @@ use crate::signed::signed_target::{
 };
 use crate::uint::u16::gadgets::arithmetic_u16::CircuitBuilderU16;
 
-pub const MARKET_DETAIL_SIZE: usize = 22;
+pub const MARKET_DETAIL_SIZE: usize = 23;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Default)]
 pub struct MarketDetails {
@@ -54,7 +54,7 @@ pub struct MarketDetails {
     pub funding_rate_prefix_sum: BigInt, // 63 bits
 
     #[serde(rename = "ap", default)]
-    pub aggregate_premium_sum: i64, // 58 bits - TODO: add sign
+    pub aggregate_premium_sum: i64,
 
     // Warning: Witness names impact ask price as bid and vice versa
     #[serde(rename = "ia", default)]
@@ -85,6 +85,9 @@ pub struct MarketDetails {
 
     #[serde(rename = "oil", default)]
     pub open_interest_limit: u64,
+
+    #[serde(rename = "sid", default)]
+    pub strategy_index: u8,
 }
 
 impl MarketDetails {
@@ -147,6 +150,7 @@ impl MarketDetails {
             funding_clamp_small: u32::try_from(pis[19].to_canonical_u64()).unwrap(),
             funding_clamp_big: u32::try_from(pis[20].to_canonical_u64()).unwrap(),
             open_interest_limit: pis[21].to_canonical_u64(),
+            strategy_index: u8::try_from(pis[22].to_canonical_u64()).unwrap(),
         }
     }
 }
@@ -171,6 +175,8 @@ pub struct MarketDetailsTarget {
     pub funding_clamp_small: Target,              // 24 bits
     pub funding_clamp_big: Target,                // 24 bits
     pub open_interest_limit: Target,              // 56 bits
+
+    pub strategy_index: Target, // 3 bits, which collateral strategy to use
 }
 
 impl MarketDetailsTarget {
@@ -230,6 +236,7 @@ impl MarketDetailsTarget {
             self.open_interest_limit,
             &format!("{} -- open_interest_limit", tag),
         );
+        builder.println(self.strategy_index, &format!("{} -- strategy_index", tag));
     }
 
     pub fn new(builder: &mut Builder) -> Self {
@@ -260,6 +267,7 @@ impl MarketDetailsTarget {
             funding_clamp_small: builder.add_virtual_target(),
             funding_clamp_big: builder.add_virtual_target(),
             open_interest_limit: builder.add_virtual_target(),
+            strategy_index: builder.add_virtual_target(),
         }
     }
 
@@ -280,6 +288,7 @@ impl MarketDetailsTarget {
             self.funding_clamp_small,
             self.funding_clamp_big,
             self.open_interest_limit,
+            self.strategy_index,
         ]
     }
 
@@ -311,6 +320,7 @@ impl MarketDetailsTarget {
             funding_clamp_small: builder.zero(),
             funding_clamp_big: builder.zero(),
             open_interest_limit: builder.zero(),
+            strategy_index: builder.zero(),
         }
     }
 
@@ -342,6 +352,7 @@ impl MarketDetailsTarget {
         builder.register_public_input(self.funding_clamp_small);
         builder.register_public_input(self.funding_clamp_big);
         builder.register_public_input(self.open_interest_limit);
+        builder.register_public_input(self.strategy_index);
 
         let public_inputs_after = builder.num_public_inputs();
         assert_eq!(
@@ -379,6 +390,7 @@ impl MarketDetailsTarget {
             funding_clamp_small: pis[19],
             funding_clamp_big: pis[20],
             open_interest_limit: pis[21],
+            strategy_index: pis[22],
         }
     }
 }
@@ -446,6 +458,8 @@ pub fn random_access_market_details(
             access_index,
             v.iter().map(|x| x.open_interest_limit).collect(),
         ),
+        strategy_index: builder
+            .random_access(access_index, v.iter().map(|x| x.strategy_index).collect()),
     }
 }
 
@@ -518,6 +532,7 @@ impl<T: Witness<F>, F: PrimeField64> MarketDetailsWitness<F> for T {
             t.open_interest_limit,
             F::from_canonical_u64(mi.open_interest_limit),
         )?;
+        self.set_target(t.strategy_index, F::from_canonical_u8(mi.strategy_index))?;
 
         Ok(())
     }
@@ -579,6 +594,7 @@ pub fn select_market_details(
         funding_clamp_small: builder.select(flag, a.funding_clamp_small, b.funding_clamp_small),
         funding_clamp_big: builder.select(flag, a.funding_clamp_big, b.funding_clamp_big),
         open_interest_limit: builder.select(flag, a.open_interest_limit, b.open_interest_limit),
+        strategy_index: builder.select(flag, a.strategy_index, b.strategy_index),
     }
 }
 
@@ -628,6 +644,7 @@ pub fn diff_market_details(
         funding_clamp_small: builder.sub(new.funding_clamp_small, old.funding_clamp_small),
         funding_clamp_big: builder.sub(new.funding_clamp_big, old.funding_clamp_big),
         open_interest_limit: builder.sub(new.open_interest_limit, old.open_interest_limit),
+        strategy_index: builder.sub(new.strategy_index, old.strategy_index),
     }
 }
 
@@ -702,6 +719,7 @@ pub fn apply_diff_market_details(
             diff.open_interest_limit,
             old.open_interest_limit,
         ),
+        strategy_index: builder.mul_add(flag.target, diff.strategy_index, old.strategy_index),
     }
 }
 
@@ -744,6 +762,7 @@ pub fn connect_market_details(
     builder.connect(lhs.funding_clamp_small, rhs.funding_clamp_small);
     builder.connect(lhs.funding_clamp_big, rhs.funding_clamp_big);
     builder.connect(lhs.open_interest_limit, rhs.open_interest_limit);
+    builder.connect(lhs.strategy_index, rhs.strategy_index);
 }
 
 pub fn all_market_details_hash(

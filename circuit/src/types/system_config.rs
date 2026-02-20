@@ -31,7 +31,7 @@ pub struct SystemConfig {
 
 impl Default for SystemConfig {
     fn default() -> Self {
-        SystemConfig::empty()
+        Self::empty()
     }
 }
 
@@ -231,22 +231,5 @@ pub fn select_system_config_target(
             a.staking_pool_lockup_period,
             b.staking_pool_lockup_period,
         ),
-    }
-}
-
-#[cfg(test)]
-impl SystemConfigTarget {
-    pub fn random(builder: &mut Builder) -> Self {
-        use rand::Rng;
-        Self {
-            liquidity_pool_index: builder
-                .constant_i64(rand::thread_rng().gen_range(0..=(1usize << 48) - 1) as i64),
-            staking_pool_index: builder
-                .constant_i64(rand::thread_rng().gen_range(0..=(1usize << 48) - 1) as i64),
-            liquidity_pool_cooldown_period: builder
-                .constant_i64(rand::thread_rng().gen_range(0..=(1usize << 48) - 1) as i64),
-            staking_pool_lockup_period: builder
-                .constant_i64(rand::thread_rng().gen_range(0..=(1usize << 48) - 1) as i64),
-        }
     }
 }

@@ -7,14 +7,14 @@ use plonky2::iop::target::{BoolTarget, Target};
 use plonky2::iop::witness::Witness;
 use serde::Deserialize;
 
-use crate::bigint::bigint::{BigIntTarget, CircuitBuilderBigInt, SignTarget};
+use crate::bigint::bigint::{BigIntTarget, CircuitBuilderBigInt};
 use crate::bigint::biguint::{BigUintTarget, CircuitBuilderBiguint};
 use crate::bigint::comparison::CircuitBuilderBiguintSubtractiveComparison;
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::comparison::CircuitBuilderSubtractiveComparison;
 use crate::eddsa::gadgets::base_field::QuinticExtensionTarget;
 use crate::eddsa::schnorr::hash_to_quintic_extension_circuit;
-use crate::liquidation::get_available_collateral;
+use crate::liquidation::get_available_asset_balance_const;
 use crate::tx_interface::{Apply, TxHash, Verify};
 use crate::types::config::{BIG_U96_LIMBS, Builder, F};
 use crate::types::constants::*;
@@ -53,7 +53,8 @@ pub struct L2CreatePublicPoolTxTarget {
 
     // helper
     pub account_type: Target,
-    pub collateral_delta: BigUintTarget,
+    pub account_trading_mode: Target,
+    pub collateral_delta: BigIntTarget,
 
     // output
     pub success: BoolTarget,
@@ -67,8 +68,11 @@ impl L2CreatePublicPoolTxTarget {
             operator_fee: builder.add_virtual_target(),
             initial_total_shares: builder.add_virtual_target(),
             min_operator_share_rate: builder.add_virtual_target(),
+
+            // helper
             account_type: builder.zero(),
-            collateral_delta: builder.zero_biguint(),
+            account_trading_mode: builder.zero(),
+            collateral_delta: builder.zero_bigint(),
 
             // output
             success: BoolTarget::default(),
@@ -114,6 +118,12 @@ impl Verify for L2CreatePublicPoolTxTarget {
             is_enabled,
             self.api_key_index,
             tx_state.api_key.api_key_index,
+        );
+
+        builder.conditional_assert_eq_constant(
+            is_enabled,
+            tx_state.asset_indices[TX_ASSET_ID],
+            USDC_ASSET_INDEX,
         );
 
         let fee_tick = builder.constant(F::from_canonical_u64(FEE_TICK));
@@ -175,32 +185,40 @@ impl Verify for L2CreatePublicPoolTxTarget {
             insurance_fund_operator_account_index,
         );
 
-        let public_pool_account_type =
-            builder.constant(F::from_canonical_u8(PUBLIC_POOL_ACCOUNT_TYPE));
-        let insurance_fund_account_type =
-            builder.constant(F::from_canonical_u8(INSURANCE_FUND_ACCOUNT_TYPE));
-        self.account_type = builder.select(
+        self.account_type = builder.select_constant(
             is_insurance_fund_operator_account,
-            insurance_fund_account_type,
-            public_pool_account_type,
+            INSURANCE_FUND_ACCOUNT_TYPE as u64,
+            PUBLIC_POOL_ACCOUNT_TYPE as u64,
+        );
+        self.account_trading_mode = builder.select_constant(
+            is_insurance_fund_operator_account,
+            ACCOUNT_ACCOUNT_TRADING_MODE_UNIFIED as u64,
+            ACCOUNT_ACCOUNT_TRADING_MODE_SIMPLE as u64,
         );
 
         let initial_pool_share_value = builder.constant_u64(INITIAL_POOL_SHARE_VALUE);
         let pool_usdc_value = builder.mul(self.initial_total_shares, initial_pool_share_value);
         let pool_usdc_value_big = builder.target_to_biguint(pool_usdc_value);
         let usdc_to_collateral_multiplier = builder.constant_u32(USDC_TO_COLLATERAL_MULTIPLIER);
-        self.collateral_delta = builder.mul_biguint_non_carry(
+        let collateral_delta = builder.mul_biguint_non_carry(
             &pool_usdc_value_big,
             &BigUintTarget::from(usdc_to_collateral_multiplier),
             BIG_U96_LIMBS,
         );
-        let available_collateral_to_transfer =
-            get_available_collateral(builder, &tx_state.risk_infos[0].cross_risk_parameters);
+        let available_collateral_to_transfer = get_available_asset_balance_const(
+            builder,
+            PRODUCT_TYPE_PERPS,
+            &tx_state.accounts[MASTER_ACCOUNT_ID],
+            &tx_state.account_assets[MASTER_ACCOUNT_ID][TX_ASSET_ID],
+            tx_state.is_asset_used_as_margin[MASTER_ACCOUNT_ID][TX_ASSET_ID],
+            &tx_state.risk_infos[MASTER_ACCOUNT_ID].cross_risk_parameters,
+        );
         builder.conditional_assert_lte_biguint(
             is_enabled,
-            &self.collateral_delta,
+            &collateral_delta,
             &available_collateral_to_transfer,
         );
+        self.collateral_delta = builder.biguint_to_bigint(&collateral_delta);
     }
 }
 
@@ -210,6 +228,11 @@ impl Apply for L2CreatePublicPoolTxTarget {
             self.success,
             self.account_type,
             tx_state.accounts[SUB_ACCOUNT_ID].account_type,
+        );
+        tx_state.accounts[SUB_ACCOUNT_ID].account_trading_mode = builder.select(
+            self.success,
+            self.account_trading_mode,
+            tx_state.accounts[SUB_ACCOUNT_ID].account_trading_mode,
         );
         tx_state.accounts[SUB_ACCOUNT_ID].l1_address = builder.select_biguint(
             self.success,
@@ -222,51 +245,34 @@ impl Apply for L2CreatePublicPoolTxTarget {
             tx_state.accounts[SUB_ACCOUNT_ID].master_account_index,
         );
 
-        let zero = builder.zero();
-        let one = builder.one();
-        let neg_one = builder.neg_one();
-
-        let is_big_collateral_amount_zero = builder.is_zero_biguint(&self.collateral_delta);
-        let add_sign = builder.select(is_big_collateral_amount_zero, zero, one);
-        let sub_sign = builder.select(is_big_collateral_amount_zero, zero, neg_one);
-
-        let account_collateral_after = builder.add_bigint_non_carry(
-            &tx_state.accounts[MASTER_ACCOUNT_ID].collateral,
-            &BigIntTarget {
-                abs: self.collateral_delta.clone(),
-                sign: SignTarget::new_unsafe(sub_sign),
-            },
-            BIG_U96_LIMBS,
-        );
-        let pool_collateral_after = &BigIntTarget {
-            abs: self.collateral_delta.clone(),
-            sign: SignTarget::new_unsafe(add_sign),
-        };
-
-        tx_state.accounts[MASTER_ACCOUNT_ID].collateral = builder.select_bigint(
-            self.success,
-            &account_collateral_after,
-            &tx_state.accounts[MASTER_ACCOUNT_ID].collateral,
-        );
-        tx_state.accounts[SUB_ACCOUNT_ID].collateral = builder.select_bigint(
-            self.success,
-            pool_collateral_after,
-            &tx_state.accounts[SUB_ACCOUNT_ID].collateral,
-        );
-
-        let active_public_pool = builder.constant_from_u8(ACTIVE_PUBLIC_POOL);
         let public_pool_info = &PublicPoolInfoTarget {
-            status: active_public_pool,
+            status: builder.constant_from_u8(ACTIVE_PUBLIC_POOL),
             operator_fee: self.operator_fee,
             min_operator_share_rate: self.min_operator_share_rate,
             total_shares: self.initial_total_shares,
             operator_shares: self.initial_total_shares,
+            strategies: core::array::from_fn(|_| builder.zero_bigint()),
         };
         tx_state.accounts[SUB_ACCOUNT_ID].public_pool_info = select_public_pool_info_target(
             builder,
             self.success,
             public_pool_info,
             &tx_state.accounts[SUB_ACCOUNT_ID].public_pool_info,
+        );
+
+        tx_state.accounts[SUB_ACCOUNT_ID].apply_collateral_delta(
+            builder,
+            self.success,
+            &self.collateral_delta,
+            &mut tx_state.strategies[SUB_ACCOUNT_ID],
+        );
+
+        let owner_collateral_delta = builder.neg_bigint(&self.collateral_delta);
+        tx_state.accounts[MASTER_ACCOUNT_ID].apply_collateral_delta(
+            builder,
+            self.success,
+            &owner_collateral_delta,
+            &mut tx_state.strategies[MASTER_ACCOUNT_ID],
         );
 
         self.success

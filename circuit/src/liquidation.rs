@@ -2,13 +2,14 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 use num::{BigUint, FromPrimitive};
-use plonky2::iop::target::Target;
+use plonky2::iop::target::{BoolTarget, Target};
 
 use crate::bigint::big_u16::CircuitBuilderBigIntU16;
 use crate::bigint::bigint::{BigIntTarget, CircuitBuilderBigInt, SignTarget};
 use crate::bigint::biguint::{BigUintTarget, CircuitBuilderBiguint};
 use crate::bigint::comparison::CircuitBuilderBiguintSubtractiveComparison;
 use crate::bigint::div_rem::CircuitBuilderBiguintDivRem;
+use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::types::account::AccountTarget;
 use crate::types::account_asset::AccountAssetTarget;
 use crate::types::account_position::AccountPositionTarget;
@@ -207,6 +208,117 @@ pub fn get_position_zero_quote(
     }
 }
 
+// Returns the balance of the asset in context of product type, which is constant at circuit generation time.
+pub fn get_asset_balance_const(
+    builder: &mut Builder,
+    product_type: u64,
+    account: &AccountTarget,
+    account_asset: &AccountAssetTarget,
+    is_asset_used_as_margin: BoolTarget,
+) -> BigIntTarget {
+    if product_type == PRODUCT_TYPE_PERPS {
+        account.collateral.clone()
+    } else {
+        let is_account_isolated = builder.is_equal_constant(
+            account.account_trading_mode,
+            ACCOUNT_ACCOUNT_TRADING_MODE_SIMPLE as u64,
+        );
+        let is_account_unified = builder.not(is_account_isolated);
+
+        let is_unified_and_margin = builder.and(is_account_unified, is_asset_used_as_margin);
+
+        let asset_balance = builder.biguint_to_bigint(&account_asset.balance);
+
+        builder.select_bigint(is_unified_and_margin, &account.collateral, &asset_balance)
+    }
+}
+
+// Returns the available balance of the asset in context of product type, which is constant at circuit generation time.
+pub fn get_available_asset_balance_const(
+    builder: &mut Builder,
+    product_type: u64,
+    account: &AccountTarget,
+    account_asset: &AccountAssetTarget,
+    is_asset_used_as_margin: BoolTarget,
+    risk_info: &RiskParametersTarget,
+) -> BigUintTarget {
+    let zero_big = builder.zero_biguint();
+
+    let is_account_isolated = builder.is_equal_constant(
+        account.account_trading_mode,
+        ACCOUNT_ACCOUNT_TRADING_MODE_SIMPLE as u64,
+    );
+    let is_account_unified = builder.not(is_account_isolated);
+
+    let is_unified_and_not_margin = builder.and_not(is_account_unified, is_asset_used_as_margin);
+
+    let available_cross_collateral = get_available_collateral(builder, risk_info);
+
+    let return_available_asset_balance = builder.or(is_account_isolated, is_unified_and_not_margin);
+
+    let (available_cross_collateral_minus_locked, borrow) =
+        builder.try_sub_biguint(&available_cross_collateral, &account_asset.locked_balance);
+    let available_cross_collateral_minus_locked = builder.select_biguint(
+        BoolTarget::new_unsafe(borrow.0),
+        &zero_big,
+        &available_cross_collateral_minus_locked,
+    );
+
+    let available_cross_collateral = builder.select_biguint(
+        is_account_unified,
+        &available_cross_collateral_minus_locked,
+        &available_cross_collateral,
+    );
+
+    if product_type == PRODUCT_TYPE_PERPS {
+        available_cross_collateral
+    } else {
+        let available_asset_balance = account_asset.get_available_balance(builder);
+
+        builder.select_biguint(
+            return_available_asset_balance,
+            &available_asset_balance,
+            &available_cross_collateral,
+        )
+    }
+}
+
+// Returns the available balance of the asset in context of product type
+pub fn get_available_asset_balance(
+    builder: &mut Builder,
+    product_type: Target,
+    account: &AccountTarget,
+    account_asset: &AccountAssetTarget,
+    is_asset_used_as_margin: BoolTarget,
+    risk_info: &RiskParametersTarget,
+) -> BigUintTarget {
+    let zero_big = builder.zero_biguint();
+
+    let is_product_spot = BoolTarget::new_unsafe(product_type);
+    let is_account_unified = account.is_unified_mode();
+    let is_not_margin = builder.not(is_asset_used_as_margin);
+
+    // spot = (unified && 'margin) || ('unified && spot)
+    let return_available_asset_balance =
+        builder.select_bool(is_account_unified, is_not_margin, is_product_spot);
+
+    let available_asset_balance = account_asset.get_available_balance(builder);
+    let available_cross_collateral = {
+        let available_cross_collateral = get_available_collateral(builder, risk_info);
+        let locked_balance_delta =
+            builder.select_biguint(is_account_unified, &account_asset.locked_balance, &zero_big);
+        let (result, borrow) =
+            builder.try_sub_biguint(&available_cross_collateral, &locked_balance_delta);
+        builder.select_biguint(BoolTarget::new_unsafe(borrow.0), &zero_big, &result)
+    };
+
+    builder.select_biguint(
+        return_available_asset_balance,
+        &available_asset_balance,
+        &available_cross_collateral,
+    )
+}
+
 pub fn get_available_collateral(
     builder: &mut Builder,
     risk_info: &RiskParametersTarget,
@@ -235,7 +347,7 @@ pub fn get_available_collateral(
     builder.min_biguint(&available_collateral, &collateral_with_funding.abs)
 }
 
-pub fn get_shares_asset_value(
+pub fn get_shares_asset_value_for_staking_pool(
     builder: &mut Builder,
     total_shares: Target,
     asset_balance: &BigUintTarget,
@@ -266,7 +378,7 @@ pub fn get_shares_asset_value(
     )
 }
 
-pub fn get_shares_usdc_value(
+pub fn get_shares_usdc_value_for_public_pool(
     builder: &mut Builder,
     risk_info: &RiskParametersTarget,
     account: &AccountTarget,
@@ -301,7 +413,7 @@ pub fn get_shares_usdc_value(
 }
 
 // Ensure total account value is positive before calling this function
-pub fn get_available_shares_to_burn(
+pub fn get_available_shares_to_burn_for_public_pool(
     builder: &mut Builder,
     risk_info: &RiskParametersTarget,
     pool_account: &AccountTarget,

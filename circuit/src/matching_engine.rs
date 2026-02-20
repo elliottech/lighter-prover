@@ -1,5 +1,10 @@
 // Copyright (c) Elliot Technologies, Inc.
 // SPDX-License-Identifier: BUSL-1.1
+//
+// Proven statements in this circuit module (spot-specific paths):
+// 1. unified accounts skip spot balance updates for margin assets.
+// 2. unified accounts apply spot margin-asset deltas to collateral.
+// 3. spot trades are canceled when the account risk change is invalid.
 
 use plonky2::field::types::Field;
 use plonky2::iop::target::{BoolTarget, Target};
@@ -14,13 +19,14 @@ use crate::bigint::comparison::CircuitBuilderBiguintSubtractiveComparison;
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::comparison::CircuitBuilderSubtractiveComparison;
 use crate::hints::CircuitBuilderHints;
-use crate::liquidation::get_available_collateral;
+use crate::liquidation::{get_asset_balance_const, get_available_collateral};
 use crate::order_book_tree_helpers::order_indexes_to_merkle_path;
 use crate::signed::signed_target::{CircuitBuilderSigned, SignedTarget};
+use crate::types::account::AccountTarget;
 use crate::types::account_asset::AccountAssetTarget;
 use crate::types::account_order::{AccountOrderTarget, select_account_order_target};
 use crate::types::account_position::AccountPositionTarget;
-use crate::types::config::{BIG_U96_LIMBS, Builder, F};
+use crate::types::config::{BIG_U96_LIMBS, BIG_U128_LIMBS, Builder, F};
 use crate::types::constants::*;
 use crate::types::market::MarketTarget;
 use crate::types::order::{
@@ -28,7 +34,7 @@ use crate::types::order::{
 };
 use crate::types::order_book_node::OrderBookNodeTarget;
 use crate::types::register::BaseRegisterInfoTarget;
-use crate::types::risk_info::RiskInfoTarget;
+use crate::types::risk_info::{RiskInfoTarget, RiskParametersTarget};
 use crate::types::tx_state::TxState;
 use crate::uint::u32::gadgets::arithmetic_u32::CircuitBuilderU32;
 use crate::utils::CircuitBuilderUtils;
@@ -710,8 +716,8 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
     let (
         new_taker_position,
         new_maker_position,
-        new_taker_risk_info,
-        new_maker_risk_info,
+        new_taker_risk_info_perps,
+        new_maker_risk_info_perps,
         fee_account_collateral_delta,
         new_open_interest,
         taker_position_sign_changed,
@@ -727,10 +733,10 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
         &mut update_status_flags,
         tx_state,
         &new_taker_position,
-        &new_taker_risk_info,
+        &new_taker_risk_info_perps,
         &taker_margin_delta,
         &new_maker_position,
-        &new_maker_risk_info,
+        &new_maker_risk_info_perps,
         &maker_margin_delta,
         new_open_interest,
         &mut cancel_taker_order,
@@ -743,15 +749,18 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
         fee_account_is_maker: tx_state.fee_account_is_maker,
     };
     let (
-        new_taker_base_balance,
-        new_taker_quote_balance,
-        new_maker_base_balance,
-        new_maker_quote_balance,
-        new_fee_base_balance,
-        new_fee_quote_balance,
+        taker_base_balance_delta,
+        taker_quote_balance_delta,
+        maker_base_balance_delta,
+        maker_quote_balance_delta,
+        fee_base_balance_delta,
+        fee_quote_balance_delta,
+        new_taker_risk_info_spot,
+        new_maker_risk_info_spot,
     ) = apply_spot_trade(
         builder,
         update_status_flags,
+        tx_state,
         &apply_trade_params,
         &apply_spot_trade_params,
     );
@@ -760,13 +769,45 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
         builder,
         &mut update_status_flags,
         tx_state,
-        &new_taker_base_balance,
-        &new_taker_quote_balance,
-        &new_maker_base_balance,
-        &new_maker_quote_balance,
+        is_taker_ask,
+        &taker_base_balance_delta,
+        &taker_quote_balance_delta,
+        &maker_base_balance_delta,
+        &maker_quote_balance_delta,
+        &new_taker_risk_info_spot,
+        &new_maker_risk_info_spot,
         &mut cancel_taker_order,
         &mut cancel_maker_order,
     );
+
+    let new_taker_risk_info = RiskInfoTarget {
+        current_risk_parameters: RiskParametersTarget::select(
+            builder,
+            is_perps,
+            &new_taker_risk_info_perps.current_risk_parameters,
+            &new_taker_risk_info_spot.current_risk_parameters,
+        ),
+        cross_risk_parameters: RiskParametersTarget::select(
+            builder,
+            is_perps,
+            &new_taker_risk_info_perps.cross_risk_parameters,
+            &new_taker_risk_info_spot.cross_risk_parameters,
+        ),
+    };
+    let new_maker_risk_info = RiskInfoTarget {
+        current_risk_parameters: RiskParametersTarget::select(
+            builder,
+            is_perps,
+            &new_maker_risk_info_perps.current_risk_parameters,
+            &new_maker_risk_info_spot.current_risk_parameters,
+        ),
+        cross_risk_parameters: RiskParametersTarget::select(
+            builder,
+            is_perps,
+            &new_maker_risk_info_perps.cross_risk_parameters,
+            &new_maker_risk_info_spot.cross_risk_parameters,
+        ),
+    };
 
     // Verify maker and taker fee being valid
     {
@@ -827,58 +868,73 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
         let fee_account_is_taker = builder.and(update_status_flags, tx_state.fee_account_is_taker);
         let fee_account_is_maker = builder.and(update_status_flags, tx_state.fee_account_is_maker);
 
-        // Update account assets
+        // Update account assets for spot
         {
             let update_assets_flag = builder.and(update_status_flags, is_spot);
 
-            let new_taker_base_balance =
-                builder.trim_biguint(&new_taker_base_balance.abs, BIG_U96_LIMBS);
-            tx_state.account_assets[TAKER_ACCOUNT_ID][BASE_ASSET_ID].balance = builder
-                .select_biguint(
-                    update_assets_flag,
-                    &new_taker_base_balance,
-                    &tx_state.account_assets[TAKER_ACCOUNT_ID][BASE_ASSET_ID].balance,
-                );
-            let new_taker_quote_balance =
-                builder.trim_biguint(&new_taker_quote_balance.abs, BIG_U96_LIMBS);
-            tx_state.account_assets[TAKER_ACCOUNT_ID][QUOTE_ASSET_ID].balance = builder
-                .select_biguint(
-                    update_assets_flag,
-                    &new_taker_quote_balance,
-                    &tx_state.account_assets[TAKER_ACCOUNT_ID][QUOTE_ASSET_ID].balance,
-                );
-            let new_maker_base_balance =
-                builder.trim_biguint(&new_maker_base_balance.abs, BIG_U96_LIMBS);
-            tx_state.account_assets[MAKER_ACCOUNT_ID][BASE_ASSET_ID].balance = builder
-                .select_biguint(
-                    update_assets_flag,
-                    &new_maker_base_balance,
-                    &tx_state.account_assets[MAKER_ACCOUNT_ID][BASE_ASSET_ID].balance,
-                );
-            let new_maker_quote_balance =
-                builder.trim_biguint(&new_maker_quote_balance.abs, BIG_U96_LIMBS);
-            tx_state.account_assets[MAKER_ACCOUNT_ID][QUOTE_ASSET_ID].balance = builder
-                .select_biguint(
-                    update_assets_flag,
-                    &new_maker_quote_balance,
-                    &tx_state.account_assets[MAKER_ACCOUNT_ID][QUOTE_ASSET_ID].balance,
-                );
-            let new_fee_base_balance =
-                builder.trim_biguint(&new_fee_base_balance.abs, BIG_U96_LIMBS);
-            tx_state.account_assets[FEE_ACCOUNT_ID][BASE_ASSET_ID].balance = builder
-                .select_biguint(
-                    update_assets_flag,
-                    &new_fee_base_balance,
-                    &tx_state.account_assets[FEE_ACCOUNT_ID][BASE_ASSET_ID].balance,
-                );
-            let new_fee_quote_balance =
-                builder.trim_biguint(&new_fee_quote_balance.abs, BIG_U96_LIMBS);
-            tx_state.account_assets[FEE_ACCOUNT_ID][QUOTE_ASSET_ID].balance = builder
-                .select_biguint(
-                    update_assets_flag,
-                    &new_fee_quote_balance,
-                    &tx_state.account_assets[FEE_ACCOUNT_ID][QUOTE_ASSET_ID].balance,
-                );
+            AccountTarget::apply_asset_delta_const(
+                builder,
+                update_assets_flag,
+                PRODUCT_TYPE_SPOT,
+                &mut tx_state.accounts[TAKER_ACCOUNT_ID],
+                Some(&mut tx_state.account_assets[TAKER_ACCOUNT_ID][BASE_ASSET_ID]),
+                tx_state.is_asset_used_as_margin[TAKER_ACCOUNT_ID][BASE_ASSET_ID],
+                &taker_base_balance_delta,
+                &mut tx_state.strategies[TAKER_ACCOUNT_ID],
+            );
+
+            AccountTarget::apply_asset_delta_const(
+                builder,
+                update_assets_flag,
+                PRODUCT_TYPE_SPOT,
+                &mut tx_state.accounts[TAKER_ACCOUNT_ID],
+                Some(&mut tx_state.account_assets[TAKER_ACCOUNT_ID][QUOTE_ASSET_ID]),
+                tx_state.is_asset_used_as_margin[TAKER_ACCOUNT_ID][QUOTE_ASSET_ID],
+                &taker_quote_balance_delta,
+                &mut tx_state.strategies[TAKER_ACCOUNT_ID],
+            );
+
+            AccountTarget::apply_asset_delta_const(
+                builder,
+                update_assets_flag,
+                PRODUCT_TYPE_SPOT,
+                &mut tx_state.accounts[MAKER_ACCOUNT_ID],
+                Some(&mut tx_state.account_assets[MAKER_ACCOUNT_ID][BASE_ASSET_ID]),
+                tx_state.is_asset_used_as_margin[MAKER_ACCOUNT_ID][BASE_ASSET_ID],
+                &maker_base_balance_delta,
+                &mut tx_state.strategies[MAKER_ACCOUNT_ID],
+            );
+            AccountTarget::apply_asset_delta_const(
+                builder,
+                update_assets_flag,
+                PRODUCT_TYPE_SPOT,
+                &mut tx_state.accounts[MAKER_ACCOUNT_ID],
+                Some(&mut tx_state.account_assets[MAKER_ACCOUNT_ID][QUOTE_ASSET_ID]),
+                tx_state.is_asset_used_as_margin[MAKER_ACCOUNT_ID][QUOTE_ASSET_ID],
+                &maker_quote_balance_delta,
+                &mut tx_state.strategies[MAKER_ACCOUNT_ID],
+            );
+
+            AccountTarget::apply_asset_delta_const(
+                builder,
+                update_assets_flag,
+                PRODUCT_TYPE_SPOT,
+                &mut tx_state.accounts[FEE_ACCOUNT_ID],
+                Some(&mut tx_state.account_assets[FEE_ACCOUNT_ID][BASE_ASSET_ID]),
+                tx_state.is_asset_used_as_margin[FEE_ACCOUNT_ID][BASE_ASSET_ID],
+                &fee_base_balance_delta,
+                &mut tx_state.strategies[FEE_ACCOUNT_ID],
+            );
+            AccountTarget::apply_asset_delta_const(
+                builder,
+                update_assets_flag,
+                PRODUCT_TYPE_SPOT,
+                &mut tx_state.accounts[FEE_ACCOUNT_ID],
+                Some(&mut tx_state.account_assets[FEE_ACCOUNT_ID][QUOTE_ASSET_ID]),
+                tx_state.is_asset_used_as_margin[FEE_ACCOUNT_ID][QUOTE_ASSET_ID],
+                &fee_quote_balance_delta,
+                &mut tx_state.strategies[FEE_ACCOUNT_ID],
+            );
         }
 
         // Update market, register, order leaf, account order leaf
@@ -1020,79 +1076,96 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
             );
         }
 
-        // Update collaterals
+        // Update collaterals for perps
         {
-            // Update Taker
-            let is_flag_and_is_taker_position_isolated =
-                builder.and(update_status_flags, is_taker_position_isolated);
-            let is_flag_and_is_taker_position_cross =
-                builder.and_not(update_status_flags, is_taker_position_isolated);
-            tx_state.accounts[TAKER_ACCOUNT_ID].collateral = builder.select_bigint(
-                is_flag_and_is_taker_position_isolated,
-                &new_taker_risk_info.cross_risk_parameters.collateral,
-                &tx_state.accounts[TAKER_ACCOUNT_ID].collateral,
-            );
-            tx_state.accounts[TAKER_ACCOUNT_ID].collateral = builder.select_bigint(
-                is_flag_and_is_taker_position_cross,
-                &new_taker_risk_info.current_risk_parameters.collateral,
-                &tx_state.accounts[TAKER_ACCOUNT_ID].collateral,
-            );
+            let flag = builder.and(update_status_flags, is_perps);
 
+            // We are not handling unified accounts because perps trades always happen with collateral balance.
+            // Update Taker
+            let mut new_taker_collateral = builder.select_bigint(
+                is_taker_position_isolated,
+                &new_taker_risk_info.cross_risk_parameters.collateral,
+                &new_taker_risk_info.current_risk_parameters.collateral,
+            );
             // If taker and fee accounts are the same, add fee payment to taker's cross collateral too
             // We are using cross collateral here because this can only happen when taker and fee account is insurance fund and
             // it can't open isolated positions
             let new_taker_cross_collateral_with_funding = builder.add_bigint_non_carry(
-                &tx_state.accounts[TAKER_ACCOUNT_ID].collateral,
+                &new_taker_collateral,
                 &fee_account_collateral_delta,
                 BIG_U96_LIMBS,
             );
-            tx_state.accounts[TAKER_ACCOUNT_ID].collateral = builder.select_bigint(
+            new_taker_collateral = builder.select_bigint(
                 fee_account_is_taker,
                 &new_taker_cross_collateral_with_funding,
-                &tx_state.accounts[TAKER_ACCOUNT_ID].collateral,
+                &new_taker_collateral,
+            );
+
+            let old_taker_collateral = builder.select_bigint(
+                is_taker_position_isolated,
+                &tx_state.risk_infos[TAKER_ACCOUNT_ID]
+                    .cross_risk_parameters
+                    .collateral,
+                &tx_state.risk_infos[TAKER_ACCOUNT_ID]
+                    .current_risk_parameters
+                    .collateral,
+            );
+            let taker_collateral_delta =
+                builder.sub_bigint(&new_taker_collateral, &old_taker_collateral);
+
+            tx_state.accounts[TAKER_ACCOUNT_ID].apply_collateral_delta(
+                builder,
+                flag,
+                &taker_collateral_delta,
+                &mut tx_state.strategies[TAKER_ACCOUNT_ID],
             );
 
             // Update Maker
-            let is_flag_and_is_maker_position_isolated =
-                builder.and(update_status_flags, is_maker_position_isolated);
-            let is_flag_and_is_maker_position_cross =
-                builder.and_not(update_status_flags, is_maker_position_isolated);
-            tx_state.accounts[MAKER_ACCOUNT_ID].collateral = builder.select_bigint(
-                is_flag_and_is_maker_position_isolated,
+            let mut new_maker_collateral = builder.select_bigint(
+                is_maker_position_isolated,
                 &new_maker_risk_info.cross_risk_parameters.collateral,
-                &tx_state.accounts[MAKER_ACCOUNT_ID].collateral,
-            );
-            tx_state.accounts[MAKER_ACCOUNT_ID].collateral = builder.select_bigint(
-                is_flag_and_is_maker_position_cross,
                 &new_maker_risk_info.current_risk_parameters.collateral,
-                &tx_state.accounts[MAKER_ACCOUNT_ID].collateral,
             );
-
             // If maker and fee accounts are the same, add fee payment to maker's cross collateral too
             // We are using cross collateral here because this can only happen when maker and fee account is insurance fund and
             // it can't open isolated positions
             let new_maker_cross_collateral_with_funding = builder.add_bigint_non_carry(
-                &tx_state.accounts[MAKER_ACCOUNT_ID].collateral,
+                &new_maker_collateral,
                 &fee_account_collateral_delta,
                 BIG_U96_LIMBS,
             );
-            tx_state.accounts[MAKER_ACCOUNT_ID].collateral = builder.select_bigint(
+            new_maker_collateral = builder.select_bigint(
                 fee_account_is_maker,
                 &new_maker_cross_collateral_with_funding,
-                &tx_state.accounts[MAKER_ACCOUNT_ID].collateral,
+                &new_maker_collateral,
+            );
+
+            let old_maker_collateral = builder.select_bigint(
+                is_maker_position_isolated,
+                &tx_state.risk_infos[MAKER_ACCOUNT_ID]
+                    .cross_risk_parameters
+                    .collateral,
+                &tx_state.risk_infos[MAKER_ACCOUNT_ID]
+                    .current_risk_parameters
+                    .collateral,
+            );
+            let maker_collateral_delta =
+                builder.sub_bigint(&new_maker_collateral, &old_maker_collateral);
+
+            tx_state.accounts[MAKER_ACCOUNT_ID].apply_collateral_delta(
+                builder,
+                flag,
+                &maker_collateral_delta,
+                &mut tx_state.strategies[MAKER_ACCOUNT_ID],
             );
 
             // Update Fee account
             // Fee payments always applied to cross collateral
-            let new_fee_account_collateral = builder.add_bigint_non_carry(
-                &tx_state.accounts[FEE_ACCOUNT_ID].collateral,
+            tx_state.accounts[FEE_ACCOUNT_ID].apply_collateral_delta(
+                builder,
+                flag,
                 &fee_account_collateral_delta,
-                BIG_U96_LIMBS,
-            );
-            tx_state.accounts[FEE_ACCOUNT_ID].collateral = builder.select_bigint(
-                update_status_flags,
-                &new_fee_account_collateral,
-                &tx_state.accounts[FEE_ACCOUNT_ID].collateral,
+                &mut tx_state.strategies[FEE_ACCOUNT_ID],
             );
         }
     }
@@ -1496,46 +1569,198 @@ fn is_valid_spot_trade(
     builder: &mut Builder,
     update_status_flags: &mut BoolTarget,
     tx_state: &mut TxState,
-    new_taker_base_balance: &BigIntTarget,
-    new_taker_quote_balance: &BigIntTarget,
-    new_maker_base_balance: &BigIntTarget,
-    new_maker_quote_balance: &BigIntTarget,
+    is_taker_ask: BoolTarget,
+    taker_base_balance_delta: &BigIntTarget,
+    taker_quote_balance_delta: &BigIntTarget,
+    maker_base_balance_delta: &BigIntTarget,
+    maker_quote_balance_delta: &BigIntTarget,
+    new_taker_risk_info: &RiskInfoTarget,
+    new_maker_risk_info: &RiskInfoTarget,
     cancel_taker_order: &mut BoolTarget,
     cancel_maker_order: &mut BoolTarget,
 ) {
     let is_spot = builder.is_equal_constant(tx_state.market.market_type, MARKET_TYPE_SPOT);
     let is_enabled = builder.and(*update_status_flags, is_spot);
 
-    let (
-        valid_taker_base_balance,
-        valid_maker_base_balance,
-        valid_taker_quote_balance,
-        valid_maker_quote_balance,
-    ): (BoolTarget, BoolTarget, BoolTarget, BoolTarget);
-    (valid_taker_base_balance, _) =
-        builder.try_trim_biguint(&new_taker_base_balance.abs, BIG_U96_LIMBS);
-    let is_taker_base_negative = builder.is_sign_negative(new_taker_base_balance.sign);
-    let valid_taker_base = builder.and_not(valid_taker_base_balance, is_taker_base_negative);
-    (valid_taker_quote_balance, _) =
-        builder.try_trim_biguint(&new_taker_quote_balance.abs, BIG_U96_LIMBS);
-    let is_taker_quote_negative = builder.is_sign_negative(new_taker_quote_balance.sign);
-    let valid_taker_quote = builder.and_not(valid_taker_quote_balance, is_taker_quote_negative);
-    let valid_taker_balances = builder.and(valid_taker_base, valid_taker_quote);
-    *cancel_taker_order =
-        builder.select_bool(valid_taker_balances, *cancel_taker_order, is_enabled);
+    let is_taker_unified = builder.is_equal_constant(
+        tx_state.accounts[TAKER_ACCOUNT_ID].account_trading_mode,
+        ACCOUNT_ACCOUNT_TRADING_MODE_UNIFIED as u64,
+    );
+    let is_maker_unified = builder.is_equal_constant(
+        tx_state.accounts[MAKER_ACCOUNT_ID].account_trading_mode,
+        ACCOUNT_ACCOUNT_TRADING_MODE_UNIFIED as u64,
+    );
+
+    let is_taker_base_asset_unified_margin = builder.multi_and(&[
+        is_taker_unified,
+        tx_state.is_asset_used_as_margin[TAKER_ACCOUNT_ID][BASE_ASSET_ID],
+        is_enabled,
+    ]);
+    let is_taker_quote_asset_unified_margin = builder.multi_and(&[
+        is_taker_unified,
+        tx_state.is_asset_used_as_margin[TAKER_ACCOUNT_ID][QUOTE_ASSET_ID],
+        is_enabled,
+    ]);
+    let is_maker_base_asset_unified_margin = builder.multi_and(&[
+        is_maker_unified,
+        tx_state.is_asset_used_as_margin[MAKER_ACCOUNT_ID][BASE_ASSET_ID],
+        is_enabled,
+    ]);
+    let is_maker_quote_asset_unified_margin = builder.multi_and(&[
+        is_maker_unified,
+        tx_state.is_asset_used_as_margin[MAKER_ACCOUNT_ID][QUOTE_ASSET_ID],
+        is_enabled,
+    ]);
+
+    let taker_base_balance = get_asset_balance_const(
+        builder,
+        PRODUCT_TYPE_SPOT,
+        &tx_state.accounts[TAKER_ACCOUNT_ID],
+        &tx_state.account_assets[TAKER_ACCOUNT_ID][BASE_ASSET_ID],
+        tx_state.is_asset_used_as_margin[TAKER_ACCOUNT_ID][BASE_ASSET_ID],
+    );
+    let new_taker_base_balance = builder.add_bigint_non_carry(
+        &taker_base_balance,
+        taker_base_balance_delta,
+        BIG_U128_LIMBS,
+    );
+    let taker_quote_balance = get_asset_balance_const(
+        builder,
+        PRODUCT_TYPE_SPOT,
+        &tx_state.accounts[TAKER_ACCOUNT_ID],
+        &tx_state.account_assets[TAKER_ACCOUNT_ID][QUOTE_ASSET_ID],
+        tx_state.is_asset_used_as_margin[TAKER_ACCOUNT_ID][QUOTE_ASSET_ID],
+    );
+    let new_taker_quote_balance = builder.add_bigint_non_carry(
+        &taker_quote_balance,
+        taker_quote_balance_delta,
+        BIG_U128_LIMBS,
+    );
+
+    let maker_base_balance = get_asset_balance_const(
+        builder,
+        PRODUCT_TYPE_SPOT,
+        &tx_state.accounts[MAKER_ACCOUNT_ID],
+        &tx_state.account_assets[MAKER_ACCOUNT_ID][BASE_ASSET_ID],
+        tx_state.is_asset_used_as_margin[MAKER_ACCOUNT_ID][BASE_ASSET_ID],
+    );
+    let new_maker_base_balance = builder.add_bigint_non_carry(
+        &maker_base_balance,
+        maker_base_balance_delta,
+        BIG_U128_LIMBS,
+    );
+    let maker_quote_balance = get_asset_balance_const(
+        builder,
+        PRODUCT_TYPE_SPOT,
+        &tx_state.accounts[MAKER_ACCOUNT_ID],
+        &tx_state.account_assets[MAKER_ACCOUNT_ID][QUOTE_ASSET_ID],
+        tx_state.is_asset_used_as_margin[MAKER_ACCOUNT_ID][QUOTE_ASSET_ID],
+    );
+    let new_maker_quote_balance = builder.add_bigint_non_carry(
+        &maker_quote_balance,
+        maker_quote_balance_delta,
+        BIG_U128_LIMBS,
+    );
+
+    let (mut valid_taker_base, _) = get_valid_asset_balance(
+        builder,
+        &new_taker_base_balance,
+        is_taker_base_asset_unified_margin,
+    );
+    let (mut valid_taker_quote, _) = get_valid_asset_balance(
+        builder,
+        &new_taker_quote_balance,
+        is_taker_quote_asset_unified_margin,
+    );
+    let (mut valid_maker_base, _) = get_valid_asset_balance(
+        builder,
+        &new_maker_base_balance,
+        is_maker_base_asset_unified_margin,
+    );
+    let (mut valid_maker_quote, _) = get_valid_asset_balance(
+        builder,
+        &new_maker_quote_balance,
+        is_maker_quote_asset_unified_margin,
+    );
+
+    let is_taker_bid = builder.not(is_taker_ask);
+
+    let is_taker_collateral_negative = builder.is_sign_negative(
+        new_taker_risk_info
+            .cross_risk_parameters
+            .collateral_with_funding
+            .sign,
+    );
+    let is_taker_base_collateral_invalid = builder.multi_and(&[
+        is_taker_base_asset_unified_margin,
+        is_taker_ask,
+        is_taker_collateral_negative,
+    ]);
+    valid_taker_base = builder.and_not(valid_taker_base, is_taker_base_collateral_invalid);
+    let is_taker_quote_collateral_invalid = builder.multi_and(&[
+        is_taker_quote_asset_unified_margin,
+        is_taker_bid,
+        is_taker_collateral_negative,
+    ]);
+    valid_taker_quote = builder.and_not(valid_taker_quote, is_taker_quote_collateral_invalid);
+
+    let is_maker_collateral_negative = builder.is_sign_negative(
+        new_maker_risk_info
+            .cross_risk_parameters
+            .collateral_with_funding
+            .sign,
+    );
+    let is_maker_base_collateral_invalid = builder.multi_and(&[
+        is_maker_base_asset_unified_margin,
+        is_taker_bid,
+        is_maker_collateral_negative,
+    ]);
+    valid_maker_base = builder.and_not(valid_maker_base, is_maker_base_collateral_invalid);
+    let is_maker_quote_collateral_invalid = builder.multi_and(&[
+        is_maker_quote_asset_unified_margin,
+        is_taker_ask,
+        is_maker_collateral_negative,
+    ]);
+    valid_maker_quote = builder.and_not(valid_maker_quote, is_maker_quote_collateral_invalid);
+
+    let is_taker_using_margin_asset = builder.or(
+        is_taker_base_asset_unified_margin,
+        is_taker_quote_asset_unified_margin,
+    );
+    let is_taker_valid_risk_change = tx_state.risk_infos[TAKER_ACCOUNT_ID]
+        .current_risk_parameters
+        .is_valid_risk_change(builder, &new_taker_risk_info.current_risk_parameters);
+    let is_taker_invalid_risk_change =
+        builder.and_not(is_taker_using_margin_asset, is_taker_valid_risk_change);
+    let is_taker_valid_risk_change_for_spot = builder.not(is_taker_invalid_risk_change);
+
+    let is_maker_using_margin_asset = builder.or(
+        is_maker_base_asset_unified_margin,
+        is_maker_quote_asset_unified_margin,
+    );
+    let is_maker_valid_risk_change = tx_state.risk_infos[MAKER_ACCOUNT_ID]
+        .current_risk_parameters
+        .is_valid_risk_change(builder, &new_maker_risk_info.current_risk_parameters);
+    let is_maker_invalid_risk_change =
+        builder.and_not(is_maker_using_margin_asset, is_maker_valid_risk_change);
+    let is_maker_valid_risk_change_for_spot = builder.not(is_maker_invalid_risk_change);
+
+    let valid_taker_balances = builder.multi_and(&[
+        valid_taker_base,
+        valid_taker_quote,
+        is_taker_valid_risk_change_for_spot,
+    ]);
+    let invalid_taker_balances = builder.and_not(is_enabled, valid_taker_balances);
+    *cancel_taker_order = builder.or(invalid_taker_balances, *cancel_taker_order);
     *update_status_flags = builder.and_not(*update_status_flags, *cancel_taker_order);
 
-    (valid_maker_base_balance, _) =
-        builder.try_trim_biguint(&new_maker_base_balance.abs, BIG_U96_LIMBS);
-    let is_maker_base_negative = builder.is_sign_negative(new_maker_base_balance.sign);
-    let valid_maker_base = builder.and_not(valid_maker_base_balance, is_maker_base_negative);
-    (valid_maker_quote_balance, _) =
-        builder.try_trim_biguint(&new_maker_quote_balance.abs, BIG_U96_LIMBS);
-    let is_maker_quote_negative = builder.is_sign_negative(new_maker_quote_balance.sign);
-    let valid_maker_quote = builder.and_not(valid_maker_quote_balance, is_maker_quote_negative);
-    let valid_maker_balances = builder.and(valid_maker_base, valid_maker_quote);
-    *cancel_maker_order =
-        builder.select_bool(valid_maker_balances, *cancel_maker_order, is_enabled);
+    let valid_maker_balances = builder.multi_and(&[
+        valid_maker_base,
+        valid_maker_quote,
+        is_maker_valid_risk_change_for_spot,
+    ]);
+    let invalid_maker_balances = builder.and_not(is_enabled, valid_maker_balances);
+    *cancel_maker_order = builder.or(invalid_maker_balances, *cancel_maker_order);
     *update_status_flags = builder.and_not(*update_status_flags, *cancel_maker_order);
 }
 
@@ -2120,4 +2345,28 @@ fn get_impact_price(
     let impact_price = builder.select(is_bid, impact_price_div, impact_price_ceil_div);
 
     builder.select(enough_liquidity, impact_price, zero)
+}
+
+// Returns trimmed balance and a boolean that indicates whether the original balance is valid (non-negative for spot only assets and fits in the trimmed size)
+fn get_valid_asset_balance(
+    builder: &mut Builder,
+    balance: &BigIntTarget,
+    is_asset_unified_margin: BoolTarget,
+) -> (BoolTarget, BigIntTarget) {
+    let (valid_balance_range, trimmed_balance) =
+        builder.try_trim_biguint(&balance.abs, BIG_U96_LIMBS);
+
+    let is_balance_negative = builder.is_sign_negative(balance.sign);
+    let is_balance_non_negative = builder.not(is_balance_negative);
+    let is_sign_valid = builder.or(is_asset_unified_margin, is_balance_non_negative);
+
+    let is_valid = builder.and(is_sign_valid, valid_balance_range);
+
+    (
+        is_valid,
+        BigIntTarget {
+            abs: trimmed_balance,
+            sign: balance.sign,
+        },
+    )
 }

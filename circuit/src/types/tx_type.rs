@@ -46,6 +46,9 @@ pub struct TxTypeTargets {
     pub is_l2_stake_assets: BoolTarget,
     pub is_l2_unstake_assets: BoolTarget,
     pub is_l2_force_burn_shares: BoolTarget,
+    pub is_l2_update_account_config: BoolTarget,
+    pub is_l2_strategy_transfer: BoolTarget,
+    pub is_l2_update_market_config: BoolTarget,
 
     pub is_internal_claim_order: BoolTarget,
     pub is_internal_cancel_order: BoolTarget,
@@ -61,6 +64,8 @@ pub struct TxTypeTargets {
     pub is_non_internal: BoolTarget, // Non-internal transactions (L1 and L2)
     pub is_sub_account_tx: BoolTarget, // Operations that second account has to be of type sub-account, public pool, or insurance fund operator
     pub is_dms_blocked_tx: BoolTarget, // Transactions that are blocked if dead man's switch needs to be triggered
+
+    pub is_share_burn_tx: BoolTarget,
 }
 
 #[derive(Debug)]
@@ -73,7 +78,10 @@ pub struct TxTypeVerifyTargets {
     pub account_pk: QuinticExtensionTarget,
     pub tx_hash: QuinticExtensionTarget,
     pub instruction_type: Target,
-    pub account: AccountTarget,
+
+    // This object contains partial information to be verified here. Main account may be in the
+    // second slot, so we select the main account data before passing it here.
+    pub tx_sender_account_partial: AccountTarget,
     pub sub_account_index: Target,
 }
 
@@ -135,6 +143,12 @@ impl TxTypeTargets {
             builder.constant(F::from_canonical_u8(TX_TYPE_L2_UNSTAKE_ASSETS));
         let tx_type_l2_force_burn_shares =
             builder.constant(F::from_canonical_u8(TX_TYPE_L2_FORCE_BURN_SHARES));
+        let tx_type_l2_update_account_config =
+            builder.constant(F::from_canonical_u8(TX_TYPE_L2_UPDATE_ACCOUNT_CONFIG));
+        let tx_type_l2_strategy_transfer =
+            builder.constant(F::from_canonical_u8(TX_TYPE_L2_STRATEGY_TRANSFER));
+        let tx_type_l2_update_market_config =
+            builder.constant(F::from_canonical_u8(TX_TYPE_L2_UPDATE_MARKET_CONFIG));
 
         let tx_type_internal_claim_order =
             builder.constant(F::from_canonical_u8(TX_TYPE_INTERNAL_CLAIM_ORDER));
@@ -187,6 +201,10 @@ impl TxTypeTargets {
         let is_l2_stake_assets = builder.is_equal(tx_type, tx_type_l2_stake_assets);
         let is_l2_unstake_assets = builder.is_equal(tx_type, tx_type_l2_unstake_assets);
         let is_l2_force_burn_shares = builder.is_equal(tx_type, tx_type_l2_force_burn_shares);
+        let is_l2_update_account_config =
+            builder.is_equal(tx_type, tx_type_l2_update_account_config);
+        let is_l2_strategy_transfer = builder.is_equal(tx_type, tx_type_l2_strategy_transfer);
+        let is_l2_update_market_config = builder.is_equal(tx_type, tx_type_l2_update_market_config);
 
         let is_internal_claim_order = builder.is_equal(tx_type, tx_type_internal_claim_order);
         let is_internal_cancel_order = builder.is_equal(tx_type, tx_type_internal_cancel_order);
@@ -234,6 +252,9 @@ impl TxTypeTargets {
             is_l2_stake_assets.target,
             is_l2_unstake_assets.target,
             is_l2_force_burn_shares.target,
+            is_l2_update_account_config.target,
+            is_l2_strategy_transfer.target,
+            is_l2_update_market_config.target,
             is_internal_claim_order.target,
             is_internal_cancel_order.target,
             is_internal_deleverage.target,
@@ -265,6 +286,9 @@ impl TxTypeTargets {
             is_l2_stake_assets.target,
             is_l2_unstake_assets.target,
             is_l2_force_burn_shares.target,
+            is_l2_update_account_config.target,
+            is_l2_strategy_transfer.target,
+            is_l2_update_market_config.target,
         ]));
 
         let is_layer1 = BoolTarget::new_unsafe(builder.add_many(vec![
@@ -302,6 +326,12 @@ impl TxTypeTargets {
             is_l2_create_grouped_orders.target,
         ]));
 
+        let is_share_burn_tx = BoolTarget::new_unsafe(builder.add_many(vec![
+            is_l2_force_burn_shares.target,
+            is_l2_burn_shares.target,
+            is_l1_burn_shares.target,
+        ]));
+
         TxTypeTargets {
             is_empty,
             is_l1_deposit,
@@ -335,6 +365,9 @@ impl TxTypeTargets {
             is_l2_stake_assets,
             is_l2_unstake_assets,
             is_l2_force_burn_shares,
+            is_l2_update_account_config,
+            is_l2_strategy_transfer,
+            is_l2_update_market_config,
 
             is_internal_claim_order,
             is_internal_cancel_order,
@@ -350,6 +383,7 @@ impl TxTypeTargets {
             is_non_internal,
             is_sub_account_tx,
             is_dms_blocked_tx,
+            is_share_burn_tx,
         }
     }
 
@@ -414,13 +448,16 @@ impl TxTypeTargets {
         // do not allow user to sending dms blocked transactions.
         // Protocol needs to queue internal cancel all transaction to clear the dead man's switch.
         let should_dms_be_triggered = verify_inputs
-            .account
+            .tx_sender_account_partial
             .should_dms_be_triggered(builder, verify_inputs.block_created_at);
         builder.conditional_assert_false(self.is_dms_blocked_tx, should_dms_be_triggered);
 
         // If transaction initiator is the treasury, transfer, withdraw, order and staking pool related transactions are allowed.
         let treasury_index = builder.constant_usize(TREASURY_ACCOUNT_INDEX);
-        let is_treasury = builder.is_equal(verify_inputs.account.account_index, treasury_index);
+        let is_treasury = builder.is_equal(
+            verify_inputs.tx_sender_account_partial.account_index,
+            treasury_index,
+        );
         let is_valid_treasury_tx = builder.multi_or(&[
             self.is_l2_transfer,
             self.is_l2_withdraw,
@@ -437,7 +474,7 @@ impl TxTypeTargets {
 
         // If sender is a staking pool, no L2 transactions are allowed.
         let is_staking_pool = builder.is_equal_constant(
-            verify_inputs.account.account_type,
+            verify_inputs.tx_sender_account_partial.account_type,
             LIGHTER_STAKING_POOL_ACCOUNT_TYPE as u64,
         );
         let check_staking_pool_tx = builder.and(is_staking_pool, self.is_layer2);
@@ -449,7 +486,7 @@ impl TxTypeTargets {
         let insurance_fund_operator_index =
             builder.constant_usize(INSURANCE_FUND_OPERATOR_ACCOUNT_INDEX);
         let is_insurance_fund_operator = builder.is_equal(
-            verify_inputs.account.account_index,
+            verify_inputs.tx_sender_account_partial.account_index,
             insurance_fund_operator_index,
         );
         let is_valid_insurance_fund_operator_tx = builder.multi_or(&[
@@ -459,6 +496,7 @@ impl TxTypeTargets {
             self.is_l2_mint_shares,
             self.is_l2_create_public_pool,
             self.is_l2_update_public_pool,
+            self.is_l2_update_market_config,
         ]);
         let check_insurance_fund_operator_tx =
             builder.and(is_insurance_fund_operator, self.is_layer2);
@@ -469,7 +507,10 @@ impl TxTypeTargets {
 
         // For sub-accounts, sub-account creation transactions are not allowed.
         let sub_account_type = builder.constant_from_u8(SUB_ACCOUNT_TYPE);
-        let is_sub_account = builder.is_equal(verify_inputs.account.account_type, sub_account_type);
+        let is_sub_account = builder.is_equal(
+            verify_inputs.tx_sender_account_partial.account_type,
+            sub_account_type,
+        );
         let is_valid_sub_account_tx = builder.multi_or(&[
             self.is_l2_change_pub_key,
             self.is_l2_transfer,
@@ -485,6 +526,7 @@ impl TxTypeTargets {
             self.is_l2_update_margin,
             self.is_l2_stake_assets,
             self.is_l2_unstake_assets,
+            self.is_l2_update_account_config,
         ]);
         let check_sub_account_tx = builder.and(is_sub_account, self.is_layer2);
         builder.conditional_assert_true(check_sub_account_tx, is_valid_sub_account_tx);
@@ -492,13 +534,21 @@ impl TxTypeTargets {
         // For public pools and insurance funds, only position and api key management transactions are allowed. Also insurance fund can force access amount of shares from the pool.
         // Note that public pool and insurance fund accounts currently do not support isolated margin.
         let public_pool_type = builder.constant_from_u8(PUBLIC_POOL_ACCOUNT_TYPE);
-        let is_public_pool = builder.is_equal(verify_inputs.account.account_type, public_pool_type);
+        let is_public_pool = builder.is_equal(
+            verify_inputs.tx_sender_account_partial.account_type,
+            public_pool_type,
+        );
         let insurance_fund_type = builder.constant_from_u8(INSURANCE_FUND_ACCOUNT_TYPE);
-        let is_insurance_fund =
-            builder.is_equal(verify_inputs.account.account_type, insurance_fund_type);
+        let is_insurance_fund = builder.is_equal(
+            verify_inputs.tx_sender_account_partial.account_type,
+            insurance_fund_type,
+        );
         let is_pool_account = builder.or(is_public_pool, is_insurance_fund);
         let is_frozen_status = builder.is_equal_constant(
-            verify_inputs.account.public_pool_info.status,
+            verify_inputs
+                .tx_sender_account_partial
+                .public_pool_info
+                .status,
             FROZEN_PUBLIC_POOL as u64,
         );
         let is_frozen_pool = builder.and(is_pool_account, is_frozen_status); // Status == 1, is frozen
@@ -512,6 +562,7 @@ impl TxTypeTargets {
             self.is_l2_update_leverage,
             self.is_l2_create_grouped_orders,
             self.is_l2_force_burn_shares,
+            self.is_l2_strategy_transfer,
         ]);
         let is_valid_frozen_pool_tx =
             builder.multi_or(&[self.is_l2_transfer, self.is_l2_change_pub_key]);

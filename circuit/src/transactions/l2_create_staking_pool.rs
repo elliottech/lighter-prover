@@ -7,12 +7,14 @@ use plonky2::iop::target::{BoolTarget, Target};
 use plonky2::iop::witness::Witness;
 use serde::Deserialize;
 
+use crate::bigint::bigint::CircuitBuilderBigInt;
 use crate::bigint::biguint::{BigUintTarget, CircuitBuilderBiguint};
 use crate::bigint::comparison::CircuitBuilderBiguintSubtractiveComparison;
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::comparison::CircuitBuilderSubtractiveComparison;
 use crate::eddsa::gadgets::base_field::QuinticExtensionTarget;
 use crate::eddsa::schnorr::hash_to_quintic_extension_circuit;
+use crate::liquidation::get_available_asset_balance_const;
 use crate::tx_interface::{Apply, TxHash, Verify};
 use crate::types::config::{BIG_U96_LIMBS, Builder, F};
 use crate::types::constants::*;
@@ -185,8 +187,15 @@ impl Verify for L2CreateStakingPoolTxTarget {
             &tx_state.assets[TX_ASSET_ID].extension_multiplier,
             BIG_U96_LIMBS,
         );
-        let asset_balance =
-            tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID].get_available_balance(builder);
+
+        let asset_balance = get_available_asset_balance_const(
+            builder,
+            PRODUCT_TYPE_SPOT,
+            &tx_state.accounts[OWNER_ACCOUNT_ID],
+            &tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID],
+            tx_state.is_asset_used_as_margin[OWNER_ACCOUNT_ID][TX_ASSET_ID],
+            &tx_state.risk_infos[OWNER_ACCOUNT_ID].cross_risk_parameters,
+        );
         builder.conditional_assert_lte_biguint(is_enabled, &self.amount_for_pool, &asset_balance);
     }
 }
@@ -199,6 +208,13 @@ impl Apply for L2CreateStakingPoolTxTarget {
             self.success,
             staking_pool_account_type,
             tx_state.accounts[SUB_ACCOUNT_ID].account_type,
+        );
+        let simple_trading_mode =
+            builder.constant(F::from_canonical_u8(ACCOUNT_ACCOUNT_TRADING_MODE_SIMPLE));
+        tx_state.accounts[SUB_ACCOUNT_ID].account_trading_mode = builder.select(
+            self.success,
+            simple_trading_mode,
+            tx_state.accounts[SUB_ACCOUNT_ID].account_trading_mode,
         );
         tx_state.accounts[SUB_ACCOUNT_ID].l1_address = builder.select_biguint(
             self.success,
@@ -233,6 +249,7 @@ impl Apply for L2CreateStakingPoolTxTarget {
             min_operator_share_rate: self.min_operator_share_rate,
             total_shares: self.initial_total_shares,
             operator_shares: self.initial_total_shares,
+            strategies: core::array::from_fn(|_| builder.zero_bigint()),
         };
         tx_state.accounts[SUB_ACCOUNT_ID].public_pool_info = select_public_pool_info_target(
             builder,

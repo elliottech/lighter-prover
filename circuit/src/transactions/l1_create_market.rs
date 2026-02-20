@@ -400,6 +400,7 @@ impl Apply for L1CreateMarketTxTarget {
             funding_clamp_small: self.funding_clamp_small,
             funding_clamp_big: self.funding_clamp_big,
             open_interest_limit: self.open_interest_limit,
+            strategy_index: builder.constant_usize(DEFAULT_STRATEGY_INDEX),
         };
         tx_state.market_details = select_market_details(
             builder,

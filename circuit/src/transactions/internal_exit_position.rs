@@ -132,6 +132,7 @@ impl Apply for InternalExitPositionTxTarget {
             builder,
             self.success,
             &collateral_delta,
+            &mut tx_state.strategies[OWNER_ACCOUNT_ID],
         );
 
         // Update market details and order book

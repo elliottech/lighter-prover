@@ -13,6 +13,7 @@ use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::comparison::CircuitBuilderSubtractiveComparison;
 use crate::eddsa::gadgets::base_field::QuinticExtensionTarget;
 use crate::eddsa::schnorr::hash_to_quintic_extension_circuit;
+use crate::liquidation::get_available_asset_balance_const;
 use crate::matching_engine::{
     decrement_locked_balance_for_order, decrement_order_count_in_place,
     get_locked_amount_and_ask_asset_index, get_next_order_nonce, trigger_child_orders,
@@ -453,12 +454,24 @@ impl Verify for L2ModifyOrderTxTarget {
                 tx_state.account_assets[OWNER_ACCOUNT_ID][BASE_ASSET_ID].index_0,
                 ask_asset_index,
             );
-            let base_asset_available_balance = tx_state.account_assets[OWNER_ACCOUNT_ID]
-                [BASE_ASSET_ID]
-                .get_available_balance(builder);
-            let quote_asset_available_balance = tx_state.account_assets[OWNER_ACCOUNT_ID]
-                [QUOTE_ASSET_ID]
-                .get_available_balance(builder);
+
+            let base_asset_available_balance = get_available_asset_balance_const(
+                builder,
+                PRODUCT_TYPE_SPOT,
+                &tx_state.accounts[OWNER_ACCOUNT_ID],
+                &tx_state.account_assets[OWNER_ACCOUNT_ID][BASE_ASSET_ID],
+                tx_state.is_asset_used_as_margin[OWNER_ACCOUNT_ID][BASE_ASSET_ID],
+                &tx_state.risk_infos[OWNER_ACCOUNT_ID].cross_risk_parameters,
+            );
+            let quote_asset_available_balance = get_available_asset_balance_const(
+                builder,
+                PRODUCT_TYPE_SPOT,
+                &tx_state.accounts[OWNER_ACCOUNT_ID],
+                &tx_state.account_assets[OWNER_ACCOUNT_ID][QUOTE_ASSET_ID],
+                tx_state.is_asset_used_as_margin[OWNER_ACCOUNT_ID][QUOTE_ASSET_ID],
+                &tx_state.risk_infos[OWNER_ACCOUNT_ID].cross_risk_parameters,
+            );
+
             let available_balance = builder.select_biguint(
                 is_base_asset,
                 &base_asset_available_balance,

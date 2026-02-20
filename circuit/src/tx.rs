@@ -43,10 +43,13 @@ use crate::transactions::l2_force_burn_shares::L2ForceBurnSharesTx;
 use crate::transactions::l2_mint_shares::L2MintSharesTx;
 use crate::transactions::l2_modify_order::L2ModifyOrderTx;
 use crate::transactions::l2_stake_assets::L2StakeAssetsTx;
+use crate::transactions::l2_strategy_transfer::L2StrategyTransferTx;
 use crate::transactions::l2_transfer::L2TransferTx;
 use crate::transactions::l2_unstake_assets::L2UnstakeAssetsTx;
+use crate::transactions::l2_update_account_config::L2UpdateAccountConfigTx;
 use crate::transactions::l2_update_leverage::L2UpdateLeverageTx;
 use crate::transactions::l2_update_margin::L2UpdateMarginTx;
+use crate::transactions::l2_update_market_config::L2UpdateMarketConfigTx;
 use crate::transactions::l2_update_public_pool::L2UpdatePublicPoolTx;
 use crate::transactions::l2_withdraw::L2WithdrawTx;
 use crate::types::account::Account;
@@ -186,9 +189,21 @@ where
     #[serde(default)]
     pub l2_unstake_assets_tx: L2UnstakeAssetsTx,
 
+    #[serde(rename = "2st")]
+    #[serde(default)]
+    pub l2_strategy_transfer_tx: L2StrategyTransferTx,
+
+    #[serde(rename = "2umc")]
+    #[serde(default)]
+    pub l2_update_market_config_tx: L2UpdateMarketConfigTx,
+
     #[serde(rename = "2fbs")]
     #[serde(default)]
     pub l2_force_burn_shares_tx: L2ForceBurnSharesTx,
+
+    #[serde(rename = "2uac")]
+    #[serde(default)]
+    pub l2_update_account_config_tx: L2UpdateAccountConfigTx,
 
     #[serde(rename = "Ic")]
     #[serde(default)]

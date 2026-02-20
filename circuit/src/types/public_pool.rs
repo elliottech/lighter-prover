@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 use anyhow::Result;
+use num::BigInt;
 use plonky2::field::extension::Extendable;
 use plonky2::field::types::PrimeField64;
 use plonky2::hash::hash_types::RichField;
@@ -10,11 +11,15 @@ use plonky2::iop::witness::Witness;
 use serde::Deserialize;
 
 use super::config::Builder;
+use crate::bigint::bigint::{BigIntTarget, CircuitBuilderBigInt, WitnessBigInt};
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::circuit_logger::CircuitBuilderLogging;
+use crate::deserializers;
+use crate::types::config::BIG_U96_LIMBS;
+use crate::types::constants::NB_STRATEGIES;
 use crate::utils::CircuitBuilderUtils;
 
-#[derive(Debug, Clone, Copy, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(bound = "", default)]
 pub struct PublicPoolShare {
     #[serde(rename = "ppi")]
@@ -47,6 +52,10 @@ pub struct PublicPoolInfo {
 
     #[serde(rename = "ppi_os", default)]
     pub operator_shares: i64,
+
+    #[serde(rename = "ppi_st", default)]
+    #[serde(deserialize_with = "deserializers::strategies")]
+    pub strategies: [BigInt; NB_STRATEGIES], // 96 bits
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -122,6 +131,7 @@ pub struct PublicPoolInfoTarget {
     pub min_operator_share_rate: Target,
     pub total_shares: Target,
     pub operator_shares: Target,
+    pub strategies: [BigIntTarget; NB_STRATEGIES],
 }
 
 impl PublicPoolInfoTarget {
@@ -132,6 +142,9 @@ impl PublicPoolInfoTarget {
             min_operator_share_rate: builder.add_virtual_target(),
             total_shares: builder.add_virtual_target(),
             operator_shares: builder.add_virtual_target(),
+            strategies: core::array::from_fn(|_| {
+                builder.add_virtual_bigint_target_unsafe(BIG_U96_LIMBS)
+            }),
         }
     }
 
@@ -142,6 +155,7 @@ impl PublicPoolInfoTarget {
             min_operator_share_rate: builder.zero(),
             total_shares: builder.zero(),
             operator_shares: builder.zero(),
+            strategies: core::array::from_fn(|_| builder.zero_bigint()),
         }
     }
 
@@ -154,10 +168,13 @@ impl PublicPoolInfoTarget {
         );
         builder.println(self.total_shares, &format!("{}: total_shares", tag));
         builder.println(self.operator_shares, &format!("{}: operator_shares", tag));
+        for i in 0..NB_STRATEGIES {
+            builder.println_bigint(&self.strategies[i], &format!("{}: strategy {}", tag, i));
+        }
     }
 
     pub fn is_empty(&self, builder: &mut Builder) -> BoolTarget {
-        let assertions = [
+        let mut assertions = vec![
             builder.is_zero(self.status),
             builder.is_zero(self.operator_fee),
             builder.is_zero(self.min_operator_share_rate),
@@ -165,7 +182,19 @@ impl PublicPoolInfoTarget {
             builder.is_zero(self.operator_shares),
         ];
 
+        for i in 0..NB_STRATEGIES {
+            assertions.push(builder.is_zero_bigint(&self.strategies[i]));
+        }
+
         builder.multi_and(&assertions)
+    }
+
+    pub fn get_strategy_balance(
+        &self,
+        builder: &mut Builder,
+        strategy_index: Target,
+    ) -> BigIntTarget {
+        builder.random_access_bigint(strategy_index, self.strategies.to_vec(), BIG_U96_LIMBS)
     }
 }
 
@@ -185,6 +214,9 @@ pub fn select_public_pool_info_target(
         ),
         total_shares: builder.select(flag, a.total_shares, b.total_shares),
         operator_shares: builder.select(flag, a.operator_shares, b.operator_shares),
+        strategies: core::array::from_fn(|i| {
+            builder.select_bigint(flag, &a.strategies[i], &b.strategies[i])
+        }),
     }
 }
 
@@ -245,6 +277,9 @@ impl<T: Witness<F>, F: PrimeField64 + Extendable<5> + RichField> PublicPoolInfoW
         )?;
         self.set_target(a.total_shares, F::from_canonical_i64(b.total_shares))?;
         self.set_target(a.operator_shares, F::from_canonical_i64(b.operator_shares))?;
+        for i in 0..NB_STRATEGIES {
+            self.set_bigint_target(&a.strategies[i], &b.strategies[i])?;
+        }
 
         Ok(())
     }

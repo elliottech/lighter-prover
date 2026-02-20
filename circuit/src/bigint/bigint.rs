@@ -141,6 +141,8 @@ pub trait CircuitBuilderBigInt<F: RichField + Extendable<D>, const D: usize> {
         b: &BigUintTarget,
         num_limbs: usize,
     ) -> BigIntTarget;
+    // Return a * b, where b is a BoolTarget
+    fn mul_bigint_by_bool(&mut self, a: &BigIntTarget, b: BoolTarget) -> BigIntTarget;
 
     fn sub_bigint(&mut self, a: &BigIntTarget, b: &BigIntTarget) -> BigIntTarget;
 
@@ -351,6 +353,12 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilderBigInt<F, D> fo
         let is_b_zero = self.is_zero_biguint(b);
         let zero = self.zero();
         let sign = SignTarget::new_unsafe(self.select(is_b_zero, zero, a.sign.target));
+        BigIntTarget { abs, sign }
+    }
+
+    fn mul_bigint_by_bool(&mut self, a: &BigIntTarget, b: BoolTarget) -> BigIntTarget {
+        let abs = self.mul_biguint_by_bool(&a.abs, b);
+        let sign = SignTarget::new_unsafe(self.mul(a.sign.target, b.target));
         BigIntTarget { abs, sign }
     }
 

@@ -9,6 +9,7 @@ use super::api_key::ApiKeyTarget;
 use super::config::Builder;
 use super::constants::{ACCOUNT_ORDERS_MERKLE_LEVELS, NEW_INSTRUCTIONS_MAX_SIZE};
 use super::register::{RegisterStackTarget, select_register_target};
+use crate::bigint::bigint::BigIntTarget;
 use crate::bigint::biguint::CircuitBuilderBiguint;
 use crate::bigint::comparison::CircuitBuilderBiguintSubtractiveComparison;
 use crate::bool_utils::CircuitBuilderBoolUtils;
@@ -21,8 +22,7 @@ use crate::types::account_position::AccountPositionTarget;
 use crate::types::asset::AssetTarget;
 use crate::types::config::BIG_U96_LIMBS;
 use crate::types::constants::{
-    NB_ACCOUNTS_PER_TX, NB_ASSETS_PER_TX, NB_POSSIBLE_POOL_SHARE_SLOTS, ORDER_BASE_AMOUNT_BITS,
-    ORDER_BOOK_MERKLE_LEVELS,
+    NB_ACCOUNTS_PER_TX, NB_ASSETS_PER_TX, ORDER_BASE_AMOUNT_BITS, ORDER_BOOK_MERKLE_LEVELS,
 };
 use crate::types::market::MarketTarget;
 use crate::types::market_details::MarketDetailsTarget;
@@ -59,6 +59,10 @@ pub struct TxState {
     pub is_new_account: [BoolTarget; NB_ACCOUNTS_PER_TX],
     pub positions: [AccountPositionTarget; NB_ACCOUNTS_PER_TX - 1],
     pub risk_infos: [RiskInfoTarget; NB_ACCOUNTS_PER_TX - 1],
+    /// Store used strategies in the tx. For L2_STRATEGY_TRANSFER, 0 is from_strategy and 1 is to_strategy.
+    ///  For other tx types, 0 is first account's strategy 1 is second account's strategy and 2 is third account's strategy (if exists).
+    pub strategies: [BigIntTarget; NB_ACCOUNTS_PER_TX],
+    pub is_asset_used_as_margin: [[BoolTarget; NB_ASSETS_PER_TX]; NB_ACCOUNTS_PER_TX], // If it is true, then the asset is used as margin for the account
     pub order_path_helper: [BoolTarget; ORDER_BOOK_MERKLE_LEVELS],
     pub matching_engine_flag: BoolTarget,
     pub update_impact_prices_flag: BoolTarget,
@@ -69,10 +73,9 @@ pub struct TxState {
     pub fee_account_is_taker: BoolTarget,
     pub fee_account_is_maker: BoolTarget,
     pub taker_client_order_proof: [HashOutTarget; ACCOUNT_ORDERS_MERKLE_LEVELS],
-    // public_pool_shares[0] is the pool share of the first account into second account,
-    // public_pool_shares[1] is the pool share of the second account into first account, if either account is a pool
-    pub public_pool_shares: [PublicPoolShareTarget; NB_POSSIBLE_POOL_SHARE_SLOTS],
-    pub apply_pool_share_delta_flag: Target, // for when pool share comes from the second account instead of the first
+    pub public_pool_share: PublicPoolShareTarget,
+    pub apply_pool_share_delta_flag: BoolTarget,
+    pub between_strategies_flag: BoolTarget, // Indicates that we are transfering between different strategies of the same account
 }
 
 impl Default for TxState {
@@ -98,6 +101,10 @@ impl Default for TxState {
             is_new_account: core::array::from_fn(|_| BoolTarget::default()),
             positions: core::array::from_fn(|_| AccountPositionTarget::default()),
             risk_infos: core::array::from_fn(|_| RiskInfoTarget::default()),
+            strategies: core::array::from_fn(|_| BigIntTarget::default()),
+            is_asset_used_as_margin: core::array::from_fn(|_| {
+                core::array::from_fn(|_| BoolTarget::default())
+            }),
             order_path_helper: core::array::from_fn(|_| BoolTarget::default()),
             matching_engine_flag: BoolTarget::default(),
             update_impact_prices_flag: BoolTarget::default(),
@@ -110,8 +117,9 @@ impl Default for TxState {
             taker_client_order_proof: core::array::from_fn(|_| HashOutTarget {
                 elements: core::array::from_fn(|_| Target::default()),
             }),
-            public_pool_shares: core::array::from_fn(|_| PublicPoolShareTarget::default()),
-            apply_pool_share_delta_flag: Target::default(),
+            public_pool_share: PublicPoolShareTarget::default(),
+            apply_pool_share_delta_flag: BoolTarget::default(),
+            between_strategies_flag: BoolTarget::default(),
         }
     }
 }

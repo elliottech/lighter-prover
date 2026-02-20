@@ -182,10 +182,26 @@ impl AccountTarget {
             );
             elements.push(self.collateral.sign.target);
 
+            let strategy_hash = {
+                let mut elements = vec![];
+                self.public_pool_info
+                    .strategies
+                    .iter()
+                    .for_each(|strategy| {
+                        elements.extend_from_slice(
+                            &strategy.abs.limbs.iter().map(|x| x.0).collect::<Vec<_>>(),
+                        );
+                        elements.push(strategy.sign.target);
+                    });
+                builder.hash_n_to_hash_no_pad::<Poseidon2Hash>(elements)
+            };
+            elements.extend_from_slice(&strategy_hash.elements);
+
             elements.extend_from_slice(&[
                 self.total_order_count,
                 self.total_non_cross_order_count,
                 self.cancel_all_time,
+                self.account_trading_mode,
             ]);
 
             [
@@ -266,14 +282,9 @@ impl AccountTarget {
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
-    #[allow(unused_imports)]
-    use env_logger::{DEFAULT_FILTER_ENV, Env, try_init_from_env};
     use plonky2::iop::witness::PartialWitness;
 
     use super::*;
-    use crate::bool_utils::CircuitBuilderBoolUtils;
-    #[allow(unused_imports)]
-    use crate::circuit_logger::CircuitBuilderLogging;
     use crate::types::account::{Account, AccountTargetWitness};
     use crate::types::config::{C, CIRCUIT_CONFIG, F};
     use crate::types::constants::{
@@ -282,10 +293,6 @@ mod tests {
 
     #[test]
     fn empty_hash_check() -> Result<()> {
-        // let _ = env_logger::try_init_from_env(
-        //     env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "debug"),
-        // );
-
         let mut builder = Builder::new(CIRCUIT_CONFIG);
 
         let account = AccountTarget::new(&mut builder);

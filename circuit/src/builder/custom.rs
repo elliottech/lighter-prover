@@ -248,6 +248,12 @@ where
         self.builder.arithmetic(F::NEG_ONE, F::ONE, b.target, x, x)
     }
 
+    pub fn select_constant(&mut self, b: BoolTarget, x: u64, y: u64) -> Target {
+        let x_target = self.constant_u64(x);
+        let y_target = self.constant_u64(y);
+        self.select(b, x_target, y_target)
+    }
+
     pub fn connect_bool(&mut self, a: BoolTarget, b: BoolTarget) {
         self.builder.connect(a.target, b.target);
     }

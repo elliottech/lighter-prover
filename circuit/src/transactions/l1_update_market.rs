@@ -260,38 +260,83 @@ impl Verify for L1UpdateMarketTxTarget {
 impl Apply for L1UpdateMarketTxTarget {
     fn apply(&mut self, builder: &mut Builder, tx_state: &mut TxState) -> BoolTarget {
         // Update market and market details
-        let new_market = MarketTarget {
-            status: self.status,
-            taker_fee: self.taker_fee,
-            maker_fee: self.maker_fee,
-            liquidation_fee: self.liquidation_fee,
-            min_base_amount: self.min_base_amount,
-            min_quote_amount: self.min_quote_amount,
-            order_quote_limit: self.order_quote_limit,
+        tx_state.market = MarketTarget {
+            status: builder.select(self.success, self.status, tx_state.market.status),
+            taker_fee: builder.select(self.success, self.taker_fee, tx_state.market.taker_fee),
+            maker_fee: builder.select(self.success, self.maker_fee, tx_state.market.maker_fee),
+            liquidation_fee: builder.select(
+                self.success,
+                self.liquidation_fee,
+                tx_state.market.liquidation_fee,
+            ),
+            min_base_amount: builder.select(
+                self.success,
+                self.min_base_amount,
+                tx_state.market.min_base_amount,
+            ),
+            min_quote_amount: builder.select(
+                self.success,
+                self.min_quote_amount,
+                tx_state.market.min_quote_amount,
+            ),
+            order_quote_limit: builder.select(
+                self.success,
+                self.order_quote_limit,
+                tx_state.market.order_quote_limit,
+            ),
             ..tx_state.market.clone()
         };
-        tx_state.market = select_market(builder, self.success, &new_market, &tx_state.market);
 
         let is_perps_market_type = builder.is_equal_constant(self.market_type, MARKET_TYPE_PERPS);
         let update_market_details_flag = builder.and(self.success, is_perps_market_type);
-        let new_market_details = MarketDetailsTarget {
-            status: self.status,
-            min_initial_margin_fraction: self.min_initial_margin_fraction,
-            default_initial_margin_fraction: self.default_initial_margin_fraction,
-            maintenance_margin_fraction: self.maintenance_margin_fraction,
-            close_out_margin_fraction: self.close_out_margin_fraction,
-            interest_rate: self.interest_rate,
-            funding_clamp_small: self.funding_clamp_small,
-            funding_clamp_big: self.funding_clamp_big,
-            open_interest_limit: self.open_interest_limit,
+        tx_state.market_details = MarketDetailsTarget {
+            status: builder.select(
+                update_market_details_flag,
+                self.status,
+                tx_state.market_details.status,
+            ),
+            min_initial_margin_fraction: builder.select(
+                update_market_details_flag,
+                self.min_initial_margin_fraction,
+                tx_state.market_details.min_initial_margin_fraction,
+            ),
+            default_initial_margin_fraction: builder.select(
+                update_market_details_flag,
+                self.default_initial_margin_fraction,
+                tx_state.market_details.default_initial_margin_fraction,
+            ),
+            maintenance_margin_fraction: builder.select(
+                update_market_details_flag,
+                self.maintenance_margin_fraction,
+                tx_state.market_details.maintenance_margin_fraction,
+            ),
+            close_out_margin_fraction: builder.select(
+                update_market_details_flag,
+                self.close_out_margin_fraction,
+                tx_state.market_details.close_out_margin_fraction,
+            ),
+            interest_rate: builder.select(
+                update_market_details_flag,
+                self.interest_rate,
+                tx_state.market_details.interest_rate,
+            ),
+            funding_clamp_small: builder.select(
+                update_market_details_flag,
+                self.funding_clamp_small,
+                tx_state.market_details.funding_clamp_small,
+            ),
+            funding_clamp_big: builder.select(
+                update_market_details_flag,
+                self.funding_clamp_big,
+                tx_state.market_details.funding_clamp_big,
+            ),
+            open_interest_limit: builder.select(
+                update_market_details_flag,
+                self.open_interest_limit,
+                tx_state.market_details.open_interest_limit,
+            ),
             ..tx_state.market_details.clone()
         };
-        tx_state.market_details = select_market_details(
-            builder,
-            update_market_details_flag,
-            &new_market_details,
-            &tx_state.market_details,
-        );
 
         // Clear market if expired and empty
         let market_status_expired = builder.constant_from_u8(MARKET_STATUS_EXPIRED);

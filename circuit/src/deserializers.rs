@@ -11,7 +11,8 @@ use plonky2::field::secp256k1_base::Secp256K1Base;
 use plonky2::field::secp256k1_scalar::Secp256K1Scalar;
 use plonky2::field::types::Field;
 use plonky2::hash::hash_types::{HashOut, RichField};
-use serde::de::{self, Deserialize, Deserializer};
+use serde::Deserialize;
+use serde::de::{self, Deserializer};
 
 use crate::blob::constants::*;
 use crate::ecdsa::curve::curve_types::AffinePoint;
@@ -47,6 +48,42 @@ where
 {
     let num: i128 = Deserialize::deserialize(deserializer)?;
     Ok(BigInt::from(num))
+}
+
+pub fn strategies<'de, D, const SIZE: usize>(deserializer: D) -> Result<[BigInt; SIZE], D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Debug, Clone, Deserialize)]
+    struct StrategyValue {
+        col: i128,
+    }
+
+    let elements: HashMap<String, StrategyValue> = Deserialize::deserialize(deserializer)?;
+    let mut result = [BigInt::ZERO; SIZE];
+
+    if elements.len() > SIZE {
+        return Err(de::Error::custom(format!(
+            "Expected at most {} elements, got {}",
+            SIZE,
+            elements.len()
+        )));
+    }
+
+    for (idx, value) in elements.into_iter() {
+        let index = idx.parse::<usize>().map_err(|err| {
+            de::Error::custom(format!("Failed to parse strategy index: {}, {}", idx, err))
+        })?;
+        if index >= SIZE {
+            return Err(de::Error::custom(format!(
+                "Strategy index out of bounds: {}",
+                index
+            )));
+        }
+        result[index] = BigInt::from(value.col);
+    }
+
+    Ok(result)
 }
 
 pub fn aggregated_balances<'de, D>(deserializer: D) -> Result<[BigInt; NB_ASSETS_PER_TX], D::Error>

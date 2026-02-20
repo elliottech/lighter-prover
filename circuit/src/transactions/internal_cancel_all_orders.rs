@@ -102,6 +102,15 @@ impl Verify for InternalCancelAllOrdersTxTarget {
 
         // Give priority to DMS over liquidation
         self.is_liquidation = builder.and_not(self.is_liquidation, self.is_dms);
+
+        // If it's not DMS and in liquidation, can't be insurance fund account
+        let is_insurance_fund_account = builder.is_equal_constant(
+            tx_state.accounts[OWNER_ACCOUNT_ID].account_type,
+            INSURANCE_FUND_ACCOUNT_TYPE as u64,
+        );
+        let is_liquidation_and_insurance_fund =
+            builder.and(self.is_liquidation, is_insurance_fund_account);
+        builder.conditional_assert_false(is_enabled, is_liquidation_and_insurance_fund);
     }
 }
 

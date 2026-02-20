@@ -12,8 +12,9 @@ use plonky2::hash::hash_types::{HashOutTarget, RichField};
 use plonky2::iop::target::{BoolTarget, Target};
 use plonky2::iop::witness::Witness;
 
-use crate::bigint::bigint::{BigIntTarget, CircuitBuilderBigInt, SignTarget};
+use crate::bigint::bigint::{BigIntTarget, CircuitBuilderBigInt};
 use crate::bigint::biguint::CircuitBuilderBiguint;
+use crate::bigint::div_rem::CircuitBuilderBiguintDivRem;
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::comparison::CircuitBuilderSubtractiveComparison;
 use crate::ecdsa::curve::curve_types::AffinePoint;
@@ -113,15 +114,24 @@ use crate::transactions::l2_force_burn_shares::{
 use crate::transactions::l2_mint_shares::{L2MintSharesTxTarget, L2MintSharesTxTargetWitness};
 use crate::transactions::l2_modify_order::{L2ModifyOrderTxTarget, L2ModifyOrderTxTargetWitness};
 use crate::transactions::l2_stake_assets::{L2StakeAssetsTxTarget, L2StakeAssetsTxTargetWitness};
+use crate::transactions::l2_strategy_transfer::{
+    L2StrategyTransferTxTarget, L2StrategyTransferTxTargetWitness,
+};
 use crate::transactions::l2_transfer::{L2TransferTxTarget, L2TransferTxTargetWitness};
 use crate::transactions::l2_unstake_assets::{
     L2UnstakeAssetsTxTarget, L2UnstakeAssetsTxTargetWitness,
+};
+use crate::transactions::l2_update_account_config::{
+    L2UpdateAccountConfigTxTarget, L2UpdateAccountConfigTxTargetWitness,
 };
 use crate::transactions::l2_update_leverage::{
     L2UpdateLeverageTxTarget, L2UpdateLeverageTxTargetWitness,
 };
 use crate::transactions::l2_update_margin::{
     L2UpdateMarginTxTarget, L2UpdateMarginTxTargetWitness,
+};
+use crate::transactions::l2_update_market_config::{
+    L2UpdateMarketConfigTxTarget, L2UpdateMarketConfigTxTargetWitness,
 };
 use crate::transactions::l2_update_public_pool::{
     L2UpdatePublicPoolTxTarget, L2UpdatePublicPoolTxTargetWitness,
@@ -145,7 +155,7 @@ use crate::types::market_details::{
 };
 use crate::types::order::{OrderTarget, OrderTargetWitness};
 use crate::types::order_book_node::{OrderBookNodeTarget, OrderBookNodeTargetWitness};
-use crate::types::public_pool::PublicPoolShareTarget;
+use crate::types::public_pool::{PublicPoolInfoTarget, PublicPoolShareTarget};
 use crate::types::register::{BaseRegisterInfoTarget, RegisterStackTarget};
 use crate::types::risk_info::RiskInfoTarget;
 use crate::types::system_config::SystemConfigTarget;
@@ -195,6 +205,9 @@ pub struct TxTarget {
     pub l2_stake_assets_tx_target: TransactionTarget<L2StakeAssetsTxTarget>,
     pub l2_unstake_assets_tx_target: TransactionTarget<L2UnstakeAssetsTxTarget>,
     pub l2_force_burn_shares_tx_target: TransactionTarget<L2ForceBurnSharesTxTarget>,
+    pub l2_update_account_config_tx_target: TransactionTarget<L2UpdateAccountConfigTxTarget>,
+    pub l2_strategy_transfer_tx_target: TransactionTarget<L2StrategyTransferTxTarget>,
+    pub l2_update_market_config_tx_target: TransactionTarget<L2UpdateMarketConfigTxTarget>,
 
     /*************************/
     /* Internal Transactions */
@@ -342,6 +355,15 @@ impl TxTarget {
             l2_force_burn_shares_tx_target: TransactionTarget::new(L2ForceBurnSharesTxTarget::new(
                 builder,
             )),
+            l2_update_account_config_tx_target: TransactionTarget::new(
+                L2UpdateAccountConfigTxTarget::new(builder),
+            ),
+            l2_strategy_transfer_tx_target: TransactionTarget::new(
+                L2StrategyTransferTxTarget::new(builder),
+            ),
+            l2_update_market_config_tx_target: TransactionTarget::new(
+                L2UpdateMarketConfigTxTarget::new(builder),
+            ),
 
             /*************************/
             /* Internal Transactions */
@@ -402,7 +424,7 @@ impl TxTarget {
             api_key_before: ApiKeyTarget::new(builder),
             account_order_before: AccountOrderTarget::new(builder),
             market_before: MarketTarget::new(builder),
-            order_before: OrderTarget::new(builder), 
+            order_before: OrderTarget::new(builder),
             asset_indices: core::array::from_fn(|_| builder.add_virtual_target()),
 
             /*****************************/
@@ -477,6 +499,7 @@ impl TxTarget {
         let tx_type = TxTypeTargets::new(builder, self.tx_type);
         let tx_hash = self.select_tx_hash(builder, &tx_type, chain_id);
         let account_pk = self.select_account_pk(builder, &tx_type);
+        let partial_main_account = self.select_partial_main_account(builder, &tx_type);
 
         // Perform common verifications for the transaction.
         tx_type.verify(
@@ -490,7 +513,7 @@ impl TxTarget {
                 account_pk,
                 tx_hash,
                 instruction_type: register_stack_before[0].instruction_type,
-                account: self.accounts_before[OWNER_ACCOUNT_ID].clone(),
+                tx_sender_account_partial: partial_main_account,
                 sub_account_index: self.accounts_before[SUB_ACCOUNT_ID].account_index,
             },
         );
@@ -510,32 +533,29 @@ impl TxTarget {
                 &self.accounts_delta_before[..NB_ACCOUNTS_PER_TX - 1],
             );
 
-        let risk_infos_before: [RiskInfoTarget; NB_ACCOUNTS_PER_TX - 1] =
+        let is_asset_used_as_margin: [[BoolTarget; NB_ASSETS_PER_TX]; NB_ACCOUNTS_PER_TX] =
             core::array::from_fn(|i| {
-                RiskInfoTarget::new(
-                    builder,
-                    &self.accounts_before[i],
-                    &positions_with_pub_data_before[i].position,
-                    &market_details_before,
-                    all_market_details_before,
-                )
+                AccountTarget::are_assets_used_as_margin(builder, &self.account_assets_before[i])
+                    .into()
             });
+
+        let risk_infos_before = self.get_risk_infos_before(
+            builder,
+            &tx_type,
+            &positions_with_pub_data_before,
+            &market_details_before,
+            all_market_details_before,
+        );
+        let (strategy_indexes, strategies_before) =
+            self.get_strategies_before(builder, &tx_type, &market_details_before);
         let order_path_helper = order_indexes_to_merkle_path(
             builder,
             self.order_before.price_index,
             self.order_before.nonce_index,
         );
 
-        let public_pool_shares_before: [PublicPoolShareTarget; NB_POSSIBLE_POOL_SHARE_SLOTS] = [
-            self.accounts_before[OWNER_OR_POOL_ACCOUNT_ID_1].get_public_pool_share(
-                builder,
-                self.accounts_before[OWNER_OR_POOL_ACCOUNT_ID_2].account_index,
-            ),
-            self.accounts_before[OWNER_OR_POOL_ACCOUNT_ID_2].get_public_pool_share(
-                builder,
-                self.accounts_before[OWNER_OR_POOL_ACCOUNT_ID_1].account_index,
-            ),
-        ];
+        let public_pool_share_before = self.accounts_before[OWNER_ACCOUNT_ID]
+            .get_public_pool_share(builder, self.accounts_before[SUB_ACCOUNT_ID].account_index);
         let (mut position_bucket_hashes, old_account_hashes, old_account_empty_infos) =
             self.get_old_account_hashes(builder);
         let old_account_asset_hashes = self.get_old_asset_hashes(builder);
@@ -559,6 +579,8 @@ impl TxTarget {
             order_book_tree_path: self.order_book_tree_path.clone(),
             positions: core::array::from_fn(|i| positions_with_pub_data_before[i].position.clone()),
             risk_infos: risk_infos_before.clone(),
+            strategies: strategies_before.clone(),
+            is_asset_used_as_margin,
             order_path_helper,
             matching_engine_flag: builder._false(),
             update_impact_prices_flag: builder._false(),
@@ -583,8 +605,10 @@ impl TxTarget {
                 self.accounts_before[MAKER_ACCOUNT_ID].account_index,
             ),
             taker_client_order_proof: self.account_orders_tree_merkle_proof[2],
-            public_pool_shares: public_pool_shares_before,
-            apply_pool_share_delta_flag: builder.zero(),
+            public_pool_share: public_pool_share_before,
+            apply_pool_share_delta_flag: builder._false(),
+            between_strategies_flag: builder
+                .is_equal_constant(self.tx_type, TX_TYPE_L2_STRATEGY_TRANSFER as u64),
         };
 
         self.validate_asset_indices(builder, tx_state);
@@ -611,7 +635,7 @@ impl TxTarget {
         /*******************************/
         /*      PUSH STATE DELTAS      */
         /*******************************/
-        let aggregate_collateral_deltas = self.apply_position_delta(
+        let position_usdc_deltas = self.apply_position_delta(
             builder,
             tx_state,
             &positions_with_pub_data_before,
@@ -620,11 +644,13 @@ impl TxTarget {
 
         self.apply_asset_deltas(builder, tx_state);
 
-        self.apply_public_pool_share_delta(builder, tx_state, &public_pool_shares_before);
+        self.apply_public_pool_share_delta(builder, tx_state, &public_pool_share_before);
 
-        self.apply_pool_info_delta(builder, tx_state);
+        self.apply_pool_info_deltas(builder, tx_state);
 
-        self.apply_account_delta(builder, tx_state, &aggregate_collateral_deltas);
+        self.apply_strategy_deltas(builder, tx_state, strategy_indexes);
+
+        self.apply_account_deltas(builder, tx_state, &position_usdc_deltas);
 
         self.update_impact_prices(builder, tx_state, &market_details_before);
 
@@ -643,7 +669,7 @@ impl TxTarget {
         /*************************/
         self.verify_position_delta_merkle_proofs(builder, tx_state, &old_position_delta_hashes);
 
-        self.verify_api_key_merkle_proof(builder, tx_state);
+        self.verify_api_key_merkle_proof(builder, tx_state, &tx_type);
 
         self.verify_account_orders_merkle_proof(builder, tx_state);
 
@@ -695,6 +721,261 @@ impl TxTarget {
         //     builder.zero_hash_out(),
         //     builder.zero_hash_out(),
         // )
+    }
+
+    /// Computes the two risk slots we use in tx_state
+    ///
+    /// 1. Non-insurance fund accounts use regular collateral and markets' strategy ids do not matter (cross risk).
+    /// 2. Insurance funds use strategy balance as collateral and risk calculation respects strategy ids.
+    /// 3. For transactions that require calculating the share value of a public pool, we need the cross risk of the
+    ///    insurance fund. These are of two types:
+    ///    a. Minting shares to the insurance fund
+    ///    In this case we need cross risks of both owner and the insurance
+    ///    fund accounts. We place the owner's cross risk at index 0, and the insurance fund's cross risk at index 1.
+    ///    b. Burning shares from the insurance fund
+    ///    In this case we don't need owner's risk (as their TAV will increase), but we need the insurance fund's
+    ///    cross risk and default strategy risk. Hence we treat the insurance fund account as a regular account and use the
+    ///    whole collateral and place this risk info at index 0, and then we calculate the default strategy risk at index 1.
+    /// 4. For strategy balance transfers, we set strategy id to `from_strategy_index`.
+    ///
+    /// - Accounts and positions are partially copied as risk calculations don't use all fields.
+    /// - Insurance funds can't have isolated positions. `current_market_details` is only relevant for isolated
+    ///   positions so we can just pass it directly.
+    /// - For transactions that don't utilize a market (empty market info), strategy index will come as default (0).
+    /// - Strategy id being 0 means calculating the cross risk for non-insurance fund accounts, and the default
+    ///   strategy for insurance fund accounts.
+    fn get_risk_infos_before(
+        &self,
+        builder: &mut Builder,
+        tx_type: &TxTypeTargets,
+        positions_with_pub_data_before: &[PositionWithDelta; NB_ACCOUNTS_PER_TX - 1],
+        current_market_details_before: &MarketDetailsTarget,
+        all_market_details_before: &[MarketDetailsTarget; POSITION_LIST_SIZE],
+    ) -> [RiskInfoTarget; NB_ACCOUNTS_PER_TX - 1] {
+        let default_strategy_index = builder.constant_usize(DEFAULT_STRATEGY_INDEX);
+
+        // Select among cross risk, insurance fund strategy risk, and pool account cross risk (if share-burning transaction).
+        let (partial_account_0, strategy_index_0, all_market_details_0, current_market_details_0) = {
+            // Override strategy indices with 0 unless the owner account is an insurance fund. For strategy transfer transactions,
+            // use from_strategy_index as the strategy index for the insurance fund account.
+            let use_strategy = {
+                let assertions = [
+                    builder.not(tx_type.is_share_burn_tx), // First slot will be cross risk of sub account, not the owner
+                    builder.is_equal_constant(
+                        self.accounts_before[OWNER_ACCOUNT_ID].account_type,
+                        INSURANCE_FUND_ACCOUNT_TYPE as u64,
+                    ),
+                ];
+                builder.multi_and(&assertions)
+            };
+
+            let strategy_index = {
+                let strategy_index = builder.select(
+                    use_strategy,
+                    current_market_details_before.strategy_index,
+                    default_strategy_index,
+                );
+                builder.select(
+                    tx_type.is_l2_strategy_transfer,
+                    self.l2_strategy_transfer_tx_target
+                        .inner
+                        .from_strategy_index,
+                    strategy_index,
+                )
+            };
+
+            let collateral = {
+                // use insurance fund's whole collateral if is_share_burn_tx
+                // if not is_share_burn_tx; use owner account collateral, or strategy balance if insurance fund
+                let relevant_collateral = self.accounts_before[OWNER_ACCOUNT_ID]
+                    .get_relevant_collateral(builder, strategy_index);
+                builder.select_bigint(
+                    tx_type.is_share_burn_tx,
+                    &self.accounts_before[SUB_ACCOUNT_ID].collateral,
+                    &relevant_collateral,
+                )
+            };
+
+            // Put the pool positions for share-burning txs. If account is not insurance fund, positions' strategy
+            // indices will be zero anyways, don't override them. Furthermore, insurance fund can't have isolated
+            // positions, so we don't select `margin_mode` (0 means cross) and `allocated_margin`.
+            let positions = self.accounts_before[SUB_ACCOUNT_ID]
+                .positions
+                .iter()
+                .zip(self.accounts_before[OWNER_ACCOUNT_ID].positions.iter())
+                .map(|(sub_account_position, owner_account_position)| {
+                    AccountPositionTarget::partial_select_for_cross_risk(
+                        builder,
+                        tx_type.is_share_burn_tx,
+                        sub_account_position,
+                        owner_account_position,
+                    )
+                })
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap();
+
+            let partial_account = AccountTarget {
+                positions,
+                collateral,
+                ..AccountTarget::default() // Partial
+            };
+
+            // Override strategy indices in market details with 0 for non-insurance fund accounts
+            let all_market_details =
+                all_market_details_before
+                    .clone()
+                    .map(|md| MarketDetailsTarget {
+                        strategy_index: builder.select(
+                            use_strategy,
+                            md.strategy_index,
+                            default_strategy_index,
+                        ),
+                        ..md
+                    });
+
+            let current_market_details = MarketDetailsTarget {
+                strategy_index: builder.select(
+                    use_strategy,
+                    current_market_details_before.strategy_index,
+                    default_strategy_index,
+                ),
+                ..current_market_details_before.clone()
+            };
+
+            (
+                partial_account,
+                strategy_index,
+                all_market_details,
+                current_market_details,
+            )
+        };
+
+        // Select between normal account cross risk, insurance fund strategy risk, or insurance fund cross risk
+        let (partial_account_1, strategy_index_1, all_market_details_1, current_market_details_1) = {
+            let is_second_account_insurance_fund = builder.is_equal_constant(
+                self.accounts_before[SUB_ACCOUNT_ID].account_type,
+                INSURANCE_FUND_ACCOUNT_TYPE as u64,
+            );
+            let use_strategy =
+                builder.and_not(is_second_account_insurance_fund, tx_type.is_l2_mint_shares);
+
+            // Override strategy indices with 0 unless the sub account is an insurance fund.
+            // Strategy transfer transactions don't use a sub account and the target strategy balance increases,
+            // so we don't need to check for l2_strategy_transfer here.
+            let strategy_index = builder.select(
+                use_strategy,
+                current_market_details_before.strategy_index,
+                default_strategy_index,
+            );
+
+            let collateral = {
+                // use insurance fund's whole collateral if use_strategy is false
+                let relevant_collateral = self.accounts_before[SUB_ACCOUNT_ID]
+                    .get_relevant_collateral(builder, strategy_index);
+                builder.select_bigint(
+                    use_strategy,
+                    &relevant_collateral,
+                    &self.accounts_before[SUB_ACCOUNT_ID].collateral,
+                )
+            };
+
+            let partial_account = AccountTarget {
+                positions: self.accounts_before[SUB_ACCOUNT_ID].positions.clone(),
+                collateral,
+                ..AccountTarget::default() // Partial
+            };
+
+            let all_market_details =
+                all_market_details_before
+                    .clone()
+                    .map(|md| MarketDetailsTarget {
+                        strategy_index: builder.select(
+                            use_strategy,
+                            md.strategy_index,
+                            default_strategy_index,
+                        ),
+                        ..md
+                    });
+
+            let current_market_details = MarketDetailsTarget {
+                strategy_index: builder.select(
+                    use_strategy,
+                    current_market_details_before.strategy_index,
+                    default_strategy_index,
+                ),
+                ..current_market_details_before.clone()
+            };
+
+            (
+                partial_account,
+                strategy_index,
+                all_market_details,
+                current_market_details,
+            )
+        };
+
+        [
+            RiskInfoTarget::new(
+                builder,
+                &partial_account_0,
+                &positions_with_pub_data_before[OWNER_ACCOUNT_ID].position,
+                &current_market_details_0,
+                &all_market_details_0,
+                strategy_index_0,
+            ),
+            RiskInfoTarget::new(
+                builder,
+                &partial_account_1,
+                &positions_with_pub_data_before[SUB_ACCOUNT_ID].position,
+                &current_market_details_1,
+                &all_market_details_1,
+                strategy_index_1,
+            ),
+        ]
+    }
+
+    fn get_strategies_before(
+        &self,
+        builder: &mut Builder,
+        tx_type: &TxTypeTargets,
+        current_market_details: &MarketDetailsTarget,
+    ) -> (
+        [Target; NB_ACCOUNTS_PER_TX],
+        [BigIntTarget; NB_ACCOUNTS_PER_TX],
+    ) {
+        let strategy_index_0 = builder.select(
+            tx_type.is_l2_strategy_transfer,
+            self.l2_strategy_transfer_tx_target
+                .inner
+                .from_strategy_index,
+            current_market_details.strategy_index,
+        );
+
+        let strategy_index_1 = builder.select(
+            tx_type.is_l2_strategy_transfer,
+            self.l2_strategy_transfer_tx_target.inner.to_strategy_index,
+            current_market_details.strategy_index,
+        );
+
+        (
+            [
+                strategy_index_0,
+                strategy_index_1,
+                current_market_details.strategy_index,
+            ],
+            [
+                self.accounts_before[OWNER_ACCOUNT_ID]
+                    .public_pool_info
+                    .get_strategy_balance(builder, strategy_index_0),
+                self.accounts_before[SUB_ACCOUNT_ID]
+                    .public_pool_info
+                    .get_strategy_balance(builder, strategy_index_1),
+                self.accounts_before[FEE_ACCOUNT_ID]
+                    .public_pool_info
+                    .get_strategy_balance(builder, current_market_details.strategy_index),
+            ],
+        )
     }
 
     fn get_old_asset_hashes(
@@ -765,6 +1046,8 @@ impl TxTarget {
         )
     }
 
+    /// If account is using unified trading mode, then usdc `balance` should be empty and `collateral` should be used,
+    /// which is accounted for in `apply_account_delta`.
     fn apply_asset_deltas(&self, builder: &mut Builder, tx_state: &mut TxState) {
         for i in 0..NB_ACCOUNTS_PER_TX {
             let old_lit_unlock = self.accounts_before[i].get_total_unlock_amount(builder);
@@ -772,46 +1055,40 @@ impl TxTarget {
 
             for j in 0..NB_ASSETS_PER_TX {
                 let is_lit = builder.is_equal_constant(tx_state.asset_indices[j], LIT_ASSET_INDEX);
+                let add_to_old_balance_for_pending_unlocks =
+                    builder.mul_biguint_by_bool(&old_lit_unlock, is_lit);
+                let add_to_new_balance_for_pending_unlocs =
+                    builder.mul_biguint_by_bool(&new_lit_unlock, is_lit);
 
-                let add_to_old_balance = builder.mul_biguint_by_bool(&old_lit_unlock, is_lit);
                 let old_extended_balance = builder.add_biguint_non_carry(
                     &self.account_assets_before[i][j].balance,
-                    &add_to_old_balance,
+                    &add_to_old_balance_for_pending_unlocks,
                     BIG_U96_LIMBS,
                 );
-                let old_extended_balance = builder.biguint_to_bigint(&old_extended_balance);
-                let old_balance = builder.euclidian_div_by_biguint(
+                let old_balance = builder.div_biguint(
                     &old_extended_balance,
                     &tx_state.assets[j].extension_multiplier,
-                    BIG_U96_LIMBS,
                 );
+                let old_balance_bigint = builder.biguint_to_bigint(&old_balance);
 
-                let add_to_new_balance = builder.mul_biguint_by_bool(&new_lit_unlock, is_lit);
                 let new_extended_balance = builder.add_biguint_non_carry(
                     &tx_state.account_assets[i][j].balance,
-                    &add_to_new_balance,
+                    &add_to_new_balance_for_pending_unlocs,
                     BIG_U96_LIMBS,
                 );
-                let new_extended_balance = builder.biguint_to_bigint(&new_extended_balance);
-                let new_balance = builder.euclidian_div_by_biguint(
+                let new_balance = builder.div_biguint(
                     &new_extended_balance,
                     &tx_state.assets[j].extension_multiplier,
+                );
+                let new_balance_bigint = builder.biguint_to_bigint(&new_balance);
+
+                let balance_delta = builder.sub_bigint_non_carry(
+                    &new_balance_bigint,
+                    &old_balance_bigint,
                     BIG_U96_LIMBS,
                 );
-
-                let balance_delta =
-                    builder.sub_bigint_non_carry(&new_balance, &old_balance, BIG_U96_LIMBS);
-                let balance_delta = BigIntTarget {
-                    // Don't apply balance delta if sender and receiver are the same
-                    abs: builder.mul_biguint_by_bool(
-                        &balance_delta.abs,
-                        tx_state.is_sender_receiver_different,
-                    ),
-                    sign: SignTarget::new_unsafe(builder.mul_bool(
-                        tx_state.is_sender_receiver_different,
-                        balance_delta.sign.target,
-                    )),
-                };
+                let balance_delta = builder
+                    .mul_bigint_by_bool(&balance_delta, tx_state.is_sender_receiver_different);
 
                 tx_state.accounts[i].aggregated_balances[j] = builder.add_bigint_non_carry(
                     &tx_state.accounts[i].aggregated_balances[j],
@@ -846,7 +1123,7 @@ impl TxTarget {
         let empty_position = AccountPositionTarget::empty(builder);
 
         array::from_fn(|i| {
-            let (position_with_pub_data, aggregated_collateral_delta) =
+            let (position_with_pub_data, position_usdc_delta) =
                 PositionWithDelta::new_position_with_pub_data_from_new_position(
                     builder,
                     &positions_with_pub_data_before[i],
@@ -917,7 +1194,7 @@ impl TxTarget {
                 }
             }
 
-            aggregated_collateral_delta
+            position_usdc_delta
         })
     }
 
@@ -925,44 +1202,39 @@ impl TxTarget {
         &self,
         builder: &mut Builder,
         tx_state: &mut TxState,
-        public_pool_shares_before: &[PublicPoolShareTarget; NB_POSSIBLE_POOL_SHARE_SLOTS],
+        public_pool_share_before: &PublicPoolShareTarget,
     ) {
-        // Flag is 1 -> Owner is share owner and sub-account is pool
-        // Flag is 2 -> Sub-account is share owner and owner is pool
-        for id in [OWNER_ACCOUNT_ID, SUB_ACCOUNT_ID] {
-            let flag =
-                builder.is_equal_constant(tx_state.apply_pool_share_delta_flag, (id + 1) as u64);
+        let share_amount_delta = builder.sub(
+            tx_state.public_pool_share.share_amount,
+            public_pool_share_before.share_amount,
+        );
 
-            let share_amount_delta = builder.sub(
-                tx_state.public_pool_shares[id].share_amount,
-                public_pool_shares_before[id].share_amount,
-            );
-            tx_state.accounts_delta[id].apply_pool_pub_data_share_delta(
-                builder,
-                flag,
-                tx_state.public_pool_shares[id].public_pool_index,
-                SignedTarget::new_unsafe(share_amount_delta),
-            );
-            let entry_usdc_delta = builder.sub(
-                tx_state.public_pool_shares[id].principal_amount,
-                public_pool_shares_before[id].principal_amount,
-            );
-            let entry_timestamp_delta = builder.sub(
-                tx_state.public_pool_shares[id].entry_timestamp,
-                public_pool_shares_before[id].entry_timestamp,
-            );
-            tx_state.accounts[id].apply_pool_share_delta(
-                builder,
-                flag,
-                tx_state.public_pool_shares[id].public_pool_index,
-                share_amount_delta,
-                entry_usdc_delta,
-                entry_timestamp_delta,
-            );
-        }
+        tx_state.accounts_delta[OWNER_ACCOUNT_ID].apply_pool_pub_data_share_delta(
+            builder,
+            tx_state.apply_pool_share_delta_flag,
+            tx_state.public_pool_share.public_pool_index,
+            SignedTarget::new_unsafe(share_amount_delta),
+        );
+
+        let entry_usdc_delta = builder.sub(
+            tx_state.public_pool_share.principal_amount,
+            public_pool_share_before.principal_amount,
+        );
+        let entry_timestamp_delta = builder.sub(
+            tx_state.public_pool_share.entry_timestamp,
+            public_pool_share_before.entry_timestamp,
+        );
+        tx_state.accounts[OWNER_ACCOUNT_ID].apply_pool_share_delta(
+            builder,
+            tx_state.apply_pool_share_delta_flag,
+            tx_state.public_pool_share.public_pool_index,
+            share_amount_delta,
+            entry_usdc_delta,
+            entry_timestamp_delta,
+        );
     }
 
-    fn apply_pool_info_delta(&self, builder: &mut Builder, tx_state: &mut TxState) {
+    fn apply_pool_info_deltas(&self, builder: &mut Builder, tx_state: &mut TxState) {
         for i in 0..NB_ACCOUNTS_PER_TX - 1 {
             let pool_total_shares_delta = SignedTarget::new_unsafe(builder.sub(
                 tx_state.accounts[i].public_pool_info.total_shares,
@@ -991,11 +1263,32 @@ impl TxTarget {
         }
     }
 
-    fn apply_account_delta(
+    fn apply_strategy_deltas(
         &self,
         builder: &mut Builder,
         tx_state: &mut TxState,
-        aggregate_collateral_deltas: &[BigIntTarget; NB_ACCOUNTS_PER_TX - 1],
+        strategy_indexes: [Target; NB_ACCOUNTS_PER_TX],
+    ) {
+        for account in 0..NB_ACCOUNTS_PER_TX {
+            for strategy in 0..NB_STRATEGIES {
+                let correct_strategy =
+                    builder.is_equal_constant(strategy_indexes[account], strategy as u64);
+                let flag = builder.and_not(correct_strategy, tx_state.between_strategies_flag);
+                tx_state.accounts[account].public_pool_info.strategies[strategy] = builder
+                    .select_bigint(
+                        flag,
+                        &tx_state.strategies[account],
+                        &tx_state.accounts[account].public_pool_info.strategies[strategy],
+                    );
+            }
+        }
+    }
+
+    fn apply_account_deltas(
+        &self,
+        builder: &mut Builder,
+        tx_state: &mut TxState,
+        position_usdc_deltas: &[BigIntTarget; NB_ACCOUNTS_PER_TX - 1],
     ) {
         let usdc_to_collateral_multiplier =
             builder.constant_biguint(&BigUint::from(USDC_TO_COLLATERAL_MULTIPLIER as u64));
@@ -1005,13 +1298,17 @@ impl TxTarget {
                 &usdc_to_collateral_multiplier,
                 BIG_U96_LIMBS,
             );
+
             let new_collateral = builder.euclidian_div_by_biguint(
                 &tx_state.accounts[i].collateral,
                 &usdc_to_collateral_multiplier,
                 BIG_U96_LIMBS,
             );
+
             let mut collateral_delta =
                 builder.sub_bigint_non_carry(&new_collateral, &old_collateral, BIG_U96_LIMBS);
+
+            // Account for position changes except for fee account
             if i < NB_ACCOUNTS_PER_TX - 1 {
                 // If account is a new account, apply l1 address and account type changes to pub data delta
                 let is_new_account = tx_state.is_new_account[i];
@@ -1029,22 +1326,17 @@ impl TxTarget {
                 // Apply aggregated collateral delta for position change
                 collateral_delta = builder.add_bigint_non_carry(
                     &collateral_delta,
-                    &aggregate_collateral_deltas[i],
+                    &position_usdc_deltas[i],
                     BIG_U96_LIMBS,
                 );
 
-                collateral_delta = BigIntTarget {
-                    // Don't apply collateral delta if sender and receiver are the same
-                    abs: builder.mul_biguint_by_bool(
-                        &collateral_delta.abs,
-                        tx_state.is_sender_receiver_different,
-                    ),
-                    sign: SignTarget::new_unsafe(builder.mul_bool(
-                        tx_state.is_sender_receiver_different,
-                        collateral_delta.sign.target,
-                    )),
-                };
+                // Don't apply collateral delta if sender and receiver are the same
+                collateral_delta = builder
+                    .mul_bigint_by_bool(&collateral_delta, tx_state.is_sender_receiver_different);
             }
+
+            let ignore_collateral = builder.not(tx_state.between_strategies_flag);
+            collateral_delta = builder.mul_bigint_by_bool(&collateral_delta, ignore_collateral);
 
             // Apply collateral delta to usdc asset balance
             let zero_bigint = builder.zero_bigint();
@@ -1373,26 +1665,48 @@ impl TxTarget {
         // )
     }
 
-    fn verify_api_key_merkle_proof(&self, builder: &mut Builder, tx_state: &mut TxState) {
+    fn verify_api_key_merkle_proof(
+        &self,
+        builder: &mut Builder,
+        tx_state: &mut TxState,
+        tx_type: &TxTypeTargets,
+    ) {
         let api_key_before_hash = self.api_key_before.hash(builder);
         let api_key_merkle_path =
             api_key_index_to_merkle_path(builder, self.api_key_before.api_key_index);
 
+        // Force burn swaps owner and pool accounts
+        let api_key_root = builder.select_hash(
+            tx_type.is_l2_force_burn_shares,
+            &self.accounts_before[SUB_ACCOUNT_ID].api_key_root,
+            &self.accounts_before[OWNER_ACCOUNT_ID].api_key_root,
+        );
+
         verify_merkle_proof(
             builder,
-            &self.accounts_before[0].api_key_root,
+            &api_key_root,
             api_key_before_hash,
             self.api_key_tree_merkle_proof,
             api_key_merkle_path,
         );
 
         let new_api_key_hash = tx_state.api_key.hash(builder);
-
-        tx_state.accounts[0].api_key_root = recalculate_root(
+        let new_api_key_root = recalculate_root(
             builder,
             new_api_key_hash,
             self.api_key_tree_merkle_proof,
             api_key_merkle_path,
+        );
+
+        tx_state.accounts[OWNER_ACCOUNT_ID].api_key_root = builder.select_hash(
+            tx_type.is_l2_force_burn_shares,
+            &tx_state.accounts[OWNER_ACCOUNT_ID].api_key_root,
+            &new_api_key_root,
+        );
+        tx_state.accounts[SUB_ACCOUNT_ID].api_key_root = builder.select_hash(
+            tx_type.is_l2_force_burn_shares,
+            &new_api_key_root,
+            &tx_state.accounts[SUB_ACCOUNT_ID].api_key_root,
         );
     }
 
@@ -1679,6 +1993,43 @@ impl TxTarget {
         )
     }
 
+    /// Selects parts of the main account for tx type related verifications.
+    /// Any new field verification added to `verify_l2_tx` requires a change here as well.
+    fn select_partial_main_account(
+        &self,
+        builder: &mut Builder,
+        tx_type: &TxTypeTargets,
+    ) -> AccountTarget {
+        AccountTarget {
+            account_index: builder.select(
+                tx_type.is_l2_force_burn_shares,
+                self.accounts_before[SUB_ACCOUNT_ID].account_index,
+                self.accounts_before[OWNER_ACCOUNT_ID].account_index,
+            ),
+            account_type: builder.select(
+                tx_type.is_l2_force_burn_shares,
+                self.accounts_before[SUB_ACCOUNT_ID].account_type,
+                self.accounts_before[OWNER_ACCOUNT_ID].account_type,
+            ),
+            cancel_all_time: builder.select(
+                tx_type.is_l2_force_burn_shares,
+                self.accounts_before[SUB_ACCOUNT_ID].cancel_all_time,
+                self.accounts_before[OWNER_ACCOUNT_ID].cancel_all_time,
+            ),
+            public_pool_info: PublicPoolInfoTarget {
+                status: builder.select(
+                    tx_type.is_l2_force_burn_shares,
+                    self.accounts_before[SUB_ACCOUNT_ID].public_pool_info.status,
+                    self.accounts_before[OWNER_ACCOUNT_ID]
+                        .public_pool_info
+                        .status,
+                ),
+                ..PublicPoolInfoTarget::default()
+            },
+            ..AccountTarget::default()
+        }
+    }
+
     /// Selects the public key for the account. For L2 Change Pub Key transaction, the new public key in transaction is used.
     fn select_account_pk(
         &self,
@@ -1887,6 +2238,42 @@ impl TxTarget {
             selected_hash,
         );
 
+        let l2_update_account_config_tx_hash = self.l2_update_account_config_tx_target.hash(
+            builder,
+            self.nonce,
+            self.expired_at,
+            chain_id,
+        );
+        selected_hash = builder.select_quintic_ext(
+            tx_type.is_l2_update_account_config,
+            l2_update_account_config_tx_hash,
+            selected_hash,
+        );
+
+        let l2_strategy_transfer_tx_hash = self.l2_strategy_transfer_tx_target.hash(
+            builder,
+            self.nonce,
+            self.expired_at,
+            chain_id,
+        );
+        selected_hash = builder.select_quintic_ext(
+            tx_type.is_l2_strategy_transfer,
+            l2_strategy_transfer_tx_hash,
+            selected_hash,
+        );
+
+        let l2_update_market_config_tx_hash = self.l2_update_market_config_tx_target.hash(
+            builder,
+            self.nonce,
+            self.expired_at,
+            chain_id,
+        );
+        selected_hash = builder.select_quintic_ext(
+            tx_type.is_l2_update_market_config,
+            l2_update_market_config_tx_hash,
+            selected_hash,
+        );
+
         selected_hash
     }
 
@@ -1994,6 +2381,12 @@ impl TxTarget {
         self.l2_unstake_assets_tx_target
             .verify(builder, tx_type, tx_state);
         self.l2_force_burn_shares_tx_target
+            .verify(builder, tx_type, tx_state);
+        self.l2_update_account_config_tx_target
+            .verify(builder, tx_type, tx_state);
+        self.l2_strategy_transfer_tx_target
+            .verify(builder, tx_type, tx_state);
+        self.l2_update_market_config_tx_target
             .verify(builder, tx_type, tx_state);
 
         /*************************/
@@ -2180,6 +2573,11 @@ impl TxTarget {
         self.l2_stake_assets_tx_target.apply(builder, tx_state);
         self.l2_unstake_assets_tx_target.apply(builder, tx_state);
         self.l2_force_burn_shares_tx_target.apply(builder, tx_state);
+        self.l2_update_account_config_tx_target
+            .apply(builder, tx_state);
+        self.l2_strategy_transfer_tx_target.apply(builder, tx_state);
+        self.l2_update_market_config_tx_target
+            .apply(builder, tx_state);
 
         /*************************/
         /* Internal Transactions */
@@ -2503,6 +2901,18 @@ impl<T: Witness<F> + PartialWitnessCurve<F>, F: PrimeField64 + Extendable<5> + R
         self.set_l2_force_burn_shares_tx_target(
             &a.l2_force_burn_shares_tx_target.inner,
             &b.l2_force_burn_shares_tx,
+        )?;
+        self.set_l2_update_account_config_tx_target(
+            &a.l2_update_account_config_tx_target.inner,
+            &b.l2_update_account_config_tx,
+        )?;
+        self.set_l2_strategy_transfer_tx_target(
+            &a.l2_strategy_transfer_tx_target.inner,
+            &b.l2_strategy_transfer_tx,
+        )?;
+        self.set_l2_update_market_config_tx_target(
+            &a.l2_update_market_config_tx_target.inner,
+            &b.l2_update_market_config_tx,
         )?;
 
         /*************************/

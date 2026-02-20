@@ -116,6 +116,12 @@ impl Verify for InternalDeleverageTxTarget {
             tx_state.market.perps_market_index,
         );
 
+        builder.conditional_assert_eq_constant(
+            is_enabled,
+            tx_state.asset_indices[TX_ASSET_ID],
+            USDC_ASSET_INDEX,
+        );
+
         // Size should be non-zero
         builder.conditional_assert_not_zero(is_enabled, self.size);
         builder.register_range_check(self.size, ORDER_SIZE_BITS);
@@ -163,7 +169,7 @@ impl Verify for InternalDeleverageTxTarget {
         );
         builder.conditional_assert_true(is_enabled, is_bankrupt_account_health_correct);
 
-        // Bankrupt account should not have any open orders
+        // Bankrupt account should not have any open orders (unless bankrupt account is insurance fund)
         let cross_order_count = builder.sub(
             tx_state.accounts[BANKRUPT_ACCOUNT_ID].total_order_count,
             tx_state.accounts[BANKRUPT_ACCOUNT_ID].total_non_cross_order_count,
@@ -179,7 +185,13 @@ impl Verify for InternalDeleverageTxTarget {
             isolated_order_count,
             cross_order_count,
         );
-        builder.conditional_assert_zero(is_enabled, order_count);
+        let is_order_count_zero = builder.is_zero(order_count);
+        let is_bankrupt_account_insurance_fund = builder.is_equal_constant(
+            tx_state.accounts[BANKRUPT_ACCOUNT_ID].account_type,
+            INSURANCE_FUND_ACCOUNT_TYPE as u64,
+        );
+        let should_be_true = builder.or(is_order_count_zero, is_bankrupt_account_insurance_fund);
+        builder.conditional_assert_true(is_enabled, should_be_true);
 
         // Bankrupt account should have a position that is at least the size of the deleverage in absolute value
         let abs_bankrupt_position =
@@ -293,6 +305,7 @@ impl Apply for InternalDeleverageTxTarget {
             deleverager_margin_delta,
         ) = apply_perps_trade(builder, self.success, &apply_trade_params);
 
+        // Get cross collateral and not asset balance, so not to deduct locked balances
         let bankrupt_available_cross_collateral = get_available_collateral(
             builder,
             &tx_state.risk_infos[BANKRUPT_ACCOUNT_ID].cross_risk_parameters,
@@ -309,6 +322,7 @@ impl Apply for InternalDeleverageTxTarget {
             builder.or(collateral_gte_delta, is_delta_negative)
         };
 
+        // Get cross collateral and not asset balance, so not to deduct locked balances
         let deleverager_available_cross_collateral = get_available_collateral(
             builder,
             &tx_state.risk_infos[DELEVERAGER_ACCOUNT_ID].cross_risk_parameters,
@@ -364,35 +378,53 @@ impl Apply for InternalDeleverageTxTarget {
             &tx_state.positions[DELEVERAGER_ACCOUNT_ID],
         );
 
-        // Update collaterals
-        let is_success_and_is_bankrupt_position_isolated =
-            builder.and(self.success, is_bankrupt_position_isolated);
-        let is_success_and_is_bankrupt_position_cross =
-            builder.and_not(self.success, is_bankrupt_position_isolated);
-        tx_state.accounts[BANKRUPT_ACCOUNT_ID].collateral = builder.select_bigint(
-            is_success_and_is_bankrupt_position_isolated,
+        // Update collaterals - Because deleverage can only happen in Perps markets, we don't need to handle asset balances for unified accounts
+        let new_bankrupt_collateral = builder.select_bigint(
+            is_bankrupt_position_isolated,
             &new_bankrupt_risk_info.cross_risk_parameters.collateral,
-            &tx_state.accounts[BANKRUPT_ACCOUNT_ID].collateral,
-        );
-        tx_state.accounts[BANKRUPT_ACCOUNT_ID].collateral = builder.select_bigint(
-            is_success_and_is_bankrupt_position_cross,
             &new_bankrupt_risk_info.current_risk_parameters.collateral,
-            &tx_state.accounts[BANKRUPT_ACCOUNT_ID].collateral,
+        );
+        let old_bankrupt_collateral = builder.select_bigint(
+            is_bankrupt_position_isolated,
+            &tx_state.risk_infos[BANKRUPT_ACCOUNT_ID]
+                .cross_risk_parameters
+                .collateral,
+            &tx_state.risk_infos[BANKRUPT_ACCOUNT_ID]
+                .current_risk_parameters
+                .collateral,
+        );
+        let bankrupt_collateral_delta =
+            builder.sub_bigint(&new_bankrupt_collateral, &old_bankrupt_collateral);
+
+        tx_state.accounts[BANKRUPT_ACCOUNT_ID].apply_collateral_delta(
+            builder,
+            self.success,
+            &bankrupt_collateral_delta,
+            &mut tx_state.strategies[BANKRUPT_ACCOUNT_ID],
         );
 
-        let is_success_and_is_deleverager_position_isolated =
-            builder.and(self.success, is_deleverager_position_isolated);
-        let is_success_and_is_deleverager_position_cross =
-            builder.and_not(self.success, is_deleverager_position_isolated);
-        tx_state.accounts[DELEVERAGER_ACCOUNT_ID].collateral = builder.select_bigint(
-            is_success_and_is_deleverager_position_isolated,
+        let new_deleverager_collateral = builder.select_bigint(
+            is_deleverager_position_isolated,
             &new_deleverager_risk_info.cross_risk_parameters.collateral,
-            &tx_state.accounts[DELEVERAGER_ACCOUNT_ID].collateral,
-        );
-        tx_state.accounts[DELEVERAGER_ACCOUNT_ID].collateral = builder.select_bigint(
-            is_success_and_is_deleverager_position_cross,
             &new_deleverager_risk_info.current_risk_parameters.collateral,
-            &tx_state.accounts[DELEVERAGER_ACCOUNT_ID].collateral,
+        );
+        let old_deleverager_collateral = builder.select_bigint(
+            is_deleverager_position_isolated,
+            &tx_state.risk_infos[DELEVERAGER_ACCOUNT_ID]
+                .cross_risk_parameters
+                .collateral,
+            &tx_state.risk_infos[DELEVERAGER_ACCOUNT_ID]
+                .current_risk_parameters
+                .collateral,
+        );
+        let deleverager_collateral_delta =
+            builder.sub_bigint(&new_deleverager_collateral, &old_deleverager_collateral);
+
+        tx_state.accounts[DELEVERAGER_ACCOUNT_ID].apply_collateral_delta(
+            builder,
+            self.success,
+            &deleverager_collateral_delta,
+            &mut tx_state.strategies[DELEVERAGER_ACCOUNT_ID],
         );
 
         // If deleverager position sign changes, update the register to cancel reduce only orders

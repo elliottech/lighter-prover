@@ -218,6 +218,10 @@ impl Apply for L2UpdatePublicPoolTxTarget {
             status: self.status,
             operator_fee: self.operator_fee,
             min_operator_share_rate: self.min_operator_share_rate,
+            strategies: tx_state.accounts[SUB_ACCOUNT_ID]
+                .public_pool_info
+                .strategies
+                .clone(),
             ..tx_state.accounts[SUB_ACCOUNT_ID].public_pool_info
         };
         tx_state.accounts[SUB_ACCOUNT_ID].public_pool_info = select_public_pool_info_target(

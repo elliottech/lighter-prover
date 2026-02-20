@@ -27,6 +27,9 @@ pub const MARKET_TYPE_SPOT: u64 = 1;
 pub const ROUTE_TYPE_PERPS: u64 = 0;
 pub const ROUTE_TYPE_SPOT: u64 = 1;
 
+pub const PRODUCT_TYPE_PERPS: u64 = 0;
+pub const PRODUCT_TYPE_SPOT: u64 = 1;
+
 pub const MARKET_INDEX_BITS: usize = 12;
 
 pub const ORDER_NONCE_BITS: usize = 48;
@@ -102,10 +105,10 @@ pub const EMPTY_ORDER_BOOK_TREE_ROOT: HashOut<F> = const_hash_out([
 ]);
 
 pub const EMPTY_ACCOUNT_HASH: HashOut<F> = const_hash_out([
-    14083341044668769695,
-    15055170424628087844,
-    11256155421193779629,
-    13640430731253023330,
+    169037676868324023,
+    18053121229614128473,
+    9919893519801862585,
+    10083874819988081213,
 ]);
 
 /// Tx Types
@@ -146,6 +149,10 @@ pub const TX_TYPE_L2_CREATE_STAKING_POOL: u8 = 33;
 pub const TX_TYPE_L2_STAKE_ASSETS: u8 = 35;
 pub const TX_TYPE_L2_UNSTAKE_ASSETS: u8 = 36;
 pub const TX_TYPE_L2_FORCE_BURN_SHARES: u8 = 40;
+pub const TX_TYPE_L2_UPDATE_ACCOUNT_CONFIG: u8 = 41;
+pub const TX_TYPE_L2_UPDATE_ACCOUNT_ASSET_CONFIG: u8 = 42;
+pub const TX_TYPE_L2_STRATEGY_TRANSFER: u8 = 43;
+pub const TX_TYPE_L2_UPDATE_MARKET_CONFIG: u8 = 44;
 
 // Internal
 pub const TX_TYPE_INTERNAL_CLAIM_ORDER: u8 = 21;
@@ -228,6 +235,7 @@ pub const NB_ACCOUNTS_PER_TX: usize = 3;
 pub const NB_ACCOUNT_ORDERS_PATHS_PER_TX: usize = 3;
 pub const NB_ASSETS_PER_TX: usize = 2;
 pub const NB_POSSIBLE_POOL_SHARE_SLOTS: usize = 2;
+pub const NB_STRATEGIES: usize = 1 << STRATEGY_INDEX_BITS;
 
 pub const TREASURY_ACCOUNT_INDEX: usize = 0;
 pub const INSURANCE_FUND_OPERATOR_ACCOUNT_INDEX: usize = 1;
@@ -237,6 +245,10 @@ pub const NIL_L1_ADDRESS: u64 = 0;
 
 // Account index
 pub const MIN_ACCOUNT_INDEX: i64 = 0;
+
+pub const STRATEGY_INDEX_BITS: usize = 3;
+pub const DEFAULT_STRATEGY_INDEX: usize = 0;
+pub const NIL_STRATEGY_INDEX: usize = 8;
 
 /// Before changing these, see [`crate::transactions::l2_change_pubkey::L2ChangePubKeyTxTarget::verify()`]
 pub const MAX_ACCOUNT_INDEX: i64 = 281474976710654; // 2^48 - 2
@@ -254,6 +266,9 @@ pub const SUB_ACCOUNT_TYPE: u8 = 1;
 pub const PUBLIC_POOL_ACCOUNT_TYPE: u8 = 2;
 pub const INSURANCE_FUND_ACCOUNT_TYPE: u8 = 3; // Insurance Fund Public Pool
 pub const LIGHTER_STAKING_POOL_ACCOUNT_TYPE: u8 = 4; // Lighter Staking Pool
+
+pub const ACCOUNT_ACCOUNT_TRADING_MODE_SIMPLE: u8 = 0;
+pub const ACCOUNT_ACCOUNT_TRADING_MODE_UNIFIED: u8 = 1;
 
 // Public pool
 pub const INITIAL_POOL_SHARE_VALUE: u64 = 1_000; // 0.001 USDC
@@ -335,8 +350,16 @@ pub const ASSET_EXTENSION_MULTIPLIER_BITS: usize = 56;
 pub const EMPTY_ASSET_BALANCE: i128 = 0;
 
 // Asset Margin Modes
+/// means asset can't be used as margin
 pub const ASSET_MARGIN_MODE_DISABLED: u64 = 0;
+/// means asset can be used as margin
 pub const ASSET_MARGIN_MODE_ENABLED: u64 = 1;
+
+// Account Asset Margin Modes
+/// means account is not using this asset as margin
+pub const ACCOUNT_ASSET_MARGIN_MODE_DISABLED: u64 = 0;
+/// means account is using this asset as margin
+pub const ACCOUNT_ASSET_MARGIN_MODE_ENABLED: u64 = 1;
 
 // Collateral
 pub const MAX_EXCHANGE_USDC_BITS: usize = 60;
@@ -434,12 +457,16 @@ pub const FULL_LIQUIDATION: u8 = 3;
 pub const BANKRUPTCY: u8 = 4;
 
 // Tx Account Ids
+pub const POOL_CROSS_RISK_ID: usize = 0;
+pub const POOL_STRATEGY_RISK_ID: usize = 1;
+
+pub const FROM_STRATEGY_ID: usize = 0;
+pub const TO_STRATEGY_ID: usize = 1;
+
 pub const OWNER_ACCOUNT_ID: usize = 0;
 
 pub const LIQUIDITY_POOL_ACCOUNT_ID: usize = 0;
 pub const STAKING_POOL_ACCOUNT_ID: usize = 1;
-pub const SHARE_OWNER_ACCOUNT_ID: usize = 1;
-
 pub const SYSTEM_CONFIG_ACCOUNT_ID: usize = 2;
 
 pub const TAKER_ACCOUNT_ID: usize = 0;
@@ -457,6 +484,8 @@ pub const DELEVERAGER_ACCOUNT_ID: usize = 1;
 
 pub const TX_ASSET_ID: usize = 0;
 pub const FEE_ASSET_ID: usize = 1;
+
+pub const STAKE_ASSET_ID: usize = 1;
 
 pub const BASE_ASSET_ID: usize = 0;
 pub const QUOTE_ASSET_ID: usize = 1;

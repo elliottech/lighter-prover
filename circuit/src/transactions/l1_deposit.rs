@@ -1,5 +1,11 @@
 // Copyright (c) Elliot Technologies, Inc.
 // SPDX-License-Identifier: BUSL-1.1
+//
+// Proven statements in this circuit module:
+// 1. perps-route deposits require margin-enabled assets.
+// 2. accepted deposit does not exceed product-context balance cap.
+// 3. unified spot deposits for margin-enabled assets are applied to collateral.
+// 4. balance updates are applied via account-level asset delta helpers.
 
 use anyhow::Result;
 use num::{BigUint, FromPrimitive};
@@ -8,12 +14,13 @@ use plonky2::iop::target::{BoolTarget, Target};
 use plonky2::iop::witness::Witness;
 use serde::Deserialize;
 
-use crate::bigint::bigint::{BigIntTarget, CircuitBuilderBigInt};
+use crate::bigint::bigint::CircuitBuilderBigInt;
 use crate::bigint::biguint::{BigUintTarget, CircuitBuilderBiguint, WitnessBigUint};
 use crate::bigint::comparison::CircuitBuilderBiguintSubtractiveComparison;
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::deserializers;
 use crate::tx_interface::{Apply, OnChainPubData, PriorityOperationsPubData, Verify};
+use crate::types::account::AccountTarget;
 use crate::types::asset::ensure_valid_asset_index;
 use crate::types::config::{BIG_U64_LIMBS, BIG_U96_LIMBS, BIG_U128_LIMBS, BIG_U160_LIMBS, Builder};
 use crate::types::constants::*;
@@ -189,16 +196,12 @@ impl Verify for L1DepositTxTarget {
             builder.multi_and(&[is_accepted_amount_non_zero, self.is_enabled]);
         builder.conditional_assert_false(asset_existence_check, is_asset_empty);
 
-        // If sequencer accepted non-zero amount for perps route, margin mode has to be enabled for the asset
         let is_perps = builder.is_equal_constant(self.route_type, ROUTE_TYPE_PERPS);
         let margin_mode_check =
             builder.multi_and(&[is_accepted_amount_non_zero, self.is_enabled, is_perps]);
-        builder.conditional_assert_eq_constant(
-            margin_mode_check,
-            tx_state.assets[TX_ASSET_ID].margin_mode,
-            ASSET_MARGIN_MODE_ENABLED,
-        );
-
+        let is_asset_margin_enabled =
+            tx_state.is_asset_used_as_margin[OWNER_ACCOUNT_ID][TX_ASSET_ID];
+        builder.conditional_assert_true(margin_mode_check, is_asset_margin_enabled);
         // nil account index is reserved and always should be empty
         let nil_account_index = builder.constant_i64(NIL_ACCOUNT_INDEX);
         builder.conditional_assert_not_eq(is_enabled, self.account_index, nil_account_index);
@@ -218,12 +221,23 @@ impl Verify for L1DepositTxTarget {
 impl Apply for L1DepositTxTarget {
     fn apply(&mut self, builder: &mut Builder, tx_state: &mut TxState) -> BoolTarget {
         let is_perps = builder.is_equal_constant(self.route_type, ROUTE_TYPE_PERPS);
+        let is_spot = builder.not(is_perps);
+        let is_account_isolated = builder.is_equal_constant(
+            tx_state.accounts[OWNER_ACCOUNT_ID].account_trading_mode,
+            ACCOUNT_ACCOUNT_TRADING_MODE_SIMPLE as u64,
+        );
+        let is_account_unified = builder.not(is_account_isolated);
+        let is_asset_used_as_margin =
+            tx_state.is_asset_used_as_margin[OWNER_ACCOUNT_ID][TX_ASSET_ID];
+        let unified_spot =
+            builder.multi_and(&[is_spot, is_account_unified, is_asset_used_as_margin]);
+        let use_collateral_as_source_balance = builder.or(is_perps, unified_spot);
 
         let source_balance = {
             let balance_bigint = builder
                 .biguint_to_bigint(&tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID].balance);
             builder.select_bigint(
-                is_perps,
+                use_collateral_as_source_balance,
                 &tx_state.accounts[OWNER_ACCOUNT_ID].collateral,
                 &balance_bigint,
             )
@@ -234,29 +248,25 @@ impl Apply for L1DepositTxTarget {
             &tx_state.assets[TX_ASSET_ID].extension_multiplier,
             BIG_U96_LIMBS,
         );
+        // Do addition in larger limb size to prevent overflow, and if overflow happens, reject deposit.
         let extended_balance_delta = builder.biguint_to_bigint(&extended_balance_delta_biguint);
         let balance_after =
             builder.add_bigint_non_carry(&source_balance, &extended_balance_delta, BIG_U128_LIMBS);
 
-        let (trim_success, trimmed_abs_collateral_after) =
-            builder.try_trim_biguint(&balance_after.abs, BIG_U96_LIMBS);
-        let should_update_balance = builder.and(self.success, trim_success);
-        // Route type - spot
-        let should_update_spot_balance = builder.and_not(should_update_balance, is_perps);
-        tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID].balance = builder.select_biguint(
-            should_update_spot_balance,
-            &trimmed_abs_collateral_after,
-            &tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID].balance,
-        );
-        // Route type - perps
-        let should_update_perps_balance = builder.and(should_update_balance, is_perps);
-        tx_state.accounts[OWNER_ACCOUNT_ID].collateral = builder.select_bigint(
-            should_update_perps_balance,
-            &BigIntTarget {
-                abs: trimmed_abs_collateral_after,
-                sign: balance_after.sign,
-            },
-            &tx_state.accounts[OWNER_ACCOUNT_ID].collateral,
+        // If sequencer accepted non-zero amount, balance after should not exceed the cap.
+        let (trim_success, _) = builder.try_trim_biguint(&balance_after.abs, BIG_U96_LIMBS);
+        builder.conditional_assert_true(self.success, trim_success);
+
+        let product_type = builder.select_constant(is_perps, PRODUCT_TYPE_PERPS, PRODUCT_TYPE_SPOT);
+        AccountTarget::apply_asset_delta(
+            builder,
+            self.success,
+            product_type,
+            &mut tx_state.accounts[OWNER_ACCOUNT_ID],
+            &mut tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID],
+            is_asset_used_as_margin,
+            &extended_balance_delta,
+            &mut tx_state.strategies[OWNER_ACCOUNT_ID],
         );
 
         // Handle account creation
@@ -266,20 +276,18 @@ impl Apply for L1DepositTxTarget {
             &self.l1_address,
             &tx_state.accounts[OWNER_ACCOUNT_ID].l1_address,
         );
-
         tx_state.accounts[OWNER_ACCOUNT_ID].master_account_index = builder.select(
             self.is_new_account,
             self.account_index,
             tx_state.accounts[OWNER_ACCOUNT_ID].master_account_index,
         );
-
         tx_state.accounts[OWNER_ACCOUNT_ID].account_type = builder.select(
             self.is_new_account,
             master_account_type,
             tx_state.accounts[OWNER_ACCOUNT_ID].account_type,
         );
 
-        // Create withdraw onchain operation when accepted_usdc_amount is less than usdc_amount
+        // Create withdraw onchain operation when accepted_amount is less than usdc_amount
         let accepted_amount_eq_amount =
             builder.is_equal_biguint(&self.accepted_amount, &self.amount);
         self.on_chain_pub_data_flag = builder.and_not(self.success, accepted_amount_eq_amount);

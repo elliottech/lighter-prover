@@ -89,6 +89,14 @@ impl AccountPositionTarget {
         }
     }
 
+    pub fn is_isolated(&self) -> BoolTarget {
+        BoolTarget::new_unsafe(self.margin_mode)
+    }
+
+    pub fn is_cross(&self, builder: &mut Builder) -> BoolTarget {
+        builder.not(self.is_isolated())
+    }
+
     pub fn print(&self, builder: &mut Builder, tag: &str) {
         builder.println_bigint_u16(
             &self.last_funding_rate_prefix_sum,
@@ -118,15 +126,15 @@ impl AccountPositionTarget {
         default_imr: Target,
         min_imr: Target,
     ) -> Target {
-        let mut position_imr = self.initial_margin_fraction;
-
         let position_imr_is_zero = builder.is_zero(self.initial_margin_fraction);
-        position_imr = builder.select(position_imr_is_zero, default_imr, position_imr);
+        let position_imr = builder.select(
+            position_imr_is_zero,
+            default_imr,
+            self.initial_margin_fraction,
+        );
 
-        let position_imr_lt_min_imr = builder.is_lt(position_imr, min_imr, MARGIN_FRACTION_BITS);
-        position_imr = builder.select(position_imr_lt_min_imr, min_imr, position_imr);
-
-        position_imr
+        let min_imr_lte_position_imr = builder.is_lte(min_imr, position_imr, MARGIN_FRACTION_BITS);
+        builder.select(min_imr_lte_position_imr, position_imr, min_imr)
     }
 
     pub fn is_order_or_position_open(&self, builder: &mut Builder) -> BoolTarget {
@@ -205,6 +213,36 @@ impl AccountPositionTarget {
         let is_entry_quote_valid = builder.is_lte(self.entry_quote, max_entry_quote, 64);
 
         builder.and(is_entry_quote_valid, is_position_size_valid)
+    }
+
+    pub fn partial_select_for_cross_risk(
+        builder: &mut Builder,
+        flag: BoolTarget,
+        sub_position: &Self,
+        owner_position: &Self,
+    ) -> Self {
+        Self {
+            position: builder.select_bigint_u16(
+                flag,
+                &sub_position.position,
+                &owner_position.position,
+            ),
+            last_funding_rate_prefix_sum: builder.select_bigint_u16(
+                flag,
+                &sub_position.last_funding_rate_prefix_sum,
+                &owner_position.last_funding_rate_prefix_sum,
+            ),
+            entry_quote: builder.select(flag, sub_position.entry_quote, owner_position.entry_quote),
+            initial_margin_fraction: builder.select(
+                flag,
+                sub_position.initial_margin_fraction,
+                owner_position.initial_margin_fraction,
+            ),
+            margin_mode: builder.select(flag, sub_position.margin_mode, owner_position.margin_mode),
+
+            // No need to select allocated_margin and margin_mode as insurance fund doesn't have isolated positions
+            ..owner_position.clone()
+        }
     }
 
     pub fn select_position(builder: &mut Builder, flag: BoolTarget, a: &Self, b: &Self) -> Self {

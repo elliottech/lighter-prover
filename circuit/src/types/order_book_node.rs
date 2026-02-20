@@ -14,7 +14,7 @@ use crate::deserializers;
 use crate::hash_utils::CircuitBuilderHashUtils;
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
-#[serde(bound = "")]
+#[serde(bound = "")] 
 pub struct OrderBookNode<F: Field> {
     #[serde(rename = "h", default)]
     #[serde(deserialize_with = "deserializers::hash_out")]
