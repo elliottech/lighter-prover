@@ -6,6 +6,10 @@ authors = ["Lighter Team"]
 edition.workspace = true
 license.workspace = true
 
+[[example]]
+name = "block"
+path = "examples/block.rs"
+
 [[bin]]
 name = "build_block_circuit"
 path = "src/bin/build_block_circuit.rs"
