@@ -1,0 +1,56 @@
+[package]
+name = "bench"
+description = "Lighter Circuits Benchmarking"
+version = "0.0.1"
+authors = ["Lighter Team"]
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "bench"
+path = "src/bin/bench.rs"
+
+[features]
+default = ["parallel", "std"]
+parallel = ["plonky2/parallel"]
+std = ["plonky2/std"]
+
+[dependencies]
+num = { workspace = true }
+itertools = { workspace = true }
+anyhow = { workspace = true }
+rand = { workspace = true }
+plonky2 = { workspace = true, default-features = true }
+lazy_static = { workspace = true }
+serde = { workspace = true }
+rayon = { workspace = true }
+serde_with = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+sha2 = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+bincode = { workspace = true }
+ff = { workspace = true }
+hashbrown = { workspace = true }
+clap = { workspace = true }
+clap_derive = { workspace = true }
+tiny-keccak =  { workspace = true }
+paste = { workspace = true }
+circuit = { path = "../circuit", default-features = true }
+
+[dev-dependencies]
+flate2 = "1.0"
+criterion = { version = "0.5.1", default-features = false }
+num_cpus = { version = "1.14.0", default-features = false }
+rand = { workspace = true, features = [
+  "getrandom",
+  "std",
+], default-features = true }
+serde_cbor = { version = "0.11.2" }
+serde_json = { version = "1.0" }
+structopt = { version = "0.3.26", default-features = false }
+tynm = { version = "0.1.6", default-features = false }
+
+[target.'cfg(not(target_env = "msvc"))'.dev-dependencies]
+tikv-jemallocator = "0.6"
