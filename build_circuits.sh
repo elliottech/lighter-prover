@@ -18,7 +18,7 @@ ls | grep "final::.*.vk" | xargs rm -f
 ls | grep "final::.*.sol" | xargs rm -f
 ls | grep "final::.*.r1cs" | xargs rm -f
 
-TX_PER_PROOF=4
+TX_PER_PROOF=5
 ON_CHAIN_OPERATIONS_LIMIT=1
 PRIORITY_OPERATIONS_LIMIT=1
 CHAIN_ID=${CHAIN_ID:-304} # Default to mainnet if not set

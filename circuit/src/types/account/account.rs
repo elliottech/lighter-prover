@@ -14,6 +14,7 @@ use serde::Deserialize;
 
 use crate::bigint::bigint::{BigIntTarget, CircuitBuilderBigInt, WitnessBigInt};
 use crate::bigint::biguint::{BigUintTarget, CircuitBuilderBiguint, WitnessBigUint};
+use crate::bigint::unsafe_big::{CircuitBuilderUnsafeBig, UnsafeBigTarget};
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::circuit_logger::CircuitBuilderLogging;
 use crate::comparison::CircuitBuilderSubtractiveComparison;
@@ -23,6 +24,9 @@ use crate::hash_utils::CircuitBuilderHashUtils;
 use crate::types::account_asset::AccountAssetTarget;
 use crate::types::account_position::{
     AccountPosition, AccountPositionTarget, AccountPositionTargetWitness,
+};
+use crate::types::approved_integrator::{
+    ApprovedIntegrator, ApprovedIntegratorTarget, ApprovedIntegratorWitness,
 };
 use crate::types::config::{BIG_U96_LIMBS, BIG_U160_LIMBS, Builder};
 use crate::types::constants::*;
@@ -71,6 +75,9 @@ where
 
     #[serde(rename = "pwi", default)]
     pub pending_unlocks: [PendingUnlock; MAX_PENDING_UNLOCKS],
+
+    #[serde(rename = "aiw", default)]
+    pub approved_integrators: [ApprovedIntegrator; MAX_APPROVED_INTEGRATORS],
 
     #[serde(rename = "pps", default)]
     pub public_pool_shares: [PublicPoolShare; SHARES_LIST_SIZE],
@@ -128,6 +135,7 @@ where
             positions: array::from_fn(|_| AccountPosition::default()),
             public_pool_shares: array::from_fn(|_| PublicPoolShare::default()),
             pending_unlocks: array::from_fn(|_| PendingUnlock::default()),
+            approved_integrators: array::from_fn(|_| ApprovedIntegrator::default()),
             public_pool_info: PublicPoolInfo::default(),
             total_order_count: 0,
             total_non_cross_order_count: 0,
@@ -154,6 +162,7 @@ pub struct AccountTarget {
     pub aggregated_balances: [BigIntTarget; NB_ASSETS_PER_TX],
     pub positions: [AccountPositionTarget; POSITION_LIST_SIZE],
 
+    pub approved_integrators: [ApprovedIntegratorTarget; MAX_APPROVED_INTEGRATORS],
     pub pending_unlocks: [PendingUnlockTarget; MAX_PENDING_UNLOCKS],
     pub public_pool_shares: [PublicPoolShareTarget; SHARES_LIST_SIZE],
     pub public_pool_info: PublicPoolInfoTarget,
@@ -173,7 +182,7 @@ pub struct AccountTarget {
 
 impl Default for AccountTarget {
     fn default() -> Self {
-        AccountTarget {
+        Self {
             master_account_index: Target::default(),
             account_index: Target::default(),
             l1_address: BigUintTarget::default(),
@@ -185,6 +194,7 @@ impl Default for AccountTarget {
 
             positions: array::from_fn(|_| AccountPositionTarget::default()),
 
+            approved_integrators: array::from_fn(|_| ApprovedIntegratorTarget::default()),
             pending_unlocks: array::from_fn(|_| PendingUnlockTarget::default()),
             public_pool_shares: array::from_fn(|_| PublicPoolShareTarget::default()),
             public_pool_info: PublicPoolInfoTarget::default(),
@@ -210,7 +220,7 @@ impl Default for AccountTarget {
 
 impl AccountTarget {
     pub fn new(builder: &mut Builder) -> Self {
-        AccountTarget {
+        Self {
             master_account_index: builder.add_virtual_target(),
             account_index: builder.add_virtual_target(),
             l1_address: builder.add_virtual_biguint_target_unsafe(BIG_U160_LIMBS), // safe because it is read from the state using merkle proofs
@@ -224,6 +234,7 @@ impl AccountTarget {
 
             positions: array::from_fn(|_| AccountPositionTarget::new(builder)),
 
+            approved_integrators: array::from_fn(|_| ApprovedIntegratorTarget::new(builder)),
             pending_unlocks: array::from_fn(|_| PendingUnlockTarget::new(builder)),
             public_pool_shares: array::from_fn(|_| PublicPoolShareTarget::new(builder)),
             public_pool_info: PublicPoolInfoTarget::new(builder),
@@ -244,7 +255,7 @@ impl AccountTarget {
     }
 
     pub fn new_fee_account(builder: &mut Builder) -> Self {
-        AccountTarget {
+        Self {
             master_account_index: builder.add_virtual_target(),
             account_index: builder.add_virtual_target(),
             l1_address: builder.add_virtual_biguint_target_unsafe(BIG_U160_LIMBS), // safe because it is read from the state using merkle proofs
@@ -258,6 +269,7 @@ impl AccountTarget {
 
             positions: array::from_fn(|_| AccountPositionTarget::default()), // Unused for fee accounts
 
+            approved_integrators: array::from_fn(|_| ApprovedIntegratorTarget::new(builder)),
             pending_unlocks: array::from_fn(|_| PendingUnlockTarget::new(builder)),
             public_pool_shares: array::from_fn(|_| PublicPoolShareTarget::default()),
             public_pool_info: PublicPoolInfoTarget::new(builder),
@@ -316,12 +328,14 @@ impl AccountTarget {
     }
 
     pub fn get_total_unlock_amount(&self, builder: &mut Builder) -> BigUintTarget {
-        let mut total_unlock_amount = builder.zero_biguint();
+        let mut total_unlock_amount = UnsafeBigTarget {
+            limbs: vec![builder.zero(); BIG_U96_LIMBS],
+        };
         for pu in self.pending_unlocks.iter() {
-            total_unlock_amount =
-                builder.add_biguint_non_carry(&total_unlock_amount, &pu.amount, BIG_U96_LIMBS);
+            let unsafe_amount = builder.unsafe_big_from_biguint(&pu.amount);
+            total_unlock_amount = builder.add_unsafe_big(&total_unlock_amount, &unsafe_amount);
         }
-        total_unlock_amount
+        builder.unsafe_big32_to_biguint(&total_unlock_amount, BIG_U96_LIMBS)
     }
 
     pub fn add_pending_unlock(
@@ -524,6 +538,11 @@ impl AccountTarget {
             builder.println_bigint(agg_bal, &format!("{}: aggregated_balance_{}", tag, i));
         }
 
+        for i in 0..MAX_APPROVED_INTEGRATORS {
+            self.approved_integrators[i]
+                .print(builder, &format!("{}: approved_integrator_{}", tag, i));
+        }
+
         builder.println_hash_out(&self.asset_root, &format!("{}: asset_root", tag));
 
         builder.println(
@@ -722,6 +741,9 @@ impl<T: Witness<F> + PartialWitnessCurve<F>, F: PrimeField64 + Extendable<5> + R
         }
         for i in 0..b.public_pool_shares.len() {
             self.set_public_pool_share(&a.public_pool_shares[i], &b.public_pool_shares[i])?;
+        }
+        for i in 0..b.approved_integrators.len() {
+            self.set_approved_integrator(&a.approved_integrators[i], &b.approved_integrators[i])?;
         }
 
         Ok(())

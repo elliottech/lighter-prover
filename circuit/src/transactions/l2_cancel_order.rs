@@ -203,6 +203,7 @@ impl Apply for L2CancelOrderTxTarget {
             tx_state.account_order.owner_account_index,
             tx_state.account_order.to_trigger_order_index0,
             tx_state.account_order.to_trigger_order_index1,
+            1,
         );
 
         // If the order's trigger status is not NA, it's nonce is zero and all orders with zero nonce are always empty.

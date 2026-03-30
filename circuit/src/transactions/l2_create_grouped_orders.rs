@@ -16,6 +16,10 @@ use crate::eddsa::schnorr::hash_to_quintic_extension_circuit;
 use crate::hash_utils::CircuitBuilderHashUtils;
 use crate::matching_engine::{get_next_order_nonce, is_not_valid_reduce_only_direction};
 use crate::poseidon2::Poseidon2Hash;
+use crate::tx_attributes::{
+    ATTRIBUTE_TYPE_INTEGRATOR_FEE_COLLECTOR_INDEX, ATTRIBUTE_TYPE_INTEGRATOR_MAKER_FEE,
+    ATTRIBUTE_TYPE_INTEGRATOR_TAKER_FEE,
+};
 use crate::tx_interface::{Apply, TxHash, Verify};
 use crate::types::account_order_type::AccountOrderTypes;
 use crate::types::config::{Builder, F};
@@ -710,6 +714,11 @@ impl Apply for L2CreateGroupedOrdersTxTarget {
                 pending_to_trigger_order_index0: builder.zero(),
                 pending_to_trigger_order_index1: builder.zero(),
                 pending_to_cancel_order_index0: builder.zero(),
+
+                generic_field_1: tx_state
+                    .get_attribute(ATTRIBUTE_TYPE_INTEGRATOR_FEE_COLLECTOR_INDEX),
+                u32_generic_field_0: tx_state.get_attribute(ATTRIBUTE_TYPE_INTEGRATOR_TAKER_FEE),
+                u32_generic_field_1: tx_state.get_attribute(ATTRIBUTE_TYPE_INTEGRATOR_MAKER_FEE),
             };
         }
 
@@ -812,10 +821,16 @@ impl Apply for L2CreateGroupedOrdersTxTarget {
             );
         }
 
+        // Inserted registers won't have a hole in the middle.
         for i in 0..MAX_NB_GROUPED_ORDERS {
             let instruction_flag =
                 builder.is_equal(order_instructions[i].instruction_type, insert_order);
-            tx_state.insert_to_instruction_stack(builder, instruction_flag, &order_instructions[i]);
+            tx_state.put_to_instruction_stack_unsafe(
+                builder,
+                instruction_flag,
+                &order_instructions[i],
+                MAX_NB_GROUPED_ORDERS - i - 1,
+            );
         }
         tx_state.matching_engine_flag = builder.or(tx_state.matching_engine_flag, self.success);
 

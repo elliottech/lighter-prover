@@ -77,7 +77,7 @@ pub struct L2TransferTxTarget {
     pub usdc_fee: BigUintTarget,
     pub memo: [U8Target; TRANSFER_MEMO_BYTES], // Memo hash is not used in the circuit, but included for completeness
 
-    pub success: BoolTarget, // Output
+    success: BoolTarget, // Output
 
     extended_transfer_amount: BigUintTarget,
     extended_fee_amount: BigUintTarget,
@@ -203,14 +203,6 @@ impl Verify for L2TransferTxTarget {
             usdc_asset_index,
         );
 
-        // Transfer amount checks - not zero, 60 bits max, gte min transfer amount
-        builder.conditional_assert_lte_biguint(
-            is_enabled,
-            &tx_state.assets[TX_ASSET_ID].min_transfer_amount,
-            &self.amount,
-        );
-        builder.conditional_assert_not_zero_biguint(is_enabled, &self.amount);
-
         // Self transfer is only possible with different route types. If account is unified, both route types are point to the same balance, so it is not allowed.
         let is_same_account = builder.is_equal(self.from_account_index, self.to_account_index);
         let mut is_same_route_type = builder.is_equal(self.from_route_type, self.to_route_type);
@@ -237,6 +229,16 @@ impl Verify for L2TransferTxTarget {
             is_sender_treasury_account_and_enabled,
             is_sender_and_receiver_same_master_account,
         );
+
+        // Transfer amount checks - not zero, 60 bits max, gte min transfer amount (except for sub account transfer)
+        let is_check_min_amount =
+            builder.and_not(is_enabled, is_sender_and_receiver_same_master_account);
+        builder.conditional_assert_lte_biguint(
+            is_check_min_amount,
+            &tx_state.assets[TX_ASSET_ID].min_transfer_amount,
+            &self.amount,
+        );
+        builder.conditional_assert_not_zero_biguint(is_enabled, &self.amount);
 
         // For transfers to perps, asset must be used as margin.
         let route_type_perps = builder.constant_u64(ROUTE_TYPE_PERPS);

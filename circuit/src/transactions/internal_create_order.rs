@@ -122,6 +122,9 @@ impl InternalCreateOrderTxTarget {
             pending_to_trigger_order_index0: builder.zero(),
             pending_to_trigger_order_index1: builder.zero(),
             pending_to_cancel_order_index0: builder.zero(),
+            generic_field_1: tx_state.account_order.integrator_fee_collector_index,
+            u32_generic_field_0: tx_state.account_order.integrator_taker_fee,
+            u32_generic_field_1: tx_state.account_order.integrator_maker_fee,
         }
     }
 
@@ -168,6 +171,9 @@ impl InternalCreateOrderTxTarget {
             pending_to_trigger_order_index0: tx_state.account_order.to_trigger_order_index0,
             pending_to_trigger_order_index1: tx_state.account_order.to_trigger_order_index1,
             pending_to_cancel_order_index0: tx_state.account_order.to_cancel_order_index0,
+            generic_field_1: tx_state.account_order.integrator_fee_collector_index,
+            u32_generic_field_0: tx_state.account_order.integrator_taker_fee,
+            u32_generic_field_1: tx_state.account_order.integrator_maker_fee,
         }
     }
 
@@ -635,7 +641,12 @@ impl Apply for InternalCreateOrderTxTarget {
                 // Build the register
                 let register_for_twap_order =
                     self.get_register_for_twap_order(builder, tx_state, next_order_nonce);
-                tx_state.insert_to_instruction_stack(builder, twap_flag, &register_for_twap_order);
+                tx_state.put_to_instruction_stack_unsafe(
+                    builder,
+                    twap_flag,
+                    &register_for_twap_order,
+                    0,
+                );
 
                 // Cancel twap order if filled
                 let cancel_twap_order = builder.and(twap_flag, is_remaining_base_amount_zero);
@@ -669,10 +680,11 @@ impl Apply for InternalCreateOrderTxTarget {
                 // Set the register for twap or conditional order
                 let register_for_conditional_order =
                     self.get_register_for_conditional_order(builder, tx_state, next_order_nonce);
-                tx_state.insert_to_instruction_stack(
+                tx_state.put_to_instruction_stack_unsafe(
                     builder,
                     conditional_flag,
                     &register_for_conditional_order,
+                    1,
                 );
 
                 let to_cancel_order_index0 = tx_state.account_order.to_cancel_order_index0;
@@ -708,10 +720,11 @@ impl Apply for InternalCreateOrderTxTarget {
                 let to_cancel_order_index_not_empty = builder.is_not_zero(to_cancel_order_index0);
                 let push_to_register_stack_flag =
                     builder.and(conditional_flag, to_cancel_order_index_not_empty);
-                tx_state.insert_to_instruction_stack(
+                tx_state.put_to_instruction_stack_unsafe(
                     builder,
                     push_to_register_stack_flag,
                     &register_for_to_cancel_order,
+                    0,
                 );
             }
         }

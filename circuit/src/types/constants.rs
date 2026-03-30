@@ -10,6 +10,9 @@ pub const MAX_PREMIUM_SAMPLE_COUNT: usize = 60;
 pub const TX_TYPE_BITS: usize = 8;
 
 pub const TIMESTAMP_BITS: usize = 48;
+pub const NONCE_BITS: usize = 48;
+pub const MAX_NONCE: i64 = (1i64 << NONCE_BITS) - 1;
+pub const MAX_SKIP_NONCE_CAP: i64 = MAX_NONCE / 2;
 
 pub const MASTER_ACCOUNT_INDEX_BITS: usize = 47;
 pub const ACCOUNT_INDEX_BITS: usize = 48;
@@ -105,10 +108,10 @@ pub const EMPTY_ORDER_BOOK_TREE_ROOT: HashOut<F> = const_hash_out([
 ]);
 
 pub const EMPTY_ACCOUNT_HASH: HashOut<F> = const_hash_out([
-    169037676868324023,
-    18053121229614128473,
-    9919893519801862585,
-    10083874819988081213,
+    14392890145472191659,
+    2908530609512515206,
+    10530419883902713688,
+    12796262307803934181,
 ]);
 
 /// Tx Types
@@ -153,6 +156,7 @@ pub const TX_TYPE_L2_UPDATE_ACCOUNT_CONFIG: u8 = 41;
 pub const TX_TYPE_L2_UPDATE_ACCOUNT_ASSET_CONFIG: u8 = 42;
 pub const TX_TYPE_L2_STRATEGY_TRANSFER: u8 = 43;
 pub const TX_TYPE_L2_UPDATE_MARKET_CONFIG: u8 = 44;
+pub const TX_TYPE_L2_APPROVE_INTEGRATOR: u8 = 45;
 
 // Internal
 pub const TX_TYPE_INTERNAL_CLAIM_ORDER: u8 = 21;
@@ -163,6 +167,7 @@ pub const TX_TYPE_INTERNAL_CANCEL_ALL_ORDERS: u8 = 25;
 pub const TX_TYPE_INTERNAL_LIQUIDATE_POSITION: u8 = 26;
 pub const TX_TYPE_INTERNAL_CREATE_ORDER: u8 = 27;
 pub const TX_TYPE_INTERNAL_PENDING_UNLOCK: u8 = 39;
+pub const TX_TYPE_INTERNAL_INTEGRATOR_OPERATIONS: u8 = 46;
 
 // Priority request pub data
 pub const PRIORITY_PUB_DATA_TYPE_L1_DEPOSIT: u8 = 41;
@@ -259,6 +264,13 @@ pub const NIL_MASTER_ACCOUNT_INDEX: i64 = 0;
 
 pub const MAX_LIQUIDITY_POOL_COOLDOWN_PERIOD: i64 = 1000 * 60 * 60 * 24 * 365; // 1 year
 pub const MAX_STAKING_POOL_LOCKUP_PERIOD: i64 = 1000 * 60 * 60 * 24 * 30; // 30 days
+pub const MAX_MAX_INTEGRATOR_SPOT_TAKER_FEE: i64 = 20_000; // 2% fee
+pub const MAX_MAX_INTEGRATOR_SPOT_MAKER_FEE: i64 = 20_000; // 2% fee
+pub const MAX_MAX_INTEGRATOR_PERPS_TAKER_FEE: i64 = 5_000; // 0.5% fee
+pub const MAX_MAX_INTEGRATOR_PERPS_MAKER_FEE: i64 = 5_000; // 0.5% fee
+
+pub const MAX_INTEGRATOR_FEE_AMOUNT_BITS: usize = 60;
+pub const MAX_INTEGRATOR_FEE_AMOUNT: usize = (1 << MAX_INTEGRATOR_FEE_AMOUNT_BITS) - 1;
 
 // Account Type
 pub const MASTER_ACCOUNT_TYPE: u8 = 0;
@@ -315,6 +327,7 @@ pub const POSITION_HASH_BUCKET_COUNT: usize = 16;
 pub const POSITION_HASH_BUCKET_SIZE: usize = 16;
 pub const SHARES_LIST_SIZE: usize = 16;
 pub const SHARES_DELTA_LIST_SIZE: usize = SHARES_LIST_SIZE * 2;
+pub const MAX_APPROVED_INTEGRATORS: usize = 4;
 
 pub const MAX_PENDING_UNLOCKS: usize = 8;
 
@@ -399,10 +412,15 @@ pub const CANCEL_POSITION_TIED_ACCOUNT_ORDERS: u8 = 4;
 pub const TRIGGER_CHILD_ORDER: u8 = 5;
 pub const CANCEL_ALL_CROSS_MARGIN_ORDERS: u8 = 6;
 pub const CANCEL_ALL_ISOLATED_MARGIN_ORDERS: u8 = 7;
+pub const TRANSFER_ASSET: u8 = 8;
 
 pub const PENDING_BASE_REGISTER_SIZE: usize = 8;
 pub const REGISTER_STACK_SIZE: usize = PENDING_BASE_REGISTER_SIZE + 1;
-pub const NEW_INSTRUCTIONS_MAX_SIZE: usize = 6;
+pub const NEW_INSTRUCTIONS_MAX_SIZE: usize = 8;
+
+pub const INSERT_MAX_THREE_REGISTERS: usize = 3;
+pub const INSERT_MAX_FIVE_REGISTERS: usize = 5;
+pub const INSERT_MAX_SIX_REGISTERS: usize = 6;
 
 // Tree depths
 pub const ACCOUNT_MERKLE_LEVELS: usize = 48;
@@ -478,6 +496,7 @@ pub const SUB_ACCOUNT_ID: usize = 1;
 
 pub const SENDER_ACCOUNT_ID: usize = 0;
 pub const RECEIVER_ACCOUNT_ID: usize = 1;
+pub const INTEGRATOR_ACCOUNT_ID: usize = 1;
 
 pub const BANKRUPT_ACCOUNT_ID: usize = 0;
 pub const DELEVERAGER_ACCOUNT_ID: usize = 1;

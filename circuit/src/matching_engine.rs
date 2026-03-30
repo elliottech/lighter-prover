@@ -16,6 +16,7 @@ use crate::bigint::big_u16::CircuitBuilderBiguint16;
 use crate::bigint::bigint::{BigIntTarget, CircuitBuilderBigInt, SignTarget};
 use crate::bigint::biguint::{BigUintTarget, CircuitBuilderBiguint};
 use crate::bigint::comparison::CircuitBuilderBiguintSubtractiveComparison;
+use crate::bigint::div_rem::CircuitBuilderBiguintDivRem;
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::comparison::CircuitBuilderSubtractiveComparison;
 use crate::hints::CircuitBuilderHints;
@@ -699,6 +700,13 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
         quote_multiplier,
     ])); // Already verified that multiplication can fit NORMALIZED_QUOTE_BITS bits and can't be negative
 
+    // Make a copy of integrator related variables
+    let integrator_taker_fee = tx_state.register_stack[0].u32_generic_field_0;
+    let integrator_taker_fee_collector_index = tx_state.register_stack[0].generic_field_1;
+    let integrator_maker_fee = tx_state.account_order.integrator_maker_fee;
+    let integrator_maker_fee_collector_index =
+        tx_state.account_order.integrator_fee_collector_index;
+
     let apply_trade_params = ApplyTradeParams {
         market: &tx_state.market,
         market_details: &tx_state.market_details,
@@ -709,8 +717,14 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
         maker_position: &tx_state.positions[MAKER_ACCOUNT_ID],
         taker_risk_info: &tx_state.risk_infos[TAKER_ACCOUNT_ID],
         maker_risk_info: &tx_state.risk_infos[MAKER_ACCOUNT_ID],
-        taker_fee: tx_state.taker_fee,
-        maker_fee: tx_state.maker_fee,
+        taker_fee: SignedTarget::new_unsafe(builder.add(
+            tx_state.taker_fee.target,
+            tx_state.register_stack[0].u32_generic_field_0,
+        )),
+        maker_fee: SignedTarget::new_unsafe(builder.add(
+            tx_state.maker_fee.target,
+            tx_state.account_order.integrator_maker_fee,
+        )),
     };
 
     let (
@@ -1240,6 +1254,7 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
         maker_account_index,
         maker_child_order_index_0,
         maker_child_order_index_1,
+        7,
     );
     trigger_child_orders(
         builder,
@@ -1250,6 +1265,7 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
         maker_child_order_index_0,
         maker_child_order_index_1,
         maker_filled_size,
+        7,
     );
     tx_state.account_order = select_account_order_target(
         builder,
@@ -1268,9 +1284,8 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
         register_account_order.remaining_base_amount,
     );
     let is_taker_filled_size_zero = builder.is_zero(taker_filled_size);
-    let is_taker_filled_size_non_zero = builder.not(is_taker_filled_size_zero);
     let trigger_taker_child_orders_flag =
-        builder.and(is_taker_filled_size_non_zero, cancel_taker_order);
+        builder.and_not(cancel_taker_order, is_taker_filled_size_zero);
     let cancel_taker_child_orders_flag = builder.and(is_taker_filled_size_zero, cancel_taker_order);
     cancel_child_orders(
         builder,
@@ -1280,6 +1295,7 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
         taker_account_index,
         taker_child_order_index_0,
         taker_child_order_index_1,
+        5,
     );
     trigger_child_orders(
         builder,
@@ -1290,6 +1306,7 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
         taker_child_order_index_0,
         taker_child_order_index_1,
         taker_filled_size,
+        5,
     );
 
     // Insert taker order if needed
@@ -1340,6 +1357,7 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
         market_index,
         taker_account_index,
         tx_state.positions[TAKER_ACCOUNT_ID].total_position_tied_order_count,
+        3,
     );
 
     let maker_has_position_tied_orders =
@@ -1356,7 +1374,230 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
         market_index,
         maker_account_index,
         tx_state.positions[MAKER_ACCOUNT_ID].total_position_tied_order_count,
+        2,
     );
+
+    // Insert register for partner fees
+    {
+        let fee_account_exists = builder.not(tx_state.is_new_account[FEE_ACCOUNT_ID]);
+        let trade_base_is_not_zero = builder.is_not_zero(trade_base);
+        let flag = builder.multi_and(&[
+            update_status_flags,
+            trade_base_is_not_zero,
+            fee_account_exists,
+        ]);
+
+        let usdc_asset_index = builder.constant_u64(USDC_ASSET_INDEX);
+        let default_strategy_index = builder.constant_usize(DEFAULT_STRATEGY_INDEX);
+
+        let trade_quote = trade_quote.target;
+
+        let integrator_taker_fee_big =
+            builder.target_to_biguint_single_limb_unsafe(integrator_taker_fee);
+        let integrator_maker_fee_big =
+            builder.target_to_biguint_single_limb_unsafe(integrator_maker_fee);
+
+        let mut taker_fee_amount;
+        let mut maker_fee_amount;
+
+        let mut taker_asset_index;
+        let mut maker_asset_index;
+
+        let mut strategy_index;
+        let mut route_type;
+
+        // Perps
+        {
+            strategy_index = tx_state.market_details.strategy_index;
+            route_type = builder.constant_u64(ROUTE_TYPE_PERPS);
+
+            let usdc_to_collateral_multiplier =
+                builder.constant_u32(USDC_TO_COLLATERAL_MULTIPLIER).0;
+            let usdc_to_collateral_multiplier =
+                builder.target_to_biguint_single_limb_unsafe(usdc_to_collateral_multiplier);
+
+            let trade_quote = builder.mul(trade_quote, tx_state.market_details.quote_multiplier);
+            let trade_quote_big = builder.target_to_biguint(trade_quote);
+
+            let extended_taker_fee = builder.mul_biguint_non_carry(
+                &integrator_taker_fee_big,
+                &trade_quote_big,
+                BIG_U96_LIMBS,
+            );
+            (taker_fee_amount, _) =
+                builder.div_rem_biguint(&extended_taker_fee, &usdc_to_collateral_multiplier);
+            taker_asset_index = usdc_asset_index;
+
+            let extended_maker_fee = builder.mul_biguint_non_carry(
+                &integrator_maker_fee_big,
+                &trade_quote_big,
+                BIG_U96_LIMBS,
+            );
+            (maker_fee_amount, _) =
+                builder.div_rem_biguint(&extended_maker_fee, &usdc_to_collateral_multiplier);
+            maker_asset_index = usdc_asset_index;
+        }
+
+        // Spot
+        {
+            let flag = builder.and(flag, is_spot);
+
+            strategy_index = builder.select(flag, default_strategy_index, strategy_index);
+            let route_type_spot = builder.constant_u64(ROUTE_TYPE_SPOT);
+            route_type = builder.select(flag, route_type_spot, route_type);
+
+            let fee_tick = builder.constant_u64(FEE_TICK);
+
+            let base_fee_amount_big = {
+                let (base_fee_multiplier, _) = builder.div_rem(
+                    tx_state.market.size_extension_multiplier,
+                    fee_tick,
+                    FEE_BITS,
+                );
+                let base_fee_multiplier = builder.target_to_biguint(base_fee_multiplier);
+                let trade_base_big = builder.target_to_biguint(trade_base);
+                let trade_base_multiplied = builder.mul_biguint_non_carry(
+                    &trade_base_big,
+                    &base_fee_multiplier,
+                    BIG_U96_LIMBS,
+                );
+                let base_fee_selected = builder.select_biguint(
+                    is_taker_ask,
+                    &integrator_maker_fee_big,
+                    &integrator_taker_fee_big,
+                );
+                let extended_base_fee_amount = builder.mul_biguint_non_carry(
+                    &trade_base_multiplied,
+                    &base_fee_selected,
+                    BIG_U96_LIMBS,
+                );
+                let (base_fee_amount_big, _) = builder.div_rem_biguint(
+                    &extended_base_fee_amount,
+                    &tx_state.assets[BASE_ASSET_ID].extension_multiplier,
+                );
+
+                base_fee_amount_big
+            };
+
+            let quote_fee_amount_big = {
+                let (quote_fee_multiplier, _) = builder.div_rem(
+                    tx_state.market.quote_extension_multiplier,
+                    fee_tick,
+                    FEE_BITS,
+                );
+                let quote_fee_multiplier = builder.target_to_biguint(quote_fee_multiplier);
+                let trade_quote_big = builder.target_to_biguint(trade_quote);
+                let trade_quote_multiplied = builder.mul_biguint_non_carry(
+                    &trade_quote_big,
+                    &quote_fee_multiplier,
+                    BIG_U96_LIMBS,
+                );
+                let quote_fee_selected = builder.select_biguint(
+                    is_taker_ask,
+                    &integrator_taker_fee_big,
+                    &integrator_maker_fee_big,
+                );
+                let extended_quote_fee_amount = builder.mul_biguint_non_carry(
+                    &trade_quote_multiplied,
+                    &quote_fee_selected,
+                    BIG_U96_LIMBS,
+                );
+                let (quote_fee_amount_big, _) = builder.div_rem_biguint(
+                    &extended_quote_fee_amount,
+                    &tx_state.assets[QUOTE_ASSET_ID].extension_multiplier,
+                );
+                quote_fee_amount_big
+            };
+
+            let spot_taker_fee_amount =
+                builder.select_biguint(is_taker_ask, &quote_fee_amount_big, &base_fee_amount_big);
+            taker_fee_amount =
+                builder.select_biguint(flag, &spot_taker_fee_amount, &taker_fee_amount);
+            let spot_taker_asset_index = builder.select(
+                is_taker_ask,
+                tx_state.market.quote_asset_id,
+                tx_state.market.base_asset_id,
+            );
+            taker_asset_index = builder.select(flag, spot_taker_asset_index, taker_asset_index);
+
+            let spot_maker_fee_amount =
+                builder.select_biguint(is_taker_ask, &base_fee_amount_big, &quote_fee_amount_big);
+            maker_fee_amount =
+                builder.select_biguint(flag, &spot_maker_fee_amount, &maker_fee_amount);
+            let spot_maker_asset_index = builder.select(
+                is_taker_ask,
+                tx_state.market.base_asset_id,
+                tx_state.market.quote_asset_id,
+            );
+            maker_asset_index = builder.select(flag, spot_maker_asset_index, maker_asset_index);
+        }
+
+        let max_integrator_fee_amount = builder.constant_usize(MAX_INTEGRATOR_FEE_AMOUNT);
+        let taker_fee = builder.biguint_to_target_safe(&taker_fee_amount);
+        let taker_fee = builder.min(
+            &[taker_fee, max_integrator_fee_amount],
+            MAX_INTEGRATOR_FEE_AMOUNT_BITS,
+        );
+        let maker_fee = builder.biguint_to_target_safe(&maker_fee_amount);
+        let maker_fee = builder.min(
+            &[maker_fee, max_integrator_fee_amount],
+            MAX_INTEGRATOR_FEE_AMOUNT_BITS,
+        );
+
+        // Taker
+        {
+            let integrator_taker_fee_exists = builder.is_not_zero(taker_fee);
+            let integrator_fee_collector_is_fee_collector = builder.is_equal(
+                integrator_taker_fee_collector_index,
+                tx_state.accounts[FEE_ACCOUNT_ID].account_index,
+            );
+            let cond = builder.and_not(
+                integrator_taker_fee_exists,
+                integrator_fee_collector_is_fee_collector,
+            );
+            let flag = builder.and(flag, cond);
+
+            let new_register = BaseRegisterInfoTarget {
+                instruction_type: builder.constant_u64(TRANSFER_ASSET as u64),
+                account_index: tx_state.accounts[FEE_ACCOUNT_ID].account_index,
+                generic_field_0: integrator_taker_fee_collector_index,
+                u32_generic_field_0: taker_asset_index,
+                u32_generic_field_1: strategy_index,
+                pending_type: route_type,
+                pending_size: taker_fee,
+
+                ..BaseRegisterInfoTarget::empty(builder)
+            };
+            tx_state.put_to_instruction_stack_unsafe(builder, flag, &new_register, 1);
+        }
+
+        // Maker
+        {
+            let integrator_maker_fee_exists = builder.is_not_zero(maker_fee);
+            let integrator_fee_collector_is_fee_collector = builder.is_equal(
+                integrator_maker_fee_collector_index,
+                tx_state.accounts[FEE_ACCOUNT_ID].account_index,
+            );
+            let cond = builder.and_not(
+                integrator_maker_fee_exists,
+                integrator_fee_collector_is_fee_collector,
+            );
+            let flag = builder.and(flag, cond);
+
+            let new_register = BaseRegisterInfoTarget {
+                instruction_type: builder.constant_u64(TRANSFER_ASSET as u64),
+                account_index: tx_state.accounts[FEE_ACCOUNT_ID].account_index,
+                generic_field_0: integrator_maker_fee_collector_index,
+                u32_generic_field_0: maker_asset_index,
+                u32_generic_field_1: strategy_index,
+                pending_type: route_type,
+                pending_size: maker_fee,
+
+                ..BaseRegisterInfoTarget::empty(builder)
+            };
+            tx_state.put_to_instruction_stack_unsafe(builder, flag, &new_register, 0);
+        }
+    }
 }
 
 fn is_valid_perps_trade(
@@ -1404,6 +1645,7 @@ fn is_valid_perps_trade(
         open_interest_notional_mult,
     );
     let new_open_interest_notional = builder.mul(new_open_interest, open_interest_notional_mult);
+
     let is_taker_insurance_fund = builder.is_equal_constant(
         tx_state.accounts[TAKER_ACCOUNT_ID].account_type,
         INSURANCE_FUND_ACCOUNT_TYPE as u64,
@@ -1806,6 +2048,10 @@ fn get_account_order_from_register(register: &BaseRegisterInfoTarget) -> Account
         to_trigger_order_index0: register.pending_to_trigger_order_index0,
         to_trigger_order_index1: register.pending_to_trigger_order_index1,
         to_cancel_order_index0: register.pending_to_cancel_order_index0,
+
+        integrator_fee_collector_index: register.generic_field_1,
+        integrator_taker_fee: register.u32_generic_field_0,
+        integrator_maker_fee: register.u32_generic_field_1,
     }
 }
 
@@ -2108,13 +2354,14 @@ pub fn get_impact_prices(
     (impact_ask_price, impact_bid_price)
 }
 
-pub fn cancel_position_tied_account_orders(
+fn cancel_position_tied_account_orders(
     builder: &mut Builder,
     is_enabled: BoolTarget,
     tx_state: &mut TxState,
     market_index: Target,
     owner_account_index: Target,
     position_tied_order_count: Target,
+    register_index: usize,
 ) {
     let cancel_position_tied_account_orders =
         builder.constant_from_u8(CANCEL_POSITION_TIED_ACCOUNT_ORDERS);
@@ -2123,27 +2370,14 @@ pub fn cancel_position_tied_account_orders(
         market_index,
         account_index: owner_account_index,
         pending_size: position_tied_order_count,
-        pending_order_index: builder.zero(),
-        pending_client_order_index: builder.zero(),
-        pending_price: builder.zero(),
-        pending_nonce: builder.zero(),
-        pending_is_ask: builder._false(),
-        pending_initial_size: builder.zero(),
-        pending_expiry: builder.zero(),
-        pending_time_in_force: builder.zero(),
-        pending_type: builder.zero(),
-        pending_reduce_only: builder.zero(),
-        generic_field_0: builder.zero(),
-        pending_trigger_price: builder.zero(),
-        pending_trigger_status: builder.zero(),
-        pending_to_trigger_order_index0: builder.zero(),
-        pending_to_trigger_order_index1: builder.zero(),
-        pending_to_cancel_order_index0: builder.zero(),
+
+        ..BaseRegisterInfoTarget::empty(builder)
     };
-    tx_state.insert_to_instruction_stack(
+    tx_state.put_to_instruction_stack_unsafe(
         builder,
         is_enabled,
         cancel_position_tied_account_orders_instruction,
+        register_index,
     );
 }
 
@@ -2156,7 +2390,13 @@ pub fn trigger_child_orders(
     child_order_index_0: Target,
     child_order_index_1: Target,
     pending_size: Target,
+    max_register_index: usize,
 ) {
+    assert!(
+        max_register_index >= 1,
+        "max_register_index must be at least 1"
+    );
+
     let trigger_child_order_0_instruction = get_trigger_child_order_instruction(
         builder,
         market_index,
@@ -2166,10 +2406,11 @@ pub fn trigger_child_orders(
     );
     let does_child_order_0_exist = builder.is_not_zero(child_order_index_0);
     let child_order_0_flag = builder.and(is_enabled, does_child_order_0_exist);
-    tx_state.insert_to_instruction_stack(
+    tx_state.put_to_instruction_stack_unsafe(
         builder,
         child_order_0_flag,
         &trigger_child_order_0_instruction,
+        max_register_index,
     );
 
     let trigger_child_order_1_instruction = get_trigger_child_order_instruction(
@@ -2181,10 +2422,11 @@ pub fn trigger_child_orders(
     );
     let does_child_order_1_exist = builder.is_not_zero(child_order_index_1);
     let child_order_1_flag = builder.and(is_enabled, does_child_order_1_exist);
-    tx_state.insert_to_instruction_stack(
+    tx_state.put_to_instruction_stack_unsafe(
         builder,
         child_order_1_flag,
         &trigger_child_order_1_instruction,
+        max_register_index - 1,
     );
 }
 
@@ -2202,21 +2444,8 @@ fn get_trigger_child_order_instruction(
         account_index: owner_account_index,
         pending_size,
         pending_order_index: child_order_index,
-        pending_client_order_index: builder.zero(),
-        pending_price: builder.zero(),
-        pending_nonce: builder.zero(),
-        pending_is_ask: builder._false(),
-        pending_initial_size: builder.zero(),
-        pending_expiry: builder.zero(),
-        pending_time_in_force: builder.zero(),
-        pending_type: builder.zero(),
-        pending_reduce_only: builder.zero(),
-        generic_field_0: builder.zero(),
-        pending_trigger_price: builder.zero(),
-        pending_trigger_status: builder.zero(),
-        pending_to_trigger_order_index0: builder.zero(),
-        pending_to_trigger_order_index1: builder.zero(),
-        pending_to_cancel_order_index0: builder.zero(),
+
+        ..BaseRegisterInfoTarget::empty(builder)
     }
 }
 
@@ -2228,6 +2457,7 @@ pub fn cancel_child_orders(
     owner_account_index: Target,
     child_order_index_0: Target,
     child_order_index_1: Target,
+    max_register_index: usize,
 ) {
     let cancel_child_order_0_instruction = get_cancel_child_order_instruction(
         builder,
@@ -2237,10 +2467,11 @@ pub fn cancel_child_orders(
     );
     let does_child_order_0_exist = builder.is_not_zero(child_order_index_0);
     let child_order_0_flag = builder.and(is_enabled, does_child_order_0_exist);
-    tx_state.insert_to_instruction_stack(
+    tx_state.put_to_instruction_stack_unsafe(
         builder,
         child_order_0_flag,
         &cancel_child_order_0_instruction,
+        max_register_index,
     );
 
     let cancel_child_order_1_instruction = get_cancel_child_order_instruction(
@@ -2251,10 +2482,11 @@ pub fn cancel_child_orders(
     );
     let does_child_order_1_exist = builder.is_not_zero(child_order_index_1);
     let child_order_1_flag = builder.and(is_enabled, does_child_order_1_exist);
-    tx_state.insert_to_instruction_stack(
+    tx_state.put_to_instruction_stack_unsafe(
         builder,
         child_order_1_flag,
         &cancel_child_order_1_instruction,
+        max_register_index - 1,
     );
 }
 

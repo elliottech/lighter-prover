@@ -21,6 +21,7 @@ use crate::ecdsa::curve::secp256k1::Secp256K1;
 use crate::eddsa::curve::scalar_field::ECgFp5Scalar;
 use crate::eddsa::schnorr::SchnorrSig;
 use crate::keccak::helpers::u8_array_to_bits;
+use crate::tx_attributes::{NB_ATTRIBUTES_PER_TX, TxAttributes};
 use crate::types::account_delta::{PositionDelta, PublicPoolShareDelta};
 use crate::types::account_position::AccountPosition;
 use crate::types::constants::{
@@ -354,6 +355,65 @@ where
         }
     }
     Ok(result)
+}
+
+pub fn tx_attributes<'de, D>(deserializer: D) -> Result<TxAttributes, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Debug, Deserialize)]
+    struct Helper {
+        #[serde(rename = "at", default)]
+        at: Vec<u8>,
+        #[serde(rename = "av", default)]
+        av: Vec<i64>,
+    }
+
+    let helper_opt: Option<Helper> = Option::deserialize(deserializer)?;
+    let Some(helper) = helper_opt else {
+        return Ok(TxAttributes::default());
+    };
+
+    if helper.at.is_empty() && helper.av.is_empty() {
+        return Ok(TxAttributes::default());
+    }
+
+    if helper.at.len() != NB_ATTRIBUTES_PER_TX {
+        return Err(de::Error::custom(format!(
+            "TxAttributes.at length mismatch: expected {}, got {}",
+            NB_ATTRIBUTES_PER_TX,
+            helper.at.len()
+        )));
+    }
+    if helper.av.len() != NB_ATTRIBUTES_PER_TX {
+        return Err(de::Error::custom(format!(
+            "TxAttributes.av length mismatch: expected {}, got {}",
+            NB_ATTRIBUTES_PER_TX,
+            helper.av.len()
+        )));
+    }
+
+    let mut non_zero: Vec<(u8, i64, usize)> = Vec::new();
+    for (idx, (t, v)) in helper.at.into_iter().zip(helper.av.into_iter()).enumerate() {
+        if t != 0 {
+            non_zero.push((t, v, idx));
+        }
+    }
+
+    non_zero.sort_by(|a, b| a.0.cmp(&b.0).then(a.2.cmp(&b.2)));
+
+    let mut attribute_types = [0u8; NB_ATTRIBUTES_PER_TX];
+    let mut attribute_values = [0i64; NB_ATTRIBUTES_PER_TX];
+
+    for (out_i, (t, v, _orig)) in non_zero.into_iter().enumerate() {
+        attribute_types[out_i] = t;
+        attribute_values[out_i] = v;
+    }
+
+    Ok(TxAttributes {
+        attribute_types,
+        attribute_values,
+    })
 }
 
 pub fn default_price_updates() -> [u32; POSITION_LIST_SIZE] {

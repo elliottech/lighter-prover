@@ -3,6 +3,7 @@
 
 use plonky2::iop::target::{BoolTarget, Target};
 
+use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::types::config::Builder;
 use crate::types::constants::{
     CANCEL_ALL_ACCOUNT_ORDERS, CANCEL_ALL_CROSS_MARGIN_ORDERS, CANCEL_ALL_ISOLATED_MARGIN_ORDERS,
@@ -12,6 +13,7 @@ use crate::types::register::BaseRegisterInfoTarget;
 use crate::types::tx_state::TxState;
 use crate::utils::CircuitBuilderUtils;
 
+/// Places the new register in 0th index, caller must be aware of this.
 pub fn apply_immediate_cancel_all(
     builder: &mut Builder,
     is_enabled: BoolTarget,
@@ -35,12 +37,13 @@ pub fn apply_immediate_cancel_all(
         market_index: nil_market_index,
         ..BaseRegisterInfoTarget::empty(builder)
     };
-    let open_order_exists =
-        builder.is_not_zero(tx_state.accounts[OWNER_ACCOUNT_ID].total_order_count);
-    let is_register_select_active = builder.and(is_enabled, open_order_exists);
-    tx_state.insert_to_instruction_stack(builder, is_register_select_active, &new_register);
+    let is_not_open_order_exists =
+        builder.is_zero(tx_state.accounts[OWNER_ACCOUNT_ID].total_order_count);
+    let is_register_select_active = builder.and_not(is_enabled, is_not_open_order_exists);
+    tx_state.put_to_instruction_stack_unsafe(builder, is_register_select_active, &new_register, 0);
 }
 
+/// Places the new register in 0th index, caller must be aware of this.
 pub fn apply_isolated_cancel_all(
     builder: &mut Builder,
     is_enabled: BoolTarget,
@@ -56,12 +59,13 @@ pub fn apply_isolated_cancel_all(
 
         ..BaseRegisterInfoTarget::empty(builder)
     };
-    let open_order_exists =
-        builder.is_not_zero(tx_state.positions[OWNER_ACCOUNT_ID].total_order_count);
-    let is_register_select_active = builder.and(is_enabled, open_order_exists);
-    tx_state.insert_to_instruction_stack(builder, is_register_select_active, &new_register);
+    let is_not_open_order_exists =
+        builder.is_zero(tx_state.positions[OWNER_ACCOUNT_ID].total_order_count);
+    let is_register_select_active = builder.and_not(is_enabled, is_not_open_order_exists);
+    tx_state.put_to_instruction_stack_unsafe(builder, is_register_select_active, &new_register, 0);
 }
 
+/// Places the new register in 0th index, caller must be aware of this.
 pub fn apply_cross_cancel_all(
     builder: &mut Builder,
     is_enabled: BoolTarget,
@@ -82,7 +86,7 @@ pub fn apply_cross_cancel_all(
 
         ..BaseRegisterInfoTarget::empty(builder)
     };
-    let open_order_exists = builder.is_not_zero(total_cross_count);
-    let is_register_select_active = builder.and(is_enabled, open_order_exists);
-    tx_state.insert_to_instruction_stack(builder, is_register_select_active, &new_register);
+    let is_not_open_order_exists = builder.is_zero(total_cross_count);
+    let is_register_select_active = builder.and_not(is_enabled, is_not_open_order_exists);
+    tx_state.put_to_instruction_stack_unsafe(builder, is_register_select_active, &new_register, 0);
 }

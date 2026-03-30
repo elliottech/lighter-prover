@@ -446,10 +446,11 @@ impl Apply for InternalDeleverageTxTarget {
             pending_size: position_tied_order_count,
             ..BaseRegisterInfoTarget::empty(builder)
         };
-        tx_state.insert_to_instruction_stack(
+        tx_state.put_to_instruction_stack_unsafe(
             builder,
             cancel_maker_position_tied_orders_flag,
             &cancel_position_tied_account_orders_instruction,
+            0,
         );
 
         self.success

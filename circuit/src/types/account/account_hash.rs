@@ -128,6 +128,23 @@ impl AccountTarget {
                     .collect::<Vec<_>>(),
             );
             elements.extend_from_slice(&pending_unlocks_hash.elements);
+
+            let elems = self
+                .approved_integrators
+                .iter()
+                .flat_map(|ai| {
+                    [
+                        ai.integrator_account_index,
+                        ai.max_perps_taker_fee,
+                        ai.max_perps_maker_fee,
+                        ai.max_spot_taker_fee,
+                        ai.max_spot_maker_fee,
+                        ai.expiry,
+                    ]
+                })
+                .collect::<Vec<_>>();
+            let approved_integrators_hash = builder.hash_n_to_hash_no_pad::<Poseidon2Hash>(elems);
+            elements.extend_from_slice(&approved_integrators_hash.elements);
         }
 
         [
@@ -285,14 +302,62 @@ mod tests {
     use plonky2::iop::witness::PartialWitness;
 
     use super::*;
+    use crate::circuit_logger::CircuitBuilderLogging;
     use crate::types::account::{Account, AccountTargetWitness};
+    use crate::types::approved_integrator::ApprovedIntegratorTarget;
     use crate::types::config::{C, CIRCUIT_CONFIG, F};
     use crate::types::constants::{
         EMPTY_ACCOUNT_ORDERS_TREE_ROOT, EMPTY_API_KEY_TREE_ROOT, EMPTY_ASSET_TREE_ROOT,
     };
 
+    #[ignore]
+    #[test]
+    fn empty_approved_integrators_hash() -> Result<()> {
+        {
+            use env_logger::{DEFAULT_FILTER_ENV, Env, try_init_from_env};
+
+            let _ = try_init_from_env(Env::default().filter_or(DEFAULT_FILTER_ENV, "debug"));
+        }
+
+        let mut builder = Builder::new(CIRCUIT_CONFIG);
+
+        let empty_integrator = ApprovedIntegratorTarget::empty(&mut builder);
+        let approved_integrators_hash = builder.hash_n_to_hash_no_pad::<Poseidon2Hash>(
+            [
+                &empty_integrator,
+                &empty_integrator,
+                &empty_integrator,
+                &empty_integrator,
+            ]
+            .iter()
+            .flat_map(|ai| {
+                [
+                    ai.integrator_account_index,
+                    ai.max_perps_taker_fee,
+                    ai.max_perps_maker_fee,
+                    ai.max_spot_taker_fee,
+                    ai.max_spot_maker_fee,
+                    ai.expiry,
+                ]
+            })
+            .collect::<Vec<_>>(),
+        );
+        builder.println_hash_out(&approved_integrators_hash, "Approved Integrators Hash");
+
+        let data = builder.build::<C>();
+        let pw = PartialWitness::<F>::new();
+
+        data.verify(data.prove(pw).unwrap())
+    }
+
     #[test]
     fn empty_hash_check() -> Result<()> {
+        // {
+        //     use env_logger::{DEFAULT_FILTER_ENV, Env, try_init_from_env};
+
+        //     let _ = try_init_from_env(Env::default().filter_or(DEFAULT_FILTER_ENV, "debug"));
+        // }
+
         let mut builder = Builder::new(CIRCUIT_CONFIG);
 
         let account = AccountTarget::new(&mut builder);

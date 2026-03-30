@@ -12,6 +12,9 @@ use plonky2::iop::target::Target;
 
 use crate::bigint::bigint::{BigIntTarget, SignTarget};
 use crate::bigint::biguint::BigUintTarget;
+use crate::types::approve_integrator::{
+    APPROVE_INTEGRATOR_PUBLIC_INPUTS_LEN, ApproveIntegratorMessage, ApproveIntegratorMessageTarget,
+};
 use crate::types::change_pub_key::{
     CHANGE_PK_PUBLIC_INPUTS_LEN, ChangePubKeyMessage, ChangePubKeyMessageTarget,
 };
@@ -42,6 +45,7 @@ where
 
     pub change_pub_key_message: ChangePubKeyMessage<F>,
     pub transfer_message: TransferMessage,
+    pub approve_integrator_message: ApproveIntegratorMessage,
 
     pub on_chain_operations_count: u64,
     pub on_chain_operations_pub_data: Vec<[u8; ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE]>,
@@ -110,8 +114,10 @@ where
 
         let change_pub_key_message_index = new_public_market_details_index + POSITION_LIST_SIZE * 5;
         let transfer_message_index = change_pub_key_message_index + CHANGE_PK_PUBLIC_INPUTS_LEN;
+        let approve_integrator_message_index = transfer_message_index + TRANSFER_PUBLIC_INPUTS_LEN;
 
-        let on_chain_operations_count_index = transfer_message_index + TRANSFER_PUBLIC_INPUTS_LEN;
+        let on_chain_operations_count_index =
+            approve_integrator_message_index + APPROVE_INTEGRATOR_PUBLIC_INPUTS_LEN;
         let on_chain_operations_pub_data_index = on_chain_operations_count_index + 1;
 
         let priority_operations_count_index =
@@ -170,7 +176,10 @@ where
                 &public_inputs[change_pub_key_message_index..transfer_message_index],
             ),
             transfer_message: TransferMessage::from_public_inputs(
-                &public_inputs[transfer_message_index..on_chain_operations_count_index],
+                &public_inputs[transfer_message_index..approve_integrator_message_index],
+            ),
+            approve_integrator_message: ApproveIntegratorMessage::from_public_inputs(
+                &public_inputs[approve_integrator_message_index..on_chain_operations_count_index],
             ),
 
             // On chain ops pub data
@@ -210,6 +219,7 @@ pub struct BlockTxChainWitnessTarget {
 
     pub change_pub_key_message: ChangePubKeyMessageTarget,
     pub transfer_message: TransferMessageTarget,
+    pub approve_integrator_message: ApproveIntegratorMessageTarget,
 
     pub on_chain_operations_count: Target,
     pub on_chain_operations_pub_data: Vec<[U8Target; ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE]>,
@@ -234,6 +244,7 @@ impl BlockTxChainWitnessTarget {
             }),
             change_pub_key_message: ChangePubKeyMessageTarget::new_public(builder),
             transfer_message: TransferMessageTarget::new_public(builder),
+            approve_integrator_message: ApproveIntegratorMessageTarget::new_public(builder),
             on_chain_operations_count: builder.add_virtual_public_input(),
             on_chain_operations_pub_data: (0..on_chain_operations_limit)
                 .map(|_| {
@@ -265,8 +276,10 @@ impl BlockTxChainWitnessTarget {
 
         let change_pub_key_message_index = new_public_market_details_index + POSITION_LIST_SIZE * 5;
         let transfer_message_index = change_pub_key_message_index + CHANGE_PK_PUBLIC_INPUTS_LEN;
+        let approve_integrator_message_index = transfer_message_index + TRANSFER_PUBLIC_INPUTS_LEN;
 
-        let on_chain_operations_count_index = transfer_message_index + TRANSFER_PUBLIC_INPUTS_LEN;
+        let on_chain_operations_count_index =
+            approve_integrator_message_index + APPROVE_INTEGRATOR_PUBLIC_INPUTS_LEN;
         let on_chain_operations_pub_data_index = on_chain_operations_count_index + 1;
 
         let priority_operations_count_index =
@@ -323,7 +336,10 @@ impl BlockTxChainWitnessTarget {
                     &pis[change_pub_key_message_index..transfer_message_index],
                 ),
                 transfer_message: TransferMessageTarget::from_public_inputs(
-                    &pis[transfer_message_index..on_chain_operations_count_index],
+                    &pis[transfer_message_index..approve_integrator_message_index],
+                ),
+                approve_integrator_message: ApproveIntegratorMessageTarget::from_public_inputs(
+                    &pis[approve_integrator_message_index..on_chain_operations_count_index],
                 ),
 
                 on_chain_operations_count: pis[on_chain_operations_count_index],
@@ -362,6 +378,11 @@ impl BlockTxChainWitnessTarget {
             &other.change_pub_key_message,
         );
         TransferMessageTarget::connect(builder, &self.transfer_message, &other.transfer_message);
+        ApproveIntegratorMessageTarget::connect(
+            builder,
+            &self.approve_integrator_message,
+            &other.approve_integrator_message,
+        );
 
         builder.connect(
             self.on_chain_operations_count,

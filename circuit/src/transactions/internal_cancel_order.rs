@@ -368,6 +368,7 @@ impl Apply for InternalCancelOrderTxTarget {
             tx_state.account_order.owner_account_index,
             tx_state.account_order.to_trigger_order_index0,
             tx_state.account_order.to_trigger_order_index1,
+            1,
         );
 
         // Cancel order - account order leaf

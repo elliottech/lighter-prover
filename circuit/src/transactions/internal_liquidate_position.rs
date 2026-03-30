@@ -195,8 +195,11 @@ impl Apply for InternalLiquidatePositionTxTarget {
             pending_to_trigger_order_index0: builder.zero(),
             pending_to_trigger_order_index1: builder.zero(),
             pending_to_cancel_order_index0: builder.zero(),
+            generic_field_1: builder.zero(),
+            u32_generic_field_0: builder.zero(),
+            u32_generic_field_1: builder.zero(),
         };
-        tx_state.insert_to_instruction_stack(builder, self.success, &new_register);
+        tx_state.put_to_instruction_stack_unsafe(builder, self.success, &new_register, 0);
 
         // Set the matching engine flag
         tx_state.matching_engine_flag = builder.or(tx_state.matching_engine_flag, self.success);

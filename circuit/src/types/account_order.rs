@@ -3,11 +3,10 @@
 
 use anyhow::Result;
 use plonky2::field::extension::Extendable;
-use plonky2::field::types::{Field, Field64, PrimeField64};
-use plonky2::hash::hash_types::{HashOut, HashOutTarget, RichField};
+use plonky2::field::types::PrimeField64;
+use plonky2::hash::hash_types::{HashOutTarget, RichField};
 use plonky2::iop::target::{BoolTarget, Target};
 use plonky2::iop::witness::Witness;
-use plonky2::plonk::config::Hasher;
 use serde::Deserialize;
 
 use crate::bool_utils::CircuitBuilderBoolUtils;
@@ -15,11 +14,11 @@ use crate::circuit_logger::CircuitBuilderLogging;
 use crate::eddsa::gadgets::curve::PartialWitnessCurve;
 use crate::hash_utils::CircuitBuilderHashUtils;
 use crate::poseidon2::Poseidon2Hash;
-use crate::types::config::{Builder, F};
-use crate::types::constants::{NIL_CLIENT_ORDER_INDEX, NIL_ORDER_INDEX};
+use crate::types::config::Builder;
+use crate::types::constants::{NIL_ACCOUNT_INDEX, NIL_CLIENT_ORDER_INDEX, NIL_ORDER_INDEX};
 use crate::utils::CircuitBuilderUtils;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct AccountOrder {
     #[serde(rename = "i0")]
     pub index_0: i64,
@@ -77,16 +76,18 @@ pub struct AccountOrder {
 
     #[serde(rename = "tcoi0", default)]
     pub to_cancel_order_index0: i64,
-}
-impl Default for AccountOrder {
-    fn default() -> Self {
-        Self::empty()
-    }
+
+    #[serde(rename = "ifci", default)]
+    pub integrator_fee_collector_index: i64,
+    #[serde(rename = "itf", default)]
+    pub integrator_taker_fee: i64,
+    #[serde(rename = "imf", default)]
+    pub integrator_maker_fee: i64,
 }
 
 impl AccountOrder {
     pub fn empty() -> Self {
-        AccountOrder {
+        Self {
             index_0: NIL_ORDER_INDEX,
             index_1: NIL_CLIENT_ORDER_INDEX,
 
@@ -109,51 +110,11 @@ impl AccountOrder {
             to_trigger_order_index0: NIL_ORDER_INDEX,
             to_trigger_order_index1: NIL_ORDER_INDEX,
             to_cancel_order_index0: NIL_ORDER_INDEX,
+
+            integrator_fee_collector_index: NIL_ACCOUNT_INDEX,
+            integrator_taker_fee: 0,
+            integrator_maker_fee: 0,
         }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.order_index == 0
-            && self.client_order_index == 0
-            && self.initial_base_amount == 0
-            && self.price == 0
-            && self.nonce == 0
-            && self.remaining_base_amount == 0
-            && self.is_ask == 0
-            && self.order_type == 0
-            && self.time_in_force == 0
-            && self.reduce_only == 0
-            && self.trigger_price == 0
-            && self.expiry == 0
-            && self.trigger_status == 0
-            && self.to_trigger_order_index0 == 0
-            && self.to_trigger_order_index1 == 0
-            && self.to_cancel_order_index0 == 0
-    }
-
-    pub fn hash(&self) -> HashOut<F> {
-        if self.is_empty() {
-            return HashOut::ZERO;
-        }
-
-        Poseidon2Hash::hash_no_pad(&[
-            F::from_canonical_i64(self.order_index),
-            F::from_canonical_i64(self.client_order_index),
-            F::from_canonical_i64(self.initial_base_amount),
-            F::from_canonical_u32(self.price),
-            F::from_canonical_i64(self.nonce),
-            F::from_canonical_i64(self.remaining_base_amount),
-            F::from_canonical_u8(self.is_ask),
-            F::from_canonical_u8(self.order_type),
-            F::from_canonical_u8(self.time_in_force),
-            F::from_canonical_u8(self.reduce_only),
-            F::from_canonical_u32(self.trigger_price),
-            F::from_canonical_i64(self.expiry),
-            F::from_canonical_u8(self.trigger_status),
-            F::from_canonical_i64(self.to_trigger_order_index0),
-            F::from_canonical_i64(self.to_trigger_order_index1),
-            F::from_canonical_i64(self.to_cancel_order_index0),
-        ])
     }
 }
 
@@ -178,6 +139,10 @@ pub struct AccountOrderTarget {
     pub to_trigger_order_index0: Target,
     pub to_trigger_order_index1: Target,
     pub to_cancel_order_index0: Target,
+
+    pub integrator_fee_collector_index: Target,
+    pub integrator_taker_fee: Target,
+    pub integrator_maker_fee: Target,
 }
 
 impl AccountOrderTarget {
@@ -204,6 +169,10 @@ impl AccountOrderTarget {
             to_trigger_order_index0: builder.add_virtual_target(),
             to_trigger_order_index1: builder.add_virtual_target(),
             to_cancel_order_index0: builder.add_virtual_target(),
+
+            integrator_fee_collector_index: builder.add_virtual_target(),
+            integrator_taker_fee: builder.add_virtual_target(),
+            integrator_maker_fee: builder.add_virtual_target(),
         }
     }
 
@@ -248,6 +217,18 @@ impl AccountOrderTarget {
             self.to_cancel_order_index0,
             &format!("{} to_cancel_order_index0", tag),
         );
+        builder.println(
+            self.integrator_fee_collector_index,
+            &format!("{} integrator_fee_collector_index", tag),
+        );
+        builder.println(
+            self.integrator_taker_fee,
+            &format!("{} integrator_taker_fee", tag),
+        );
+        builder.println(
+            self.integrator_maker_fee,
+            &format!("{} integrator_maker_fee", tag),
+        );
     }
 
     pub fn empty(
@@ -278,29 +259,41 @@ impl AccountOrderTarget {
             to_trigger_order_index0: builder.zero(),
             to_trigger_order_index1: builder.zero(),
             to_cancel_order_index0: builder.zero(),
+
+            integrator_fee_collector_index: builder.zero(),
+            integrator_taker_fee: builder.zero(),
+            integrator_maker_fee: builder.zero(),
         }
     }
 
     pub fn is_empty(&self, builder: &mut Builder) -> BoolTarget {
+        // Adding following fields does not overflow Goldilocks, as long as
+        // these fields are guaranteed by business logic to fit these sizes.
+        let added = builder.add_many([
+            self.client_order_index,             // 48 bits
+            self.initial_base_amount,            // 48 bits
+            self.price,                          // 32 bits
+            self.nonce,                          // 48 bits
+            self.remaining_base_amount,          // 48 bits
+            self.is_ask.target,                  // 1 bit
+            self.order_type,                     // max 8
+            self.time_in_force,                  // 2 bits
+            self.reduce_only,                    // 1 bit
+            self.trigger_price,                  // 32 bits
+            self.expiry,                         // 48 bits
+            self.trigger_status,                 // 2 bits
+            self.integrator_fee_collector_index, // 48 bits
+            self.integrator_taker_fee,           // 32 bits
+            self.integrator_maker_fee,           // 32 bits
+        ]);
+        // Order indexes are 63 bits
         let assertions = [
+            builder.is_zero(added),
             builder.is_zero(self.order_index),
-            builder.is_zero(self.client_order_index),
-            builder.is_zero(self.initial_base_amount),
-            builder.is_zero(self.price),
-            builder.is_zero(self.nonce),
-            builder.is_zero(self.remaining_base_amount),
-            builder.is_zero(self.is_ask.target),
-            builder.is_zero(self.order_type),
-            builder.is_zero(self.time_in_force),
-            builder.is_zero(self.reduce_only),
-            builder.is_zero(self.trigger_price),
-            builder.is_zero(self.expiry),
-            builder.is_zero(self.trigger_status),
             builder.is_zero(self.to_trigger_order_index0),
             builder.is_zero(self.to_trigger_order_index1),
             builder.is_zero(self.to_cancel_order_index0),
         ];
-
         builder.multi_and(&assertions)
     }
 
@@ -322,6 +315,9 @@ impl AccountOrderTarget {
             self.to_trigger_order_index0,
             self.to_trigger_order_index1,
             self.to_cancel_order_index0,
+            self.integrator_fee_collector_index,
+            self.integrator_taker_fee,
+            self.integrator_maker_fee,
         ];
         let non_empty_hash = builder.hash_n_to_hash_no_pad::<Poseidon2Hash>(elements);
 
@@ -381,6 +377,18 @@ impl<T: Witness<F> + PartialWitnessCurve<F>, F: PrimeField64 + Extendable<5> + R
             a.to_cancel_order_index0,
             F::from_canonical_i64(b.to_cancel_order_index0),
         )?;
+        self.set_target(
+            a.integrator_fee_collector_index,
+            F::from_canonical_i64(b.integrator_fee_collector_index),
+        )?;
+        self.set_target(
+            a.integrator_taker_fee,
+            F::from_canonical_i64(b.integrator_taker_fee),
+        )?;
+        self.set_target(
+            a.integrator_maker_fee,
+            F::from_canonical_i64(b.integrator_maker_fee),
+        )?;
 
         Ok(())
     }
@@ -430,57 +438,13 @@ pub fn select_account_order_target(
             a.to_cancel_order_index0,
             b.to_cancel_order_index0,
         ),
-    }
-}
 
-#[cfg(test)]
-mod tests {
-    use anyhow::Result;
-    use plonky2::iop::witness::{PartialWitness, WitnessWrite};
-    use rand::Rng;
-
-    use super::*;
-    use crate::types::config::{C, CIRCUIT_CONFIG};
-
-    #[test]
-    fn account_order_hash_check() -> Result<()> {
-        let mut builder = Builder::new(CIRCUIT_CONFIG);
-
-        let account_order_target = AccountOrderTarget::new(&mut builder);
-        let account_order_hash_target = account_order_target.hash(&mut builder);
-
-        let data = builder.build::<C>();
-
-        // Set the values
-        let mut pw = PartialWitness::new();
-
-        let account_order = AccountOrder {
-            index_0: rand::thread_rng().r#gen::<i64>() & 0x0FFFFFFFFFFFFFF0,
-            index_1: rand::thread_rng().r#gen::<i64>() & 0x0FFFFFFFFFFFFFF0,
-            owner_account_index: rand::thread_rng().r#gen::<i64>() & 0x0FFFFFFFFFFFFFF0,
-            order_index: rand::thread_rng().r#gen::<i64>() & 0x0FFFFFFFFFFFFFF0,
-            client_order_index: rand::thread_rng().r#gen::<i64>() & 0x0FFFFFFFFFFFFFF0,
-            initial_base_amount: rand::thread_rng().r#gen::<i64>() & 0x0FFFFFFFFFFFFFF0,
-            price: rand::thread_rng().r#gen::<u32>(),
-            nonce: rand::thread_rng().r#gen::<i64>() & 0x0FFFFFFFFFFFFFF0,
-            remaining_base_amount: rand::thread_rng().r#gen::<i64>() & 0x0FFFFFFFFFFFFFF0,
-            is_ask: rand::thread_rng().r#gen::<bool>() as u8,
-            order_type: rand::thread_rng().r#gen::<u8>() & 0xFE,
-            time_in_force: rand::thread_rng().r#gen::<u8>() & 0xFE,
-            reduce_only: rand::thread_rng().r#gen::<bool>() as u8,
-            trigger_price: rand::thread_rng().r#gen::<u32>(),
-            expiry: rand::thread_rng().r#gen::<i64>() & 0x0FFFFFFFFFFFFFF0,
-            trigger_status: rand::thread_rng().r#gen::<u8>() & 0xFE,
-            to_trigger_order_index0: rand::thread_rng().r#gen::<i64>() & 0x0FFFFFFFFFFFFFF0,
-            to_trigger_order_index1: rand::thread_rng().r#gen::<i64>() & 0x0FFFFFFFFFFFFFF0,
-            to_cancel_order_index0: rand::thread_rng().r#gen::<i64>() & 0x0FFFFFFFFFFFFFF0,
-        };
-        let account_order_hash = account_order.hash();
-
-        pw.set_account_order_target(&account_order_target, &account_order)?;
-        pw.set_hash_target(account_order_hash_target, account_order_hash)?;
-
-        let proof = data.prove(pw).unwrap();
-        data.verify(proof)
+        integrator_fee_collector_index: builder.select(
+            flag,
+            a.integrator_fee_collector_index,
+            b.integrator_fee_collector_index,
+        ),
+        integrator_taker_fee: builder.select(flag, a.integrator_taker_fee, b.integrator_taker_fee),
+        integrator_maker_fee: builder.select(flag, a.integrator_maker_fee, b.integrator_maker_fee),
     }
 }

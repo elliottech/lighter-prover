@@ -8,6 +8,8 @@ use plonky2::field::types::{Field, PrimeField, PrimeField64, Sample};
 use plonky2::hash::hashing::hash_n_to_m_no_pad;
 use plonky2::iop::target::{BoolTarget, Target};
 use plonky2::iop::witness::Witness;
+#[cfg(test)]
+use plonky2::plonk::circuit_data::CircuitConfig;
 use rand::thread_rng;
 use serde::Deserialize;
 
@@ -153,10 +155,9 @@ pub fn verify_schnorr_signature_conditional_circuit(
 ) {
     // Decode Fp5 into an EC point (ECgFp5PointTarget consisting of 4 Fp5 elements)
     let pk_target = builder.conditional_ecgfp5_point_decode(flag, *pk_target);
-    let curve_generator = builder.ecgfp5_point_constant(ECgFp5Point::GENERATOR.to_weierstrass());
 
     // r_v = s*G + e*pk
-    let r_v = builder.ecgfp5_muladd_2(curve_generator, pk_target, &sig_target.s, &sig_target.e);
+    let r_v = builder.ecgfp5_muladd_2_gen_opt(pk_target, &sig_target.s, &sig_target.e);
 
     // e_v = H(R || H(m))
     let mut preimage = builder.ecgfp5_point_encode(r_v).0.to_vec();
@@ -179,4 +180,93 @@ pub fn hash_to_quintic_extension_circuit(
             .try_into()
             .unwrap(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::Result;
+    use plonky2::field::types::Field;
+    use plonky2::iop::witness::PartialWitness;
+
+    use super::*;
+    use crate::eddsa::gadgets::base_field::PartialWitnessQuinticExt;
+    use crate::types::config::C;
+
+    fn build_optimized_schnorr_gate_count() -> usize {
+        let mut builder = Builder::new(CircuitConfig::standard_ecc_config());
+        let flag = builder._true();
+
+        let hashed_message_target = builder.add_virtual_quintic_ext_target();
+        let sig_target = SchnorrSigTarget::new(&mut builder);
+        let pk_target = builder.add_virtual_quintic_ext_target();
+
+        verify_schnorr_signature_conditional_circuit(
+            &mut builder,
+            flag,
+            &pk_target,
+            &hashed_message_target,
+            &sig_target,
+        );
+
+        builder.num_gates()
+    }
+
+    #[test]
+    fn test_schnorr_signature_gates_after_generator_window_opt() -> Result<()> {
+        let optimized_gates = build_optimized_schnorr_gate_count();
+
+        println!(
+            "Schnorr gate count (optimized 2-bit joint table): {}",
+            optimized_gates
+        );
+
+        assert!(optimized_gates > 0, "optimized gates should be non-zero");
+
+        Ok(())
+    }
+
+    fn build_and_prove_schnorr_circuit(sk: &ECgFp5Scalar, msg: &[F]) -> Result<()> {
+        let message_hash = hash_to_quintic_extension(msg);
+        let sig = schnorr_sign_hashed_message(&message_hash, sk);
+        let pk = schnorr_pk_from_sk(sk);
+
+        let mut builder = Builder::new(CircuitConfig::standard_ecc_config());
+        let flag = builder._true();
+        let hashed_message_target = builder.add_virtual_quintic_ext_target();
+        let sig_target = SchnorrSigTarget::new(&mut builder);
+        let pk_target = builder.add_virtual_quintic_ext_target();
+
+        verify_schnorr_signature_conditional_circuit(
+            &mut builder,
+            flag,
+            &pk_target,
+            &hashed_message_target,
+            &sig_target,
+        );
+
+        let data = builder.build::<C>();
+        let mut pw = PartialWitness::new();
+        pw.set_quintic_ext_target(hashed_message_target, message_hash)?;
+        pw.set_schnorr_sig_target(&sig_target, &sig)?;
+        pw.set_quintic_ext_target(pk_target, pk)?;
+
+        let proof = data.prove(pw)?;
+        data.verify(proof)?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_schnorr_signature_proof() -> Result<()> {
+        let message_bytes = b"gate-count test payload";
+        let msg = message_bytes
+            .iter()
+            .map(|b| F::from_canonical_u8(*b))
+            .collect::<Vec<_>>();
+        let sk = schnorr_generate_random_sk();
+
+        build_and_prove_schnorr_circuit(&sk, &msg)?;
+
+        Ok(())
+    }
 }

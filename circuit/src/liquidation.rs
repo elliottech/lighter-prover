@@ -208,6 +208,27 @@ pub fn get_position_zero_quote(
     }
 }
 
+// Returns the balance of the asset in context of product type.
+pub fn get_asset_balance(
+    builder: &mut Builder,
+    product_type: Target,
+    is_account_unified: BoolTarget,
+    collateral: &BigIntTarget,
+    account_asset: &AccountAssetTarget,
+    is_asset_used_as_margin: BoolTarget,
+) -> BigIntTarget {
+    let asset_balance = builder.biguint_to_bigint(&account_asset.balance);
+
+    let is_spot = BoolTarget::new_unsafe(product_type);
+    let is_perps = builder.not(is_spot);
+
+    let is_unified_and_margin = builder.and(is_account_unified, is_asset_used_as_margin);
+    let is_simple_and_perps = builder.and_not(is_perps, is_account_unified);
+    let is_collateral = builder.or(is_unified_and_margin, is_simple_and_perps);
+
+    builder.select_bigint(is_collateral, collateral, &asset_balance)
+}
+
 // Returns the balance of the asset in context of product type, which is constant at circuit generation time.
 pub fn get_asset_balance_const(
     builder: &mut Builder,

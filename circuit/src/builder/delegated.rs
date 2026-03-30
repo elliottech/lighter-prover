@@ -602,39 +602,12 @@ where
     F: RichField + Extendable<D>,
 {
     pub fn random_access(&mut self, access_index: Target, v: Vec<Target>) -> Target {
-        self.builder.random_access(access_index, v)
-    }
-
-    pub fn random_access_extension(
-        &mut self,
-        access_index: Target,
-        v: Vec<ExtensionTarget<D>>,
-    ) -> ExtensionTarget<D> {
-        self.builder.random_access_extension(access_index, v)
-    }
-
-    pub fn random_access_hash(
-        &mut self,
-        access_index: Target,
-        v: Vec<HashOutTarget>,
-    ) -> HashOutTarget {
-        self.builder.random_access_hash(access_index, v)
-    }
-
-    pub fn random_access_merkle_cap(
-        &mut self,
-        access_index: Target,
-        v: Vec<MerkleCapTarget>,
-    ) -> MerkleCapTarget {
-        self.builder.random_access_merkle_cap(access_index, v)
-    }
-
-    pub fn random_access_verifier_data(
-        &mut self,
-        access_index: Target,
-        v: Vec<VerifierCircuitTarget>,
-    ) -> VerifierCircuitTarget {
-        self.builder.random_access_verifier_data(access_index, v)
+        if let Some(&cached) = self.random_access_cache.get(&(access_index, v.clone())) {
+            return cached;
+        }
+        let result = self.builder.random_access(access_index, v.clone());
+        self.random_access_cache.insert((access_index, v), result);
+        result
     }
 }
 

@@ -14,11 +14,14 @@ use serde::Deserialize;
 use super::base_register_info::BaseRegisterInfo;
 use super::{BaseRegisterInfoTarget, BaseRegisterInfoTargetWitness, select_register_target};
 use crate::bool_utils::CircuitBuilderBoolUtils;
+use crate::circuit_logger::CircuitBuilderLogging;
 use crate::comparison::CircuitBuilderSubtractiveComparison;
 use crate::hash_utils::CircuitBuilderHashUtils;
 use crate::poseidon2::Poseidon2Hash;
 use crate::types::config::Builder;
-use crate::types::constants::{NEW_INSTRUCTIONS_MAX_SIZE, REGISTER_STACK_SIZE};
+use crate::types::constants::{
+    NEW_INSTRUCTIONS_MAX_SIZE, PENDING_BASE_REGISTER_SIZE, REGISTER_STACK_SIZE,
+};
 use crate::types::register::BASE_REGISTER_INFO_SIZE;
 use crate::utils::CircuitBuilderUtils;
 
@@ -105,6 +108,13 @@ impl RegisterStackTarget {
         }
     }
 
+    pub fn print(&self, builder: &mut Builder) {
+        builder.println(self.count, "reg_stack_count");
+        for (i, reg) in self.iter().enumerate() {
+            reg.print(builder, format!("reg_stack[{}]", i).as_str());
+        }
+    }
+
     pub fn empty(builder: &mut Builder) -> Self {
         Self {
             stack: [BaseRegisterInfoTarget::empty(builder); REGISTER_STACK_SIZE],
@@ -154,65 +164,62 @@ impl RegisterStackTarget {
         self.count = builder.sub(self.count, is_enabled.target);
     }
 
-    pub fn push_instructions(
+    pub fn push_instructions<const MAX_NEW_INSTR: usize>(
         &mut self,
         builder: &mut Builder,
         new_instructions: &[BaseRegisterInfoTarget; NEW_INSTRUCTIONS_MAX_SIZE],
         new_instructions_count: Target,
     ) {
-        let is_enabled = builder.is_not_zero(new_instructions_count);
-
-        let max_count = builder.constant_usize(REGISTER_STACK_SIZE);
-        let new_count = builder.add(self.count, new_instructions_count);
-        builder.register_range_check(new_count, 16);
-        builder.conditional_assert_lte(is_enabled, new_count, max_count, 16);
-
-        // Define the new stack first, and then select
-        let mut new_stack = [BaseRegisterInfoTarget::empty(builder); REGISTER_STACK_SIZE];
-
-        // Last "new_instructions_count" elements of "new_instructions" should be put in the beginning of "new_stack"
-        let instructions_max_size = builder.constant_usize(NEW_INSTRUCTIONS_MAX_SIZE);
-        let empty_count = builder.sub(instructions_max_size, new_instructions_count);
-        let mut reached_to_non_empty = builder._false();
+        // Stack new elements to the left without holes
+        let mut new_stack = [BaseRegisterInfoTarget::empty(builder); PENDING_BASE_REGISTER_SIZE];
         let mut placed_count = builder.zero();
-        for (i, new_instruction) in new_instructions.iter().enumerate() {
-            let i_target = builder.constant_usize(i);
-            let i_eq_empty_cnt = builder.is_equal(empty_count, i_target);
-            reached_to_non_empty = builder.or(reached_to_non_empty, i_eq_empty_cnt);
-            for j in 0..REGISTER_STACK_SIZE {
-                let j_target = builder.constant_usize(j);
-                let j_eq_placed_count = builder.is_equal(placed_count, j_target);
-                let flag = builder.and(j_eq_placed_count, reached_to_non_empty);
-                new_stack[j] =
-                    select_register_target(builder, flag, new_instruction, &new_stack[j]);
+        for new_instruction in new_instructions.iter().take(MAX_NEW_INSTR) {
+            for j in 0..MAX_NEW_INSTR {
+                let j_eq_placed_count = builder.is_equal_constant(placed_count, j as u64);
+                new_stack[j] = select_register_target(
+                    builder,
+                    j_eq_placed_count,
+                    new_instruction,
+                    &new_stack[j],
+                );
             }
-            placed_count = builder.add(placed_count, reached_to_non_empty.target);
+            let is_empty = new_instruction.is_empty(builder);
+            let placed = builder.not(is_empty);
+            placed_count = builder.add(placed_count, placed.target);
         }
 
-        // Put remaining stack elements. Only push the base register info if it's not empty
+        let is_enabled = builder.is_not_zero(new_instructions_count);
+        builder.conditional_assert_eq(is_enabled, new_instructions_count, placed_count);
+
+        // Update count
+        self.count = builder.add(self.count, new_instructions_count);
+        let max_count = builder.constant_usize(REGISTER_STACK_SIZE);
+        builder.conditional_assert_lte(is_enabled, self.count, max_count, 8);
+
+        // Shift existing stack to right by new_instructions_count. If base register is empty, ignore one shift.
+        // Ignore the last element of register stack as it has to be empty by business logic for new pushes anyway.
         let base_reg_info_is_empty = self[0].is_empty(builder);
-        let mut placement_index = new_instructions_count;
-        for i in 0..REGISTER_STACK_SIZE - 1 {
-            let next_instruction =
-                select_register_target(builder, base_reg_info_is_empty, &self[i + 1], &self[i]);
-            let mut placed = builder._false();
-            for j in 0..REGISTER_STACK_SIZE {
-                let j_target = builder.constant_usize(j);
-                let j_eq_placement_index = builder.is_equal(placement_index, j_target);
-                let flag = builder.and_not(j_eq_placement_index, placed);
-                new_stack[j] =
-                    select_register_target(builder, flag, &next_instruction, &new_stack[j]);
-                placement_index = builder.add(placement_index, flag.target);
-                placed = builder.or(placed, flag);
+        let shift_amount = builder.sub(new_instructions_count, base_reg_info_is_empty.target);
+        for i in (0..REGISTER_STACK_SIZE - 1).rev() {
+            // Run another for to capture "shift_amount" as an out-circuit variable "j", and shift.
+            // Ignore 0 as is_enabled would be false in that case.
+            for j in 1..MAX_NEW_INSTR {
+                if i + j >= REGISTER_STACK_SIZE {
+                    break;
+                }
+                let is_index = builder.is_equal_constant(shift_amount, j as u64);
+                let flag = builder.and(is_enabled, is_index);
+                self[i + j] = select_register_target(builder, flag, &self[i], &self[i + j]);
             }
         }
 
-        // Define new stack and mutate self if is_enabled is true
-        let new_register_stack = Self {
-            stack: new_stack,
-            count: builder.add(self.count, new_instructions_count),
-        };
-        *self = Self::select(builder, is_enabled, &new_register_stack, self);
+        // Put new elements in the beginning
+        let mut reached = builder.not(is_enabled);
+        for i in 0..MAX_NEW_INSTR {
+            let is_limit_reached = builder.is_equal_constant(new_instructions_count, i as u64);
+            reached = builder.or(reached, is_limit_reached);
+            self[i] = select_register_target(builder, reached, &self[i], &new_stack[i]);
+        }
     }
 
     pub fn hash(&self, builder: &mut Builder) -> HashOutTarget {
@@ -295,20 +302,19 @@ impl RegisterStackTarget {
 
 #[cfg(test)]
 mod tests {
-    use itertools::Itertools;
     use plonky2::iop::witness::PartialWitness;
     use plonky2::plonk::circuit_data::CircuitConfig;
 
     use super::*;
     use crate::bool_utils::CircuitBuilderBoolUtils;
     use crate::types::config::{Builder, C, F};
+    use crate::types::constants::{INSERT_MAX_FIVE_REGISTERS, INSERT_MAX_THREE_REGISTERS};
 
     #[test]
     fn register_stack_push_pop_push() {
-        // env_logger::try_init_from_env(
+        // let _ = env_logger::try_init_from_env(
         //     env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "debug"),
-        // )
-        // .unwrap();
+        // );
 
         let mut builder = Builder::new(CircuitConfig::standard_recursion_config());
 
@@ -321,7 +327,7 @@ mod tests {
                 get_random_new_instructions(&mut builder, i);
 
             let mut current_register_stack = RegisterStackTarget::empty(&mut builder);
-            current_register_stack.push_instructions(
+            current_register_stack.push_instructions::<NEW_INSTRUCTIONS_MAX_SIZE>(
                 &mut builder,
                 &new_instructions,
                 new_instructions_count,
@@ -343,13 +349,12 @@ mod tests {
             // Alternate between an empty base register info and a non-empty one
             if set_base_register_to_empty {
                 current_register_stack[0] = BaseRegisterInfoTarget::empty(&mut builder);
-                // total_count = builder.sub(total_count, one);
             }
 
             // Push another half
             let (new_instructions_2, new_instructions_count_2) =
                 get_random_new_instructions(&mut builder, i / 2);
-            current_register_stack.push_instructions(
+            current_register_stack.push_instructions::<NEW_INSTRUCTIONS_MAX_SIZE>(
                 &mut builder,
                 &new_instructions_2,
                 new_instructions_count_2,
@@ -403,6 +408,88 @@ mod tests {
     }
 
     #[test]
+    fn register_stack_insertions() {
+        // let _ = env_logger::try_init_from_env(
+        //     env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "debug"),
+        // );
+
+        let mut builder = Builder::new(CircuitConfig::standard_recursion_config());
+
+        let _true = builder._true();
+        let _false = builder._false();
+
+        // Insert two with three capacity, with a hole in the middle
+        {
+            let mut current_register_stack = RegisterStackTarget::empty(&mut builder);
+            let mut new_instructions =
+                [BaseRegisterInfoTarget::empty(&mut builder); NEW_INSTRUCTIONS_MAX_SIZE];
+            new_instructions[2] = BaseRegisterInfoTarget::random(&mut builder);
+            new_instructions[2].account_index = builder.constant_u64(111111111111111);
+            new_instructions[0] = BaseRegisterInfoTarget::random(&mut builder);
+            new_instructions[0].account_index = builder.constant_u64(222222222222222);
+            let new_instructions_count = builder.constant_usize(2);
+            current_register_stack.push_instructions::<INSERT_MAX_THREE_REGISTERS>(
+                &mut builder,
+                &new_instructions,
+                new_instructions_count,
+            );
+
+            builder.conditional_assert_eq(
+                _true,
+                current_register_stack[0].account_index,
+                new_instructions[0].account_index,
+            );
+            builder.conditional_assert_eq(
+                _true,
+                current_register_stack[1].account_index,
+                new_instructions[2].account_index,
+            );
+
+            for i in 2..REGISTER_STACK_SIZE {
+                let is_empty = current_register_stack[i].is_empty(&mut builder);
+                builder.assert_true(is_empty);
+            }
+        }
+
+        // Insert two with five capacity, with three holes
+        {
+            let mut current_register_stack = RegisterStackTarget::empty(&mut builder);
+            let mut new_instructions =
+                [BaseRegisterInfoTarget::empty(&mut builder); NEW_INSTRUCTIONS_MAX_SIZE];
+            new_instructions[4] = BaseRegisterInfoTarget::random(&mut builder);
+            new_instructions[4].account_index = builder.constant_u64(111111111111111);
+            new_instructions[1] = BaseRegisterInfoTarget::random(&mut builder);
+            new_instructions[1].account_index = builder.constant_u64(222222222222222);
+            let new_instructions_count = builder.constant_usize(2);
+            current_register_stack.push_instructions::<INSERT_MAX_FIVE_REGISTERS>(
+                &mut builder,
+                &new_instructions,
+                new_instructions_count,
+            );
+
+            builder.conditional_assert_eq(
+                _true,
+                current_register_stack[0].account_index,
+                new_instructions[1].account_index,
+            );
+            builder.conditional_assert_eq(
+                _true,
+                current_register_stack[1].account_index,
+                new_instructions[4].account_index,
+            );
+
+            for i in 2..REGISTER_STACK_SIZE {
+                let is_empty = current_register_stack[i].is_empty(&mut builder);
+                builder.assert_true(is_empty);
+            }
+        }
+
+        let data = builder.build::<C>();
+        data.verify(data.prove(PartialWitness::<F>::new()).unwrap())
+            .unwrap();
+    }
+
+    #[test]
     fn register_stack_push_and_pop() {
         let mut builder = Builder::new(CircuitConfig::standard_recursion_config());
 
@@ -415,7 +502,7 @@ mod tests {
                 get_random_new_instructions(&mut builder, i);
 
             let mut current_register_stack = RegisterStackTarget::empty(&mut builder);
-            current_register_stack.push_instructions(
+            current_register_stack.push_instructions::<NEW_INSTRUCTIONS_MAX_SIZE>(
                 &mut builder,
                 &new_instructions,
                 new_instructions_count,
@@ -502,5 +589,91 @@ mod tests {
                 BaseRegisterInfoTarget::random(builder);
         }
         (new_instructions, builder.constant_usize(count))
+    }
+
+    #[test]
+    fn register_stack_with_holes() {
+        fn get_combinations(n: usize, k: usize) -> Vec<Vec<usize>> {
+            if k == 0 {
+                return vec![vec![]];
+            }
+            if k > n {
+                return vec![];
+            }
+            let mut result = Vec::new();
+            let mut indices: Vec<usize> = (0..k).collect();
+            loop {
+                result.push(indices.clone());
+                let mut i = k as isize - 1;
+                while i >= 0 && indices[i as usize] == n - k + i as usize {
+                    i -= 1;
+                }
+                if i < 0 {
+                    break;
+                }
+                indices[i as usize] += 1;
+                for j in (i as usize + 1)..k {
+                    indices[j] = indices[j - 1] + 1;
+                }
+            }
+            result
+        }
+
+        fn test_push_with_holes_for_combos<const INSTR_COUNT: usize>(
+            non_empty_positions_combinations: &[Vec<usize>],
+            non_empty_count: usize,
+        ) {
+            let mut builder = Builder::new(CircuitConfig::standard_recursion_config());
+            let _true = builder._true();
+
+            for non_empty_positions in non_empty_positions_combinations {
+                assert_eq!(non_empty_positions.len(), non_empty_count);
+                let mut new_instructions =
+                    [BaseRegisterInfoTarget::empty(&mut builder); NEW_INSTRUCTIONS_MAX_SIZE];
+                for &non_empty_index in non_empty_positions.iter() {
+                    new_instructions[non_empty_index] =
+                        BaseRegisterInfoTarget::random(&mut builder);
+                }
+                let new_instructions_count = builder.constant_usize(non_empty_count);
+
+                let mut stack = RegisterStackTarget::empty(&mut builder);
+                stack.push_instructions::<INSTR_COUNT>(
+                    &mut builder,
+                    &new_instructions,
+                    new_instructions_count,
+                );
+                builder.conditional_assert_eq(_true, stack.count, new_instructions_count);
+
+                // Elements of new_instructions arae left-to-right stacked in correct order
+                for (i, &pos) in non_empty_positions.iter().enumerate() {
+                    let is_equal = BaseRegisterInfoTarget::is_equal(
+                        &mut builder,
+                        &stack[i],
+                        &new_instructions[pos],
+                    );
+                    builder.assert_true(is_equal);
+                }
+                // Remaining slots empty
+                for i in non_empty_count..REGISTER_STACK_SIZE {
+                    let is_empty = stack[i].is_empty(&mut builder);
+                    builder.assert_true(is_empty);
+                }
+            }
+
+            let data = builder.build::<C>();
+            data.verify(data.prove(PartialWitness::<F>::new()).unwrap())
+                .unwrap();
+        }
+
+        for ct in 0..=NEW_INSTRUCTIONS_MAX_SIZE {
+            test_push_with_holes_for_combos::<1>(&get_combinations(1, ct), ct);
+            test_push_with_holes_for_combos::<2>(&get_combinations(2, ct), ct);
+            test_push_with_holes_for_combos::<3>(&get_combinations(3, ct), ct);
+            test_push_with_holes_for_combos::<4>(&get_combinations(4, ct), ct);
+            test_push_with_holes_for_combos::<5>(&get_combinations(5, ct), ct);
+            test_push_with_holes_for_combos::<6>(&get_combinations(6, ct), ct);
+            test_push_with_holes_for_combos::<7>(&get_combinations(7, ct), ct);
+            test_push_with_holes_for_combos::<8>(&get_combinations(8, ct), ct);
+        }
     }
 }

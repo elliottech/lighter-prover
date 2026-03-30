@@ -19,13 +19,14 @@ use plonky2::util::timing::TimingTree;
 use crate::block_tx::BlockTx;
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::tx_constraints::{TxTarget, TxTargetWitness};
+use crate::types::approve_integrator::ApproveIntegratorMessageTarget;
 use crate::types::asset::{AssetTarget, AssetTargetWitness, connect_assets};
 use crate::types::change_pub_key::ChangePubKeyMessageTarget;
 use crate::types::config::{Builder, C, D, F};
 use crate::types::constants::{
     ASSET_LIST_SIZE, MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX,
     ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE, OWNER_ACCOUNT_ID, POSITION_LIST_SIZE, TIMESTAMP_BITS,
-    TX_TYPE_L2_CHANGE_PUB_KEY, TX_TYPE_L2_TRANSFER,
+    TX_TYPE_L2_APPROVE_INTEGRATOR, TX_TYPE_L2_CHANGE_PUB_KEY, TX_TYPE_L2_TRANSFER,
 };
 use crate::types::market_details::{
     MarketDetailsTarget, MarketDetailsWitness, connect_market_details,
@@ -103,6 +104,7 @@ pub struct BlockTxTarget {
     /*******************************/
     pub change_pub_key_message: ChangePubKeyMessageTarget,
     pub transfer_message: TransferMessageTarget,
+    pub approve_integrator_message: ApproveIntegratorMessageTarget,
 
     // /*************************/
     // /*       PUB DATA        */
@@ -221,8 +223,10 @@ impl Circuit<C, F, D> for BlockTxCircuit {
 
 impl BlockTxCircuit {
     /// Initializes a new block virtual targets for the given number of transactions.
-    pub fn new(config: CircuitConfig, tx_limit: usize) -> Self {
+    fn new(config: CircuitConfig, tx_limit: usize) -> Self {
         let mut builder = Builder::new(config);
+
+        builder.use_2bit_range_check = true;
 
         Self {
             target: BlockTxTarget {
@@ -266,6 +270,7 @@ impl BlockTxCircuit {
 
                 change_pub_key_message: ChangePubKeyMessageTarget::new(&mut builder),
                 transfer_message: TransferMessageTarget::new(&mut builder),
+                approve_integrator_message: ApproveIntegratorMessageTarget::new(&mut builder),
 
                 priority_operations_count: builder.add_virtual_target(),
                 priority_operations_pub_data: builder
@@ -346,6 +351,10 @@ impl BlockTxCircuit {
         // Transfer message
         self.target
             .transfer_message
+            .register_public_input(&mut self.builder);
+        // Approve integrator message
+        self.target
+            .approve_integrator_message
             .register_public_input(&mut self.builder);
 
         // On chain ops pub data
@@ -515,6 +524,7 @@ impl BlockTxCircuit {
     ) {
         self.handle_change_pub_key();
         self.handle_transfer(chain_id);
+        self.handle_approve_integrator(chain_id);
 
         self.handle_on_chain_pub_data(on_chain_operations_count, on_chain_operations_pub_data);
         self.handle_priority_operation_pub_data(
@@ -648,6 +658,73 @@ impl BlockTxCircuit {
             &mut self.builder,
             &transfer_message,
             &self.target.transfer_message,
+        );
+    }
+
+    fn handle_approve_integrator(&mut self, chain_id: u32) {
+        let l2_approve_integrator = self.builder.constant_from_u8(TX_TYPE_L2_APPROVE_INTEGRATOR);
+        let mut count = self.builder.zero();
+
+        let mut approve_integrator_message =
+            ApproveIntegratorMessageTarget::empty(&mut self.builder);
+
+        let chain_id = self.builder.constant(F::from_canonical_u32(chain_id));
+        for tx in self.target.txs.iter() {
+            let is_approve_integrator = self.builder.is_equal(tx.tx_type, l2_approve_integrator);
+            let is_same_master_account = self.builder.is_equal(
+                tx.accounts_before[0].master_account_index,
+                tx.accounts_before[1].master_account_index,
+            );
+            let is_approve_integrator_different_master_account = self
+                .builder
+                .and_not(is_approve_integrator, is_same_master_account);
+
+            count = self
+                .builder
+                .add(is_approve_integrator_different_master_account.target, count);
+
+            approve_integrator_message = ApproveIntegratorMessageTarget::select(
+                &mut self.builder,
+                is_approve_integrator_different_master_account,
+                &ApproveIntegratorMessageTarget {
+                    account_index: tx.l2_approve_integrator_tx_target.inner.account_index,
+                    api_key_index: tx.l2_approve_integrator_tx_target.inner.api_key_index,
+
+                    integrator_account_index: tx
+                        .l2_approve_integrator_tx_target
+                        .inner
+                        .integrator_account_index,
+                    max_perps_taker_fee: tx
+                        .l2_approve_integrator_tx_target
+                        .inner
+                        .max_perps_taker_fee,
+                    max_perps_maker_fee: tx
+                        .l2_approve_integrator_tx_target
+                        .inner
+                        .max_perps_maker_fee,
+                    max_spot_taker_fee: tx.l2_approve_integrator_tx_target.inner.max_spot_taker_fee,
+                    max_spot_maker_fee: tx.l2_approve_integrator_tx_target.inner.max_spot_maker_fee,
+                    approval_expiry: tx.l2_approve_integrator_tx_target.inner.approval_expiry,
+
+                    nonce: tx.nonce,
+                    chain_id,
+
+                    l1_address: tx.accounts_before[OWNER_ACCOUNT_ID].l1_address.clone(),
+                    l1_pk: tx.l1_pub_key.clone(),
+                    l1_signature: tx.l1_signature.clone(),
+                },
+                &approve_integrator_message,
+            );
+        }
+
+        // Verify that there is at most one approve_integrator message in the block
+        let c_sq_minus_c = self.builder.mul_sub(count, count, count);
+        self.builder.assert_zero(c_sq_minus_c);
+
+        ApproveIntegratorMessageTarget::connect(
+            &mut self.builder,
+            &approve_integrator_message,
+            &self.target.approve_integrator_message,
         );
     }
 

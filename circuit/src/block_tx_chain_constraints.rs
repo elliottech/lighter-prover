@@ -27,6 +27,7 @@ use crate::builder::custom::cyclic_base_proof;
 use crate::byte::split_gate::ByteDecompositionGate;
 use crate::hash_utils::CircuitBuilderHashUtils;
 use crate::poseidon2::Poseidon2Gate;
+use crate::types::approve_integrator::ApproveIntegratorMessageTarget;
 use crate::types::asset::all_assets_hash;
 use crate::types::change_pub_key::ChangePubKeyMessageTarget;
 use crate::types::config::{Builder, C, CIRCUIT_CONFIG, D, F};
@@ -233,6 +234,9 @@ impl BlockTxChainCircuit {
         block
             .transfer_message
             .conditional_assert_empty(&mut self.builder, is_first_recursion);
+        block
+            .approve_integrator_message
+            .conditional_assert_empty(&mut self.builder, is_first_recursion);
 
         block
             .on_chain_operations_pub_data
@@ -378,6 +382,21 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
             &block.transfer_message,
         );
 
+        // Treasury can't call L2 approve_integrator, so if account index is zero, then approve_integrator_message is empty
+        let is_approve_integrator_message_exists = circuit
+            .builder
+            .is_not_zero(current_tx.approve_integrator_message.account_index);
+        circuit.builder.conditional_assert_zero(
+            is_approve_integrator_message_exists,
+            block.approve_integrator_message.account_index,
+        );
+        let approve_integrator_message = ApproveIntegratorMessageTarget::select(
+            &mut circuit.builder,
+            is_approve_integrator_message_exists,
+            &current_tx.approve_integrator_message,
+            &block.approve_integrator_message,
+        );
+
         let on_chain_operation_exists = circuit
             .builder
             .is_not_zero(current_tx.on_chain_operations_count);
@@ -433,6 +452,7 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
 
             change_pub_key_message,
             transfer_message,
+            approve_integrator_message,
 
             on_chain_operations_count: circuit.builder.add(
                 block.on_chain_operations_count,

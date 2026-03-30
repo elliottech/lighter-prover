@@ -173,22 +173,6 @@ impl PublicPoolInfoTarget {
         }
     }
 
-    pub fn is_empty(&self, builder: &mut Builder) -> BoolTarget {
-        let mut assertions = vec![
-            builder.is_zero(self.status),
-            builder.is_zero(self.operator_fee),
-            builder.is_zero(self.min_operator_share_rate),
-            builder.is_zero(self.total_shares),
-            builder.is_zero(self.operator_shares),
-        ];
-
-        for i in 0..NB_STRATEGIES {
-            assertions.push(builder.is_zero_bigint(&self.strategies[i]));
-        }
-
-        builder.multi_and(&assertions)
-    }
-
     pub fn get_strategy_balance(
         &self,
         builder: &mut Builder,

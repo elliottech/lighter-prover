@@ -18,6 +18,10 @@ use crate::matching_engine::{
     decrement_locked_balance_for_order, decrement_order_count_in_place,
     get_locked_amount_and_ask_asset_index, get_next_order_nonce, trigger_child_orders,
 };
+use crate::tx_attributes::{
+    ATTRIBUTE_TYPE_INTEGRATOR_FEE_COLLECTOR_INDEX, ATTRIBUTE_TYPE_INTEGRATOR_MAKER_FEE,
+    ATTRIBUTE_TYPE_INTEGRATOR_TAKER_FEE,
+};
 use crate::tx_interface::{Apply, TxHash, Verify};
 use crate::types::account_order::{AccountOrderTarget, select_account_order_target};
 use crate::types::account_order_type::AccountOrderTypes;
@@ -119,6 +123,10 @@ impl L2ModifyOrderTxTarget {
             pending_to_trigger_order_index0: account_order.to_trigger_order_index0,
             pending_to_trigger_order_index1: account_order.to_trigger_order_index1,
             pending_to_cancel_order_index0: account_order.to_cancel_order_index0,
+
+            generic_field_1: account_order.integrator_fee_collector_index,
+            u32_generic_field_0: account_order.integrator_taker_fee,
+            u32_generic_field_1: account_order.integrator_maker_fee,
         }
     }
 
@@ -150,6 +158,25 @@ impl L2ModifyOrderTxTarget {
             tx_state.account_order.initial_base_amount,
             tx_state.account_order.remaining_base_amount,
         );
+
+        // Integrator fee information
+        {
+            account_order.integrator_fee_collector_index = builder.select(
+                flag,
+                tx_state.get_attribute(ATTRIBUTE_TYPE_INTEGRATOR_FEE_COLLECTOR_INDEX),
+                account_order.integrator_fee_collector_index,
+            );
+            account_order.integrator_taker_fee = builder.select(
+                flag,
+                tx_state.get_attribute(ATTRIBUTE_TYPE_INTEGRATOR_TAKER_FEE),
+                account_order.integrator_taker_fee,
+            );
+            account_order.integrator_maker_fee = builder.select(
+                flag,
+                tx_state.get_attribute(ATTRIBUTE_TYPE_INTEGRATOR_MAKER_FEE),
+                account_order.integrator_maker_fee,
+            );
+        }
 
         // Base amount is zero
         {
@@ -575,7 +602,7 @@ impl Apply for L2ModifyOrderTxTarget {
 
         // Set new register
         let instruction = self.get_instruction_from_account_order(builder, &new_account_order);
-        tx_state.insert_to_instruction_stack(builder, is_in_progress_order, &instruction);
+        tx_state.put_to_instruction_stack_unsafe(builder, is_in_progress_order, &instruction, 0);
 
         // Set new account order
         tx_state.account_order = select_account_order_target(
@@ -595,6 +622,7 @@ impl Apply for L2ModifyOrderTxTarget {
             new_account_order.to_trigger_order_index0,
             new_account_order.to_trigger_order_index1,
             new_account_order.initial_base_amount,
+            1,
         );
 
         tx_state.update_impact_prices_flag =

@@ -8,6 +8,8 @@ pub mod account_order;
 pub mod account_order_type;
 pub mod account_position;
 pub mod api_key;
+pub mod approve_integrator;
+pub mod approved_integrator;
 pub mod asset;
 pub mod change_pub_key;
 pub mod config;

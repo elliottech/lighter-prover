@@ -12,7 +12,6 @@ use serde::Deserialize;
 
 use super::config::Builder;
 use crate::bigint::biguint::{BigUintTarget, CircuitBuilderBiguint, WitnessBigUint};
-use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::circuit_logger::CircuitBuilderLogging;
 use crate::deserializers;
 use crate::eddsa::gadgets::curve::PartialWitnessCurve;
@@ -84,12 +83,16 @@ impl AccountAssetTarget {
     }
 
     pub fn is_empty(&self, builder: &mut Builder) -> BoolTarget {
-        let assertions = [
-            builder.is_zero_biguint(&self.balance),
-            builder.is_zero_biguint(&self.locked_balance),
-            builder.is_zero(self.margin_mode),
-        ];
-        builder.multi_and(&assertions)
+        // Adding 6 u32 limbs and a bool does not overflow Goldilocks, as long as
+        // limbs are guaranteed by business logic to fit 32 bits.
+        let added = builder.add_many(
+            [&self.balance, &self.locked_balance]
+                .iter()
+                .flat_map(|x| x.limbs.iter().map(|limb| limb.0))
+                .chain([self.margin_mode])
+                .collect::<Vec<_>>(),
+        );
+        builder.is_zero(added)
     }
 
     pub fn print(&self, builder: &mut Builder, tag: &str) {

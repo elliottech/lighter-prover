@@ -330,6 +330,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilderNonNative<F, D>
         self.connect_biguint(&sum_expected, &sum_actual);
 
         // Range-check result.
+
         let cmp = self.is_lte_biguint(&sum.value, &modulus);
         let one = self.one();
         self.connect(cmp.target, one);

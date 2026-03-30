@@ -107,13 +107,20 @@ impl AssetTarget {
     }
 
     pub fn is_empty(&self, builder: &mut Builder) -> BoolTarget {
-        let assertions = [
-            builder.is_zero(self.margin_mode),
-            builder.is_zero_biguint(&self.extension_multiplier),
-            builder.is_zero_biguint(&self.min_transfer_amount),
-            builder.is_zero_biguint(&self.min_withdrawal_amount),
-        ];
-        builder.multi_and(&assertions)
+        // Adding 6 u32 limbs and a bool does not overflow Goldilocks, as long as
+        // limbs are guaranteed by business logic to fit 32 bits.
+        let added = builder.add_many(
+            [
+                &self.extension_multiplier,
+                &self.min_transfer_amount,
+                &self.min_withdrawal_amount,
+            ]
+            .iter()
+            .flat_map(|x| x.limbs.iter().map(|limb| limb.0))
+            .chain([self.margin_mode])
+            .collect::<Vec<_>>(),
+        );
+        builder.is_zero(added)
     }
 
     pub fn print(&self, builder: &mut Builder, tag: &str) {

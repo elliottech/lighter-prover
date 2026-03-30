@@ -14,7 +14,6 @@ use plonky2::iop::witness::Witness;
 use super::biguint_u16::{BigUintU16Target, CircuitBuilderBiguint16};
 use crate::bigint::big_u16::biguint_u16::WitnessBigUintU16;
 use crate::bigint::bigint::{BigIntTarget, CircuitBuilderBigInt, SignTarget};
-use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::builder::Builder;
 use crate::signed::signed_target::{CircuitBuilderSigned, SignedTarget};
 use crate::uint::u16::gadgets::arithmetic_u16::U16Target;
@@ -274,11 +273,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilderBigIntU16<F, D>
     }
 
     fn is_zero_bigint_u16(&mut self, a: &BigIntU16Target) -> BoolTarget {
-        let assertions = [
-            self.is_zero_biguint_u16(&a.abs),
-            self.is_zero(a.sign.target),
-        ];
-        self.multi_and(&assertions)
+        self.is_zero(a.sign.target)
     }
 
     fn signed_target_to_bigint_u16(

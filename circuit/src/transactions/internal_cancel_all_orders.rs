@@ -118,15 +118,9 @@ impl Apply for InternalCancelAllOrdersTxTarget {
     fn apply(&mut self, builder: &mut Builder, state: &mut TxState) -> BoolTarget {
         apply_immediate_cancel_all(builder, self.is_dms, state, self.account_index);
 
-        let isolated_margin_mode = builder.constant_usize(ISOLATED_MARGIN);
-        let is_position_isolated = builder.is_equal(
-            state.positions[OWNER_ACCOUNT_ID].margin_mode,
-            isolated_margin_mode,
-        );
-        let is_position_cross = builder.not(is_position_isolated);
-
+        let is_position_isolated = state.positions[OWNER_ACCOUNT_ID].is_isolated_unsafe();
         let is_liquidation_and_isolated = builder.and(self.is_liquidation, is_position_isolated);
-        let is_liquidation_and_cross = builder.and(self.is_liquidation, is_position_cross);
+        let is_liquidation_and_cross = builder.and_not(self.is_liquidation, is_position_isolated);
 
         apply_isolated_cancel_all(
             builder,

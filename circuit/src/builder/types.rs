@@ -36,6 +36,7 @@ pub struct Builder<F: RichField + Extendable<D>, const D: usize> {
 
     pub(crate) split_le_cache: HashMap<Target, Vec<BoolTarget>>,
     pub(crate) split_le_base_cache: HashMap<(usize, Target), Vec<Target>>,
+    pub(crate) split_le_2bit_reuse_cache: HashMap<(usize, Target), Vec<Target>>,
     pub(crate) split_bytes_cache: HashMap<Target, Vec<U8Target>>,
     pub(crate) is_equal_cache: HashMap<(Target, Target), BoolTarget>,
     pub(crate) is_lte_cache: HashMap<(Target, Target), (BoolTarget, usize)>,
@@ -44,12 +45,15 @@ pub struct Builder<F: RichField + Extendable<D>, const D: usize> {
     pub(crate) cmp_biguint_cache: HashMap<(BigUintTarget, BigUintTarget), SignTarget>,
     pub(crate) div_rem_biguint_cache:
         HashMap<(BigUintTarget, BigUintTarget), (BigUintTarget, BigUintTarget)>,
+    pub(crate) random_access_cache: HashMap<(Target, Vec<Target>), Target>,
 
     pub(crate) range_checks: BTreeMap<usize, BTreeSet<Target>>, // Bit size to a set of targets. Using BTreeMap and BTreeSet to get deterministic circuit build
     pub(crate) range_check_targets_to_bit_sizes: HashMap<Target, usize>, // Target to bit size
 
     pub(crate) sequence_state: HashMap<usize, SequenceStateTarget>,
     pub(crate) bitstream_state: HashMap<usize, BitstreamStateTarget>,
+
+    pub(crate) use_2bit_range_check: bool,
 }
 
 impl<F, const D: usize> Builder<F, D>
@@ -73,6 +77,7 @@ where
 
             split_le_cache: HashMap::new(),
             split_le_base_cache: HashMap::new(),
+            split_le_2bit_reuse_cache: HashMap::new(),
             split_bytes_cache: HashMap::new(),
             is_equal_cache: HashMap::new(),
             is_lte_cache: HashMap::new(),
@@ -80,12 +85,15 @@ where
             cmp_cache: HashMap::new(),
             cmp_biguint_cache: HashMap::new(),
             div_rem_biguint_cache: HashMap::new(),
+            random_access_cache: HashMap::new(),
 
             range_checks: BTreeMap::new(),
             range_check_targets_to_bit_sizes: HashMap::new(),
 
             sequence_state: HashMap::new(),
             bitstream_state: HashMap::new(),
+
+            use_2bit_range_check: false,
         }
     }
 

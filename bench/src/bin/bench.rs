@@ -30,7 +30,7 @@ use plonky2::plonk::proof::CompressedProofWithPublicInputs;
 use plonky2::recursion::dummy_circuit::{self, dummy_circuit};
 use rayon::vec;
 
-const TX_PER_PROOF: usize = 4;
+const TX_PER_PROOF: usize = 5;
 const CHAIN_ID: u32 = 304;
 
 fn main() {

@@ -7,6 +7,9 @@ use plonky2::hash::hash_types::{HashOut, HashOutTarget, RichField};
 use plonky2::iop::target::Target;
 
 use crate::tx::Tx;
+use crate::types::approve_integrator::{
+    APPROVE_INTEGRATOR_PUBLIC_INPUTS_LEN, ApproveIntegratorMessage, ApproveIntegratorMessageTarget,
+};
 use crate::types::asset::{ASSET_SIZE, Asset, AssetTarget};
 use crate::types::change_pub_key::{
     CHANGE_PK_PUBLIC_INPUTS_LEN, ChangePubKeyMessage, ChangePubKeyMessageTarget,
@@ -68,6 +71,7 @@ where
 
     pub change_pub_key_message: ChangePubKeyMessage<F>,
     pub transfer_message: TransferMessage,
+    pub approve_integrator_message: ApproveIntegratorMessage,
 
     pub on_chain_operations_count: u64,
     pub on_chain_operations_pub_data: [u8; ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE],
@@ -107,8 +111,12 @@ where
         let transfer_message_start = change_pub_key_message_end;
         let transfer_message_end = transfer_message_start + TRANSFER_PUBLIC_INPUTS_LEN;
 
+        let approve_integrator_message_start = transfer_message_end;
+        let approve_integrator_message_end =
+            approve_integrator_message_start + APPROVE_INTEGRATOR_PUBLIC_INPUTS_LEN;
+
         // on_chain_pub_data_count
-        let on_chain_pub_data_start = transfer_message_end + 1;
+        let on_chain_pub_data_start = approve_integrator_message_end + 1;
         let on_chain_pub_data_end =
             on_chain_pub_data_start + ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE;
 
@@ -217,8 +225,12 @@ where
             transfer_message: TransferMessage::from_public_inputs(
                 &public_inputs[transfer_message_start..transfer_message_end],
             ),
+            approve_integrator_message: ApproveIntegratorMessage::from_public_inputs(
+                &public_inputs[approve_integrator_message_start..approve_integrator_message_end],
+            ),
 
-            on_chain_operations_count: public_inputs[transfer_message_end].to_canonical_u64(),
+            on_chain_operations_count: public_inputs[approve_integrator_message_end]
+                .to_canonical_u64(),
             on_chain_operations_pub_data: core::array::from_fn(|index| {
                 public_inputs[on_chain_pub_data_start + index].to_canonical_u64() as u8
             }),
@@ -263,6 +275,7 @@ pub struct BlockTxWitnessTarget {
 
     pub change_pub_key_message: ChangePubKeyMessageTarget,
     pub transfer_message: TransferMessageTarget,
+    pub approve_integrator_message: ApproveIntegratorMessageTarget,
 
     pub on_chain_operations_count: Target,
     pub on_chain_operations_pub_data: [U8Target; ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE],
@@ -300,7 +313,11 @@ impl BlockTxWitnessTarget {
         let transfer_message_start = change_pub_key_message_end;
         let transfer_message_end = transfer_message_start + TRANSFER_PUBLIC_INPUTS_LEN;
 
-        let on_chain_pub_data_start = transfer_message_end + 1;
+        let approve_integrator_message_start = transfer_message_end;
+        let approve_integrator_message_end =
+            approve_integrator_message_start + APPROVE_INTEGRATOR_PUBLIC_INPUTS_LEN;
+
+        let on_chain_pub_data_start = approve_integrator_message_end + 1;
         let on_chain_pub_data_end =
             on_chain_pub_data_start + ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE;
 
@@ -382,8 +399,11 @@ impl BlockTxWitnessTarget {
             transfer_message: TransferMessageTarget::from_public_inputs(
                 &pis[transfer_message_start..transfer_message_end],
             ),
+            approve_integrator_message: ApproveIntegratorMessageTarget::from_public_inputs(
+                &pis[approve_integrator_message_start..approve_integrator_message_end],
+            ),
 
-            on_chain_operations_count: pis[transfer_message_end],
+            on_chain_operations_count: pis[approve_integrator_message_end],
             on_chain_operations_pub_data: pis[on_chain_pub_data_start..on_chain_pub_data_end]
                 .iter()
                 .map(|&x| U8Target(x))

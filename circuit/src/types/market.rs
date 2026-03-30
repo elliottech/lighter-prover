@@ -254,24 +254,26 @@ impl MarketTarget {
     }
 
     pub fn is_empty(&self, builder: &mut Builder) -> BoolTarget {
-        let assertions = [
-            builder.is_zero(self.ask_nonce),
-            builder.is_zero(self.bid_nonce),
-            builder.is_zero(self.taker_fee),
-            builder.is_zero(self.maker_fee),
-            builder.is_zero(self.liquidation_fee),
-            builder.is_zero(self.min_base_amount),
-            builder.is_zero(self.min_quote_amount),
-            builder.is_zero(self.status),
-            builder.is_zero(self.order_quote_limit),
-            builder.is_zero(self.total_order_count),
-            builder.is_zero(self.market_type),
-            builder.is_zero(self.base_asset_id),
-            builder.is_zero(self.quote_asset_id),
-            builder.is_zero(self.size_extension_multiplier),
-            builder.is_zero(self.quote_extension_multiplier),
-        ];
-        builder.multi_and(&assertions)
+        // Adding following fields does not overflow Goldilocks, as long as
+        // these fields are guaranteed by business logic to fit these sizes.
+        let added = builder.add_many([
+            self.ask_nonce,                  // 48 bits
+            self.bid_nonce,                  // 48 bits
+            self.taker_fee,                  // 32 bits
+            self.maker_fee,                  // 32 bits
+            self.liquidation_fee,            // 32 bits
+            self.min_base_amount,            // 48 bits
+            self.min_quote_amount,           // 48 bits
+            self.status,                     // 8 bits
+            self.order_quote_limit,          // 48 bits
+            self.total_order_count,          // 48 bits
+            self.market_type,                // 8 bits
+            self.base_asset_id,              // 16 bits
+            self.quote_asset_id,             // 16 bits
+            self.size_extension_multiplier,  // 56 bits
+            self.quote_extension_multiplier, // 56 bits
+        ]);
+        builder.is_zero(added)
     }
 
     pub fn hash(&self, builder: &mut Builder) -> HashOutTarget {

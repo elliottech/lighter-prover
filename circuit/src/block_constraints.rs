@@ -277,18 +277,47 @@ impl Circuit<C, F, D> for BlockCircuit {
             ),
         );
 
-        // A block can have only one l1 signature
-        let at_least_one_message = BoolTarget::new_unsafe(
-            circuit
-                .builder
-                .add_many([is_change_pub_key_exists.target, is_transfer_exists.target]),
+        let is_approve_integrator_exists = circuit
+            .builder
+            .is_not_zero(tx_chain_witness.approve_integrator_message.account_index);
+        let approve_integrator_message = tx_chain_witness
+            .approve_integrator_message
+            .get_approve_integrator_l1_signature_msg_hash(&mut circuit.builder);
+        (l1_message, l1_address, l1_signature, l1_pk) = (
+            circuit.builder.select_nonnative(
+                is_approve_integrator_exists,
+                &approve_integrator_message,
+                &l1_message,
+            ),
+            circuit.builder.select_biguint(
+                is_approve_integrator_exists,
+                &tx_chain_witness.approve_integrator_message.l1_address,
+                &l1_address,
+            ),
+            circuit.builder.select_ecdsa_signature(
+                is_approve_integrator_exists,
+                &tx_chain_witness.approve_integrator_message.l1_signature,
+                &l1_signature,
+            ),
+            circuit.builder.select_ecdsa_public_key(
+                is_approve_integrator_exists,
+                &tx_chain_witness.approve_integrator_message.l1_pk,
+                &l1_pk,
+            ),
         );
-        circuit.builder.assert_bool(at_least_one_message);
+
+        // A block can have only one l1 signature
+        let at_most_one_message = BoolTarget::new_unsafe(circuit.builder.add_many([
+            is_change_pub_key_exists.target,
+            is_transfer_exists.target,
+            is_approve_integrator_exists.target,
+        ]));
+        circuit.builder.assert_bool(at_most_one_message);
 
         // Verify l1 signature
         conditional_verify_ecdsa_sig(
             &mut circuit.builder,
-            at_least_one_message,
+            at_most_one_message,
             &l1_message,
             &l1_signature,
             &l1_pk,
@@ -296,7 +325,7 @@ impl Circuit<C, F, D> for BlockCircuit {
         // Connect l1 address
         let l1_address_from_pk = circuit.builder.get_l1_address_from_ecdsa_public_key(&l1_pk);
         circuit.builder.conditional_assert_eq_biguint(
-            at_least_one_message,
+            at_most_one_message,
             &l1_address_from_pk,
             &l1_address,
         );

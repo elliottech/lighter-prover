@@ -130,6 +130,12 @@ where
     }
 
     #[must_use]
+    pub fn is_equal_f(&mut self, x: Target, y: F) -> BoolTarget {
+        let y_target = self.constant(y);
+        self.is_equal(x, y_target)
+    }
+
+    #[must_use]
     pub fn is_not_equal(&mut self, a: Target, b: Target) -> BoolTarget {
         let is_eq = self.is_equal(a, b);
 

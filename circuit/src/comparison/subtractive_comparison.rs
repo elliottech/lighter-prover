@@ -171,8 +171,8 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilderSubtractiveComp
         b: Target,
         num_bits: usize,
     ) {
-        let a_gt_b = self.is_gt(a, b, num_bits);
-        let should_be_false = self.and(is_enabled, a_gt_b);
+        let a_lte_b = self.is_lte(a, b, num_bits);
+        let should_be_false = self.and_not(is_enabled, a_lte_b);
         self.assert_false(should_be_false);
     }
 

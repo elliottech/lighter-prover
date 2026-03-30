@@ -199,9 +199,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilderBigInt<F, D> fo
     }
 
     fn is_zero_bigint(&mut self, a: &BigIntTarget) -> BoolTarget {
-        let is_zero_abs = self.is_zero_biguint(&a.abs);
-        let is_sign_zero = self.is_zero(a.sign.target);
-        self.and(is_zero_abs, is_sign_zero)
+        self.is_zero(a.sign.target)
     }
 
     fn add_virtual_bigint_target_safe(&mut self, num_limbs: usize) -> BigIntTarget {

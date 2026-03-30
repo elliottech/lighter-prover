@@ -276,6 +276,7 @@ impl<F: RichField + Extendable<D>, const D: usize> PackedEvaluableBase<F, D> for
             );
 
             yield_constr.one(computed_x_interleaved - x_interleaved);
+
             // Check 3: Range check the targets in the decomposition
             let constraints_iter = bits.iter().map(|&bit| {
                 (0..Self::B)

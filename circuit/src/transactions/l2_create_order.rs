@@ -20,6 +20,10 @@ use crate::matching_engine::{
     is_not_valid_reduce_only_direction,
 };
 use crate::merkle_helpers::{account_client_order_index_to_merkle_path, try_verify_merkle_proof};
+use crate::tx_attributes::{
+    ATTRIBUTE_TYPE_INTEGRATOR_FEE_COLLECTOR_INDEX, ATTRIBUTE_TYPE_INTEGRATOR_MAKER_FEE,
+    ATTRIBUTE_TYPE_INTEGRATOR_TAKER_FEE,
+};
 use crate::tx_interface::{Apply, TxHash, Verify};
 use crate::types::account_order::{AccountOrderTarget, select_account_order_target};
 use crate::types::account_order_type::AccountOrderTypes;
@@ -149,7 +153,13 @@ impl L2CreateOrderTxTarget {
         )
     }
 
-    fn get_in_progress_order_register(&self, builder: &mut Builder) -> BaseRegisterInfoTarget {
+    fn get_in_progress_order_register(
+        &self,
+        builder: &mut Builder,
+        integrator_fee_collector_index: Target,
+        integrator_taker_fee: Target,
+        integrator_maker_fee: Target,
+    ) -> BaseRegisterInfoTarget {
         BaseRegisterInfoTarget {
             instruction_type: builder.constant(F::from_canonical_u8(INSERT_ORDER)),
 
@@ -176,10 +186,20 @@ impl L2CreateOrderTxTarget {
             pending_to_trigger_order_index0: builder.zero(),
             pending_to_trigger_order_index1: builder.zero(),
             pending_to_cancel_order_index0: builder.zero(),
+
+            generic_field_1: integrator_fee_collector_index,
+            u32_generic_field_0: integrator_taker_fee,
+            u32_generic_field_1: integrator_maker_fee,
         }
     }
 
-    fn get_pending_account_order(&self, builder: &mut Builder) -> AccountOrderTarget {
+    fn get_pending_account_order(
+        &self,
+        builder: &mut Builder,
+        integrator_fee_collector_index: Target,
+        integrator_taker_fee: Target,
+        integrator_maker_fee: Target,
+    ) -> AccountOrderTarget {
         AccountOrderTarget {
             index_0: self.next_order_index,
             index_1: self.client_order_index,
@@ -199,6 +219,10 @@ impl L2CreateOrderTxTarget {
             reduce_only: self.reduce_only,
             trigger_price: self.trigger_price,
             expiry: self.order_expiry,
+
+            integrator_fee_collector_index,
+            integrator_taker_fee,
+            integrator_maker_fee,
 
             trigger_status: self.trigger_status,
             to_trigger_order_index0: builder.zero(),
@@ -619,11 +643,22 @@ impl Apply for L2CreateOrderTxTarget {
         tx_state.market.bid_nonce =
             builder.select(self.success, new_bid_nonce, tx_state.market.bid_nonce);
 
+        let (integrator_fee_collector_index, integrator_taker_fee, integrator_maker_fee) = (
+            tx_state.get_attribute(ATTRIBUTE_TYPE_INTEGRATOR_FEE_COLLECTOR_INDEX),
+            tx_state.get_attribute(ATTRIBUTE_TYPE_INTEGRATOR_TAKER_FEE),
+            tx_state.get_attribute(ATTRIBUTE_TYPE_INTEGRATOR_MAKER_FEE),
+        );
+
         // Pending order - put order to account order tree
         {
             let should_update_for_pending_order = builder.and(self.success, self.is_pending_order);
             // Set new account order info
-            let new_account_order = self.get_pending_account_order(builder);
+            let new_account_order = self.get_pending_account_order(
+                builder,
+                integrator_fee_collector_index,
+                integrator_taker_fee,
+                integrator_maker_fee,
+            );
             tx_state.account_order = select_account_order_target(
                 builder,
                 should_update_for_pending_order,
@@ -642,9 +677,14 @@ impl Apply for L2CreateOrderTxTarget {
         // In progress order - call matching engine
         {
             // Set new register
-            let new_register = self.get_in_progress_order_register(builder);
+            let new_register = self.get_in_progress_order_register(
+                builder,
+                integrator_fee_collector_index,
+                integrator_taker_fee,
+                integrator_maker_fee,
+            );
             let in_progress_flag = builder.and_not(self.success, self.is_pending_order);
-            tx_state.insert_to_instruction_stack(builder, in_progress_flag, &new_register);
+            tx_state.put_to_instruction_stack_unsafe(builder, in_progress_flag, &new_register, 0);
 
             // Update matching engine flag if cloid not enabled and order is not pending
             tx_state.matching_engine_flag =

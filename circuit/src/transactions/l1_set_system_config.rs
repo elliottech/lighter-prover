@@ -27,6 +27,14 @@ pub struct L1SetSystemConfigTx {
     pub liquidity_pool_cooldown_period: i64,
     #[serde(rename = "spwlm", default)]
     pub staking_pool_lockup_period: i64,
+    #[serde(rename = "mpstf", default)]
+    pub max_integrator_spot_taker_fee: i64,
+    #[serde(rename = "mpsmf", default)]
+    pub max_integrator_spot_maker_fee: i64,
+    #[serde(rename = "mpptf", default)]
+    pub max_integrator_perps_taker_fee: i64,
+    #[serde(rename = "mppmf", default)]
+    pub max_integrator_perps_maker_fee: i64,
 }
 
 #[derive(Debug)]
@@ -35,6 +43,10 @@ pub struct L1SetSystemConfigTxTarget {
     pub staking_pool_index: Target,
     pub liquidity_pool_cooldown_period: Target,
     pub staking_pool_lockup_period: Target,
+    pub max_integrator_spot_taker_fee: Target,
+    pub max_integrator_spot_maker_fee: Target,
+    pub max_integrator_perps_taker_fee: Target,
+    pub max_integrator_perps_maker_fee: Target,
 
     success: BoolTarget,
     is_enabled: BoolTarget,
@@ -47,6 +59,10 @@ impl L1SetSystemConfigTxTarget {
             staking_pool_index: builder.add_virtual_target(),
             liquidity_pool_cooldown_period: builder.add_virtual_target(),
             staking_pool_lockup_period: builder.add_virtual_target(),
+            max_integrator_spot_taker_fee: builder.add_virtual_target(),
+            max_integrator_spot_maker_fee: builder.add_virtual_target(),
+            max_integrator_perps_taker_fee: builder.add_virtual_target(),
+            max_integrator_perps_maker_fee: builder.add_virtual_target(),
 
             success: BoolTarget::default(),
             is_enabled: BoolTarget::default(),
@@ -70,6 +86,10 @@ impl PriorityOperationsPubData for L1SetSystemConfigTxTarget {
             add_account_index_target(builder, bytes, self.staking_pool_index),
             add_target(builder, bytes, self.liquidity_pool_cooldown_period, 48),
             add_target(builder, bytes, self.staking_pool_lockup_period, 48),
+            add_target(builder, bytes, self.max_integrator_perps_taker_fee, 32),
+            add_target(builder, bytes, self.max_integrator_perps_maker_fee, 32),
+            add_target(builder, bytes, self.max_integrator_spot_taker_fee, 32),
+            add_target(builder, bytes, self.max_integrator_spot_maker_fee, 32),
         ]
         .iter()
         .sum();
@@ -152,6 +172,22 @@ impl Verify for L1SetSystemConfigTxTarget {
             );
             self.success = builder.and(self.success, is_active_pool);
         }
+
+        // Partner fee validations
+        {
+            let fee_tick = builder.constant_u64(FEE_TICK);
+            [
+                self.max_integrator_spot_taker_fee,
+                self.max_integrator_spot_maker_fee,
+                self.max_integrator_perps_taker_fee,
+                self.max_integrator_perps_maker_fee,
+            ]
+            .iter()
+            .for_each(|&fee| {
+                builder.register_range_check(fee, 24);
+                builder.conditional_assert_lte(self.is_enabled, fee, fee_tick, 24);
+            });
+        }
     }
 }
 
@@ -165,6 +201,10 @@ impl Apply for L1SetSystemConfigTxTarget {
                 staking_pool_index: self.staking_pool_index,
                 liquidity_pool_cooldown_period: self.liquidity_pool_cooldown_period,
                 staking_pool_lockup_period: self.staking_pool_lockup_period,
+                max_integrator_spot_taker_fee: self.max_integrator_spot_taker_fee,
+                max_integrator_spot_maker_fee: self.max_integrator_spot_maker_fee,
+                max_integrator_perps_taker_fee: self.max_integrator_perps_taker_fee,
+                max_integrator_perps_maker_fee: self.max_integrator_perps_maker_fee,
             },
             &tx_state.system_config,
         );
@@ -202,6 +242,22 @@ impl<T: Witness<F>, F: PrimeField64> L1SetSystemConfigTxTargetWitness<F> for T {
         self.set_target(
             a.staking_pool_lockup_period,
             F::from_canonical_i64(b.staking_pool_lockup_period),
+        )?;
+        self.set_target(
+            a.max_integrator_spot_taker_fee,
+            F::from_canonical_i64(b.max_integrator_spot_taker_fee),
+        )?;
+        self.set_target(
+            a.max_integrator_spot_maker_fee,
+            F::from_canonical_i64(b.max_integrator_spot_maker_fee),
+        )?;
+        self.set_target(
+            a.max_integrator_perps_taker_fee,
+            F::from_canonical_i64(b.max_integrator_perps_taker_fee),
+        )?;
+        self.set_target(
+            a.max_integrator_perps_maker_fee,
+            F::from_canonical_i64(b.max_integrator_perps_maker_fee),
         )?;
 
         Ok(())

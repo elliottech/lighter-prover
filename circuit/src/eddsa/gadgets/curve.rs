@@ -85,6 +85,13 @@ pub trait CircuitBuilderEcGFp5 {
         scalar_a: &NonNativeTarget<ECgFp5Scalar>,
         scalar_b: &NonNativeTarget<ECgFp5Scalar>,
     ) -> ECgFp5PointTarget;
+
+    fn ecgfp5_muladd_2_gen_opt(
+        &mut self,
+        b: ECgFp5PointTarget,
+        scalar_a: &NonNativeTarget<ECgFp5Scalar>,
+        scalar_b: &NonNativeTarget<ECgFp5Scalar>,
+    ) -> ECgFp5PointTarget;
 }
 
 impl CircuitBuilderEcGFp5 for Builder<F, D> {
@@ -464,6 +471,69 @@ impl CircuitBuilderEcGFp5 for Builder<F, D> {
 
         res
     }
+
+    /// Computes `a * scalar_a + b * scalar_b` where `a` is the **fixed generator**.
+    ///
+    /// Two optimizations over [`ecgfp5_muladd_2`]:
+    ///
+    /// 1. **Constant window for `a`.**  Because `a` is the generator (a compile-time
+    ///    constant), its 2-bit scalar window `[0·G, 1·G, 2·G, 3·G]` is computed
+    ///    with `precompute_window_const` and baked into the circuit as constants.
+    ///    The generic version calls `precompute_window` which adds doublings and
+    ///    additions as constraints.
+    ///
+    /// 2. **Joint 2-bit lookup table (Shamir interleaving).**  Instead of two
+    ///    separate lookups followed by an addition per iteration, we build a single
+    ///    4×4 = 16-entry table `a_b_window[a_idx * 4 + b_idx] = a_idx·G + b_idx·B`
+    ///    at circuit-build time.  Each iteration then encodes the pair `(a_limb,
+    ///    b_limb)` as the single index `a_limb * 4 + b_limb` and does **one**
+    ///    `random_access` plus **one** `ecgfp5_add`, rather than two lookups and two
+    ///    additions.  This roughly halves the per-iteration cost compared to
+    ///    processing each scalar independently.
+    fn ecgfp5_muladd_2_gen_opt(
+        &mut self,
+        b: ECgFp5PointTarget,
+        scalar_a: &NonNativeTarget<ECgFp5Scalar>,
+        scalar_b: &NonNativeTarget<ECgFp5Scalar>,
+    ) -> ECgFp5PointTarget {
+        const WINDOW_BITS: usize = 2;
+        let base = F::from_canonical_u64(1 << WINDOW_BITS);
+
+        let a_window = self.precompute_window_const(ECgFp5Point::GENERATOR, WINDOW_BITS);
+        let b_window = self.precompute_window(b, WINDOW_BITS);
+        let a_limbs = self.split_nonnative_to_2_bit_limbs(scalar_a);
+        let b_limbs = self.split_nonnative_to_2_bit_limbs(scalar_b);
+
+        let mut a_b_window = Vec::with_capacity(a_window.len() * b_window.len());
+        for (a_idx, a_addend) in a_window.iter().enumerate() {
+            for b_idx in 0..b_window.len() {
+                match (a_idx, b_idx) {
+                    (0, 0) => a_b_window.push(self.ecgfp5_zero()),
+                    (0, _) => a_b_window.push(b_window[b_idx]),
+                    (_, 0) => a_b_window.push(*a_addend),
+                    _ => a_b_window.push(self.ecgfp5_add(*a_addend, b_window[b_idx])),
+                }
+            }
+        }
+
+        debug_assert!(a_limbs.len() == b_limbs.len());
+
+        let num_limbs = a_limbs.len();
+        let a_start = self.mul_const_add(base, a_limbs[num_limbs - 1], b_limbs[num_limbs - 1]);
+        let mut res = self.ecgfp5_random_access(a_start, &a_b_window);
+
+        for (a_limb, b_limb) in a_limbs.into_iter().zip(b_limbs).rev().skip(1) {
+            for _ in 0..WINDOW_BITS {
+                res = self.ecgfp5_double(res);
+            }
+
+            let add_idx = self.mul_const_add(base, a_limb, b_limb);
+            let addend = self.ecgfp5_random_access(add_idx, &a_b_window);
+            res = self.ecgfp5_add(res, addend);
+        }
+
+        res
+    }
 }
 
 pub trait PartialWitnessCurve<F: RichField + Extendable<5> + PrimeField64>: Witness<F> {
@@ -721,6 +791,38 @@ mod tests {
         let s2 = builder.constant_nonnative(s2);
 
         let prod = builder.ecgfp5_muladd_2(p1, p2, &s1, &s2);
+        builder.register_ecgfp5_point_public_input(prod);
+
+        let circuit = builder.build::<C>();
+
+        let mut pw = PartialWitness::new();
+        pw.set_ecgfp5_point_target(prod, prod_expected.to_weierstrass())?;
+
+        let proof = circuit.prove(pw)?;
+        circuit.verify(proof)
+    }
+
+    #[test]
+    fn test_ecgfp5_muladd_2_gen_opt() -> Result<()> {
+        const D: usize = 2;
+        type C = PoseidonGoldilocksConfig;
+        type F = <C as GenericConfig<D>>::F;
+
+        let mut rng = thread_rng();
+
+        let config = CircuitConfig::standard_recursion_config();
+        let mut builder = Builder::<F, D>::new(config);
+
+        let p2 = ECgFp5Point::sample(&mut rng);
+        let s1 = ECgFp5Scalar::sample(&mut rng);
+        let s2 = ECgFp5Scalar::sample(&mut rng);
+        let prod_expected = ECgFp5Point::GENERATOR * s1 + p2 * s2;
+
+        let p2 = builder.ecgfp5_point_constant(p2.to_weierstrass());
+        let s1 = builder.constant_nonnative(s1);
+        let s2 = builder.constant_nonnative(s2);
+
+        let prod = builder.ecgfp5_muladd_2_gen_opt(p2, &s1, &s2);
         builder.register_ecgfp5_point_public_input(prod);
 
         let circuit = builder.build::<C>();

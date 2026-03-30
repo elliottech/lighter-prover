@@ -179,7 +179,7 @@ impl RiskInfoTarget {
 
         let current_risk_parameters = RiskParametersTarget::select(
             builder,
-            position.is_isolated(),
+            position.is_isolated_unsafe(),
             &isolated_risk_parameters,
             &cross_risk_parameters,
         );
@@ -293,6 +293,7 @@ impl RiskParametersTarget {
 
     pub fn is_valid_risk_change(&self, builder: &mut Builder, new: &Self) -> BoolTarget {
         // 1. If new account collateral is not within [-2^96, 2^96], return false
+
         // 2. If the account is below initial margin requirement, health should improve
         // 3. If the account is above initial margin, it should stay above initial margin requirement
 
@@ -687,7 +688,7 @@ fn get_cross_position_base_notional_values(
             position_base_notional(builder, position, market_details, strategy_index);
 
         // Accumulate cross margins
-        let is_cross_position = position.is_cross(builder);
+        let is_cross_position = position.is_cross_unsafe(builder);
         cross_positive_tpv_sum = builder.mul_add(
             is_cross_position.target,
             positive_tpv_component,
@@ -756,7 +757,7 @@ fn get_cross_unrealized_funding(
 
         // Accumulate the unrealized funding for at most 255 (2^8 - 1) cross positions
         let is_correct_strategy = builder.is_equal(market_details.strategy_index, strategy_index);
-        let is_accumulated = builder.and_not(is_correct_strategy, position.is_isolated());
+        let is_accumulated = builder.and_not(is_correct_strategy, position.is_isolated_unsafe());
         unsafe_unrealized_funding = builder.mul_add_unsafe_big(
             &unsafe_position_unrealized_funding,
             is_accumulated.target,
@@ -786,7 +787,7 @@ fn get_initial_margin_requirement(
 
     for market_index in 0..POSITION_LIST_SIZE {
         let position = account_positions[market_index].clone();
-        let is_cross_position = position.is_cross(builder);
+        let is_cross_position = position.is_cross_unsafe(builder);
         let margin_fraction = position.get_initial_margin_fraction(
             builder,
             all_market_details[market_index].default_initial_margin_fraction,
@@ -816,7 +817,7 @@ fn get_maintenance_margin_requirement(
 
     for market_index in 0..POSITION_LIST_SIZE {
         let position = account_positions[market_index].clone();
-        let is_cross_position = position.is_cross(builder);
+        let is_cross_position = position.is_cross_unsafe(builder);
         let lhs = builder.unsafe_big_from_biguint(&position_notional_values[market_index]); // each limb 32 bit
         let rhs = builder.mul(
             all_market_details[market_index].maintenance_margin_fraction,
@@ -845,7 +846,7 @@ fn get_close_out_margin_requirement(
 
     for market_index in 0..POSITION_LIST_SIZE {
         let position = account_positions[market_index].clone();
-        let is_cross_position = position.is_cross(builder);
+        let is_cross_position = position.is_cross_unsafe(builder);
         let lhs = builder.unsafe_big_from_biguint(&position_notional_values[market_index]); // each limb 32 bit
         let rhs = builder.mul(
             all_market_details[market_index].close_out_margin_fraction,
