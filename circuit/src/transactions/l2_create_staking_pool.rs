@@ -14,7 +14,7 @@ use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::comparison::CircuitBuilderSubtractiveComparison;
 use crate::eddsa::gadgets::base_field::QuinticExtensionTarget;
 use crate::eddsa::schnorr::hash_to_quintic_extension_circuit;
-use crate::liquidation::get_available_asset_balance_const;
+use crate::liquidation::get_available_asset_balance;
 use crate::tx_interface::{Apply, TxHash, Verify};
 use crate::types::config::{BIG_U96_LIMBS, Builder, F};
 use crate::types::constants::*;
@@ -188,13 +188,17 @@ impl Verify for L2CreateStakingPoolTxTarget {
             BIG_U96_LIMBS,
         );
 
-        let asset_balance = get_available_asset_balance_const(
+        let _spot = builder.constant_u64(PRODUCT_TYPE_SPOT);
+        let asset_balance = get_available_asset_balance(
             builder,
-            PRODUCT_TYPE_SPOT,
+            _spot,
+            tx_state.asset_indices[TX_ASSET_ID],
             &tx_state.accounts[OWNER_ACCOUNT_ID],
             &tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID],
             tx_state.is_asset_used_as_margin[OWNER_ACCOUNT_ID][TX_ASSET_ID],
             &tx_state.risk_infos[OWNER_ACCOUNT_ID].cross_risk_parameters,
+            &tx_state.margined_asset[TX_ASSET_ID],
+            &tx_state.account_margined_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID].balance,
         );
         builder.conditional_assert_lte_biguint(is_enabled, &self.amount_for_pool, &asset_balance);
     }

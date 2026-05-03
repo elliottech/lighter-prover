@@ -178,7 +178,7 @@ impl PublicPoolInfoTarget {
         builder: &mut Builder,
         strategy_index: Target,
     ) -> BigIntTarget {
-        builder.random_access_bigint(strategy_index, self.strategies.to_vec(), BIG_U96_LIMBS)
+        builder.random_access_bigint(strategy_index, self.strategies.as_ref(), BIG_U96_LIMBS)
     }
 }
 

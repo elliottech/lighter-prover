@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 use anyhow::Result;
-use itertools::Itertools;
 use plonky2::field::extension::Extendable;
 use plonky2::field::types::PrimeField64;
 use plonky2::hash::hash_types::RichField;
@@ -12,9 +11,7 @@ use serde::Deserialize;
 
 use super::config::Builder;
 use crate::deserializers;
-use crate::eddsa::gadgets::base_field::QuinticExtensionTarget;
-use crate::eddsa::schnorr::hash_to_quintic_extension_circuit;
-use crate::types::constants::POSITION_LIST_SIZE;
+use crate::types::constants::{MARGINED_ASSET_LIST_SIZE, POSITION_LIST_SIZE};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(bound = "")]
@@ -28,6 +25,11 @@ pub struct PriceUpdates {
     #[serde(deserialize_with = "deserializers::price_updates")]
     #[serde(default = "deserializers::default_price_updates")]
     pub mark_price: [u32; POSITION_LIST_SIZE],
+
+    #[serde(rename = "a")]
+    #[serde(deserialize_with = "deserializers::asset_price_updates")]
+    #[serde(default = "deserializers::default_asset_price_updates")]
+    pub asset_index_price: [i64; MARGINED_ASSET_LIST_SIZE],
 }
 
 impl Default for PriceUpdates {
@@ -35,6 +37,7 @@ impl Default for PriceUpdates {
         Self {
             index_price: [0; POSITION_LIST_SIZE],
             mark_price: [0; POSITION_LIST_SIZE],
+            asset_index_price: [0; MARGINED_ASSET_LIST_SIZE],
         }
     }
 }
@@ -44,6 +47,7 @@ pub struct PriceUpdatesTarget {
     // 32 bits each
     pub index_price: [Target; POSITION_LIST_SIZE],
     pub mark_price: [Target; POSITION_LIST_SIZE],
+    pub asset_index_price: [Target; MARGINED_ASSET_LIST_SIZE],
 }
 
 impl PriceUpdatesTarget {
@@ -57,21 +61,11 @@ impl PriceUpdatesTarget {
                 .add_virtual_targets(POSITION_LIST_SIZE)
                 .try_into()
                 .unwrap(),
+            asset_index_price: builder
+                .add_virtual_targets(MARGINED_ASSET_LIST_SIZE)
+                .try_into()
+                .unwrap(),
         }
-    }
-
-    pub fn hash(&self, builder: &mut Builder) -> QuinticExtensionTarget {
-        let mut elements: Vec<Target> = Vec::with_capacity(2 * POSITION_LIST_SIZE);
-
-        self.index_price
-            .iter()
-            .zip_eq(self.mark_price.iter())
-            .for_each(|(&index_price, &mark_price)| {
-                elements.push(index_price);
-                elements.push(mark_price);
-            });
-
-        hash_to_quintic_extension_circuit(builder, &elements)
     }
 }
 
@@ -84,6 +78,13 @@ impl<T: Witness<F>, F: PrimeField64 + Extendable<5> + RichField> PriceUpdatesWit
         for i in 0..POSITION_LIST_SIZE {
             self.set_target(t.index_price[i], F::from_canonical_u32(n.index_price[i]))?;
             self.set_target(t.mark_price[i], F::from_canonical_u32(n.mark_price[i]))?;
+        }
+
+        for i in 0..MARGINED_ASSET_LIST_SIZE {
+            self.set_target(
+                t.asset_index_price[i],
+                F::from_canonical_u64(n.asset_index_price[i] as u64),
+            )?;
         }
 
         Ok(())

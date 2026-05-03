@@ -112,7 +112,7 @@ pub trait CircuitBuilderBigInt<F: RichField + Extendable<D>, const D: usize> {
     fn random_access_bigint(
         &mut self,
         access_index: Target,
-        v: Vec<BigIntTarget>,
+        v: &[BigIntTarget],
         limb_count: usize,
     ) -> BigIntTarget;
 
@@ -447,7 +447,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilderBigInt<F, D> fo
     fn random_access_bigint(
         &mut self,
         access_index: Target,
-        v: Vec<BigIntTarget>,
+        v: &[BigIntTarget],
         limb_count: usize,
     ) -> BigIntTarget {
         BigIntTarget {

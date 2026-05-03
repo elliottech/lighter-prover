@@ -33,11 +33,11 @@ pub struct InternalCancelAllOrdersTxTarget {
     pub market_index: Target,  // 8 bits, perps only
 
     // helpers
-    pub is_liquidation: BoolTarget,
-    pub is_dms: BoolTarget,
+    is_liquidation: BoolTarget,
+    is_dms: BoolTarget,
 
     // outputs
-    pub success: BoolTarget,
+    success: BoolTarget,
 }
 
 impl InternalCancelAllOrdersTxTarget {
@@ -89,10 +89,10 @@ impl Verify for InternalCancelAllOrdersTxTarget {
             execute_transaction,
         );
 
-        let is_not_in_liquidation = tx_state.risk_infos[OWNER_ACCOUNT_ID]
+        let is_in_liquidation = tx_state.risk_infos[OWNER_ACCOUNT_ID]
             .current_risk_parameters
-            .is_not_in_liquidation(builder);
-        self.is_liquidation = builder.and_not(is_enabled, is_not_in_liquidation);
+            .is_in_liquidation(builder);
+        self.is_liquidation = builder.and(is_enabled, is_in_liquidation);
         let is_dms = tx_state.accounts[OWNER_ACCOUNT_ID]
             .should_dms_be_triggered(builder, tx_state.block_timestamp);
         self.is_dms = builder.and(is_enabled, is_dms);

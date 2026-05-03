@@ -113,7 +113,7 @@ impl Verify for L2ForceBurnSharesTxTarget {
         builder.conditional_assert_eq(
             is_enabled,
             self.account_index,
-            tx_state.accounts[SUB_ACCOUNT_ID].account_index,
+            tx_state.accounts[SHARE_OWNER_ACCOUNT_ID].account_index,
         );
         builder.conditional_assert_eq(
             is_enabled,
@@ -123,7 +123,7 @@ impl Verify for L2ForceBurnSharesTxTarget {
         builder.conditional_assert_eq(
             is_enabled,
             self.depositor_index,
-            tx_state.accounts[OWNER_ACCOUNT_ID].account_index,
+            tx_state.accounts[LIQUIDITY_POOL_ACCOUNT_ID].account_index,
         );
 
         builder.conditional_assert_eq(
@@ -144,20 +144,26 @@ impl Verify for L2ForceBurnSharesTxTarget {
         );
         builder.conditional_assert_false(is_enabled, is_staking_pool_nil_account);
 
-        // Limit to lit
+        // Assets: USDC, LIT
         builder.conditional_assert_eq_constant(
             is_enabled,
-            tx_state.asset_indices[TX_ASSET_ID],
+            tx_state.asset_indices[USDC_BASE_ASSET_ID],
+            USDC_ASSET_INDEX,
+        );
+        builder.conditional_assert_eq_constant(
+            is_enabled,
+            tx_state.asset_indices[STAKE_ASSET_ID],
             LIT_ASSET_INDEX,
         );
-        let is_asset_empty = tx_state.assets[TX_ASSET_ID].is_empty(builder);
+
+        let is_asset_empty = tx_state.assets[STAKE_ASSET_ID].is_empty(builder);
         builder.conditional_assert_false(is_enabled, is_asset_empty);
 
         // Operator can't be forced
         builder.conditional_assert_not_eq(
             is_enabled,
-            tx_state.accounts[SUB_ACCOUNT_ID].master_account_index,
-            tx_state.accounts[OWNER_ACCOUNT_ID].account_index,
+            tx_state.accounts[SHARE_OWNER_ACCOUNT_ID].master_account_index,
+            tx_state.accounts[LIQUIDITY_POOL_ACCOUNT_ID].account_index,
         );
 
         // Range check share amount
@@ -171,7 +177,7 @@ impl Verify for L2ForceBurnSharesTxTarget {
         // Has to be insurance fund type
         builder.conditional_assert_eq_constant(
             is_enabled,
-            tx_state.accounts[SUB_ACCOUNT_ID].account_type,
+            tx_state.accounts[SHARE_OWNER_ACCOUNT_ID].account_type,
             INSURANCE_FUND_ACCOUNT_TYPE as u64,
         );
 
@@ -190,14 +196,14 @@ impl Verify for L2ForceBurnSharesTxTarget {
         let available_shares_to_burn = get_available_shares_to_burn_for_public_pool(
             builder,
             &tx_state.risk_infos[POOL_STRATEGY_RISK_ID].cross_risk_parameters,
-            &tx_state.accounts[SUB_ACCOUNT_ID],
+            &tx_state.accounts[SHARE_OWNER_ACCOUNT_ID],
         );
         builder.conditional_assert_lte(is_enabled, self.share_amount, available_shares_to_burn, 64);
 
         self.shares_to_burn_usdc_value = get_shares_usdc_value_for_public_pool(
             builder,
             &tx_state.risk_infos[POOL_CROSS_RISK_ID].cross_risk_parameters,
-            &tx_state.accounts[SUB_ACCOUNT_ID],
+            &tx_state.accounts[SHARE_OWNER_ACCOUNT_ID],
             self.share_amount,
         );
         builder.register_range_check(
@@ -224,7 +230,7 @@ impl Verify for L2ForceBurnSharesTxTarget {
                 let usdc_profit = builder.sub(self.shares_to_burn_usdc_value, usd_paid_for_shares);
                 let big_usdc_profit = builder.target_to_biguint(usdc_profit);
                 let big_operator_fee = builder.target_to_biguint(
-                    tx_state.accounts[SUB_ACCOUNT_ID]
+                    tx_state.accounts[SHARE_OWNER_ACCOUNT_ID]
                         .public_pool_info
                         .operator_fee,
                 );
@@ -232,7 +238,7 @@ impl Verify for L2ForceBurnSharesTxTarget {
                     builder.mul_biguint(&big_usdc_profit, &big_operator_fee);
 
                 let big_total_shares = builder.target_to_biguint(
-                    tx_state.accounts[SUB_ACCOUNT_ID]
+                    tx_state.accounts[SHARE_OWNER_ACCOUNT_ID]
                         .public_pool_info
                         .total_shares,
                 );
@@ -268,7 +274,7 @@ impl Verify for L2ForceBurnSharesTxTarget {
         self.shares_to_burn_usdc_value = get_shares_usdc_value_for_public_pool(
             builder,
             &tx_state.risk_infos[POOL_CROSS_RISK_ID].cross_risk_parameters,
-            &tx_state.accounts[SUB_ACCOUNT_ID],
+            &tx_state.accounts[SHARE_OWNER_ACCOUNT_ID],
             self.shares_to_burn,
         );
 
@@ -293,18 +299,19 @@ impl Verify for L2ForceBurnSharesTxTarget {
         }
 
         let max_allowed_principal = {
-            let staked_share_info = tx_state.accounts[OWNER_ACCOUNT_ID].get_public_pool_share(
-                builder,
-                tx_state.accounts[SYSTEM_CONFIG_ACCOUNT_ID].account_index,
-            );
+            let staked_share_info = tx_state.accounts[LIQUIDITY_POOL_ACCOUNT_ID]
+                .get_public_pool_share(
+                    builder,
+                    tx_state.accounts[SYSTEM_CONFIG_ACCOUNT_ID].account_index,
+                );
             let staked_lit_amount = get_shares_asset_value_for_staking_pool(
                 builder,
                 tx_state.accounts[SYSTEM_CONFIG_ACCOUNT_ID]
                     .public_pool_info
                     .total_shares,
                 // Because LIT can't be used as margin, we can use asset balance directly without considering unified accounts
-                &tx_state.account_assets[SYSTEM_CONFIG_ACCOUNT_ID][TX_ASSET_ID].balance,
-                &tx_state.assets[TX_ASSET_ID].extension_multiplier,
+                &tx_state.account_assets[SYSTEM_CONFIG_ACCOUNT_ID][STAKE_ASSET_ID].balance,
+                &tx_state.assets[STAKE_ASSET_ID].extension_multiplier,
                 staked_share_info.share_amount,
             );
             let llp_to_mint_shares_multiplier =
@@ -338,48 +345,52 @@ impl Apply for L2ForceBurnSharesTxTarget {
         );
 
         let positive_collateral_delta = builder.biguint_to_bigint(&collateral_diff);
-        tx_state.accounts[OWNER_ACCOUNT_ID].apply_collateral_delta(
+        tx_state.accounts[LIQUIDITY_POOL_ACCOUNT_ID].apply_collateral_delta(
             builder,
             self.success,
             &positive_collateral_delta,
-            &mut tx_state.strategies[OWNER_ACCOUNT_ID],
+            &mut tx_state.strategies[LIQUIDITY_POOL_ACCOUNT_ID],
+            &mut tx_state.account_margined_assets[LIQUIDITY_POOL_ACCOUNT_ID][USDC_BASE_ASSET_ID]
+                .balance,
         );
         let negative_collateral_delta = builder.neg_bigint(&positive_collateral_delta);
-        tx_state.accounts[SUB_ACCOUNT_ID].apply_collateral_delta(
+        tx_state.accounts[SHARE_OWNER_ACCOUNT_ID].apply_collateral_delta(
             builder,
             self.success,
             &negative_collateral_delta,
-            &mut tx_state.strategies[SUB_ACCOUNT_ID],
+            &mut tx_state.strategies[SHARE_OWNER_ACCOUNT_ID],
+            &mut tx_state.account_margined_assets[SHARE_OWNER_ACCOUNT_ID][USDC_BASE_ASSET_ID]
+                .balance,
         );
 
         let new_total_shares = builder.sub(
-            tx_state.accounts[SUB_ACCOUNT_ID]
+            tx_state.accounts[SHARE_OWNER_ACCOUNT_ID]
                 .public_pool_info
                 .total_shares,
             self.shares_to_burn,
         );
-        tx_state.accounts[SUB_ACCOUNT_ID]
+        tx_state.accounts[SHARE_OWNER_ACCOUNT_ID]
             .public_pool_info
             .total_shares = builder.select(
             self.success,
             new_total_shares,
-            tx_state.accounts[SUB_ACCOUNT_ID]
+            tx_state.accounts[SHARE_OWNER_ACCOUNT_ID]
                 .public_pool_info
                 .total_shares,
         );
 
         let new_operator_shares = builder.add(
-            tx_state.accounts[SUB_ACCOUNT_ID]
+            tx_state.accounts[SHARE_OWNER_ACCOUNT_ID]
                 .public_pool_info
                 .operator_shares,
             self.operator_fee_share,
         );
-        tx_state.accounts[SUB_ACCOUNT_ID]
+        tx_state.accounts[SHARE_OWNER_ACCOUNT_ID]
             .public_pool_info
             .operator_shares = builder.select(
             self.success,
             new_operator_shares,
-            tx_state.accounts[SUB_ACCOUNT_ID]
+            tx_state.accounts[SHARE_OWNER_ACCOUNT_ID]
                 .public_pool_info
                 .operator_shares,
         );

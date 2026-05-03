@@ -15,7 +15,7 @@ use crate::bigint::biguint::CircuitBuilderBiguint;
 use crate::bigint::comparison::CircuitBuilderBiguintSubtractiveComparison;
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::comparison::CircuitBuilderSubtractiveComparison;
-use crate::liquidation::{get_available_collateral, get_position_zero_quote};
+use crate::liquidation::{get_available_asset_balance, get_position_zero_quote};
 use crate::signed::signed_target::{CircuitBuilderSigned, SignedTarget};
 use crate::tx_interface::{Apply, Verify};
 use crate::types::account_position::AccountPositionTarget;
@@ -305,10 +305,18 @@ impl Apply for InternalDeleverageTxTarget {
             deleverager_margin_delta,
         ) = apply_perps_trade(builder, self.success, &apply_trade_params);
 
-        // Get cross collateral and not asset balance, so not to deduct locked balances
-        let bankrupt_available_cross_collateral = get_available_collateral(
+        let _perps = builder.constant_u64(PRODUCT_TYPE_PERPS);
+        let usdc_asset_index = builder.constant_u64(USDC_ASSET_INDEX);
+        let bankrupt_available_cross_collateral = get_available_asset_balance(
             builder,
+            _perps,
+            usdc_asset_index,
+            &tx_state.accounts[BANKRUPT_ACCOUNT_ID],
+            &tx_state.account_assets[BANKRUPT_ACCOUNT_ID][TX_ASSET_ID],
+            tx_state.is_asset_used_as_margin[BANKRUPT_ACCOUNT_ID][TX_ASSET_ID],
             &tx_state.risk_infos[BANKRUPT_ACCOUNT_ID].cross_risk_parameters,
+            &tx_state.margined_asset[TX_ASSET_ID],
+            &tx_state.account_margined_assets[BANKRUPT_ACCOUNT_ID][TX_ASSET_ID].balance,
         );
         let is_bankrupt_has_enough_cross_collateral = {
             // new collateral = old collateral - margin_delta
@@ -322,10 +330,16 @@ impl Apply for InternalDeleverageTxTarget {
             builder.or(collateral_gte_delta, is_delta_negative)
         };
 
-        // Get cross collateral and not asset balance, so not to deduct locked balances
-        let deleverager_available_cross_collateral = get_available_collateral(
+        let deleverager_available_cross_collateral = get_available_asset_balance(
             builder,
+            _perps,
+            usdc_asset_index,
+            &tx_state.accounts[DELEVERAGER_ACCOUNT_ID],
+            &tx_state.account_assets[DELEVERAGER_ACCOUNT_ID][TX_ASSET_ID],
+            tx_state.is_asset_used_as_margin[DELEVERAGER_ACCOUNT_ID][TX_ASSET_ID],
             &tx_state.risk_infos[DELEVERAGER_ACCOUNT_ID].cross_risk_parameters,
+            &tx_state.margined_asset[TX_ASSET_ID],
+            &tx_state.account_margined_assets[DELEVERAGER_ACCOUNT_ID][TX_ASSET_ID].balance,
         );
         let is_deleverager_has_enough_cross_collateral = {
             // new collateral = old collateral - margin_delta
@@ -381,17 +395,19 @@ impl Apply for InternalDeleverageTxTarget {
         // Update collaterals - Because deleverage can only happen in Perps markets, we don't need to handle asset balances for unified accounts
         let new_bankrupt_collateral = builder.select_bigint(
             is_bankrupt_position_isolated,
-            &new_bankrupt_risk_info.cross_risk_parameters.collateral,
-            &new_bankrupt_risk_info.current_risk_parameters.collateral,
+            &new_bankrupt_risk_info.cross_risk_parameters.usdc_collateral,
+            &new_bankrupt_risk_info
+                .current_risk_parameters
+                .usdc_collateral,
         );
         let old_bankrupt_collateral = builder.select_bigint(
             is_bankrupt_position_isolated,
             &tx_state.risk_infos[BANKRUPT_ACCOUNT_ID]
                 .cross_risk_parameters
-                .collateral,
+                .usdc_collateral,
             &tx_state.risk_infos[BANKRUPT_ACCOUNT_ID]
                 .current_risk_parameters
-                .collateral,
+                .usdc_collateral,
         );
         let bankrupt_collateral_delta =
             builder.sub_bigint(&new_bankrupt_collateral, &old_bankrupt_collateral);
@@ -401,21 +417,26 @@ impl Apply for InternalDeleverageTxTarget {
             self.success,
             &bankrupt_collateral_delta,
             &mut tx_state.strategies[BANKRUPT_ACCOUNT_ID],
+            &mut tx_state.account_margined_assets[BANKRUPT_ACCOUNT_ID][TX_ASSET_ID].balance,
         );
 
         let new_deleverager_collateral = builder.select_bigint(
             is_deleverager_position_isolated,
-            &new_deleverager_risk_info.cross_risk_parameters.collateral,
-            &new_deleverager_risk_info.current_risk_parameters.collateral,
+            &new_deleverager_risk_info
+                .cross_risk_parameters
+                .usdc_collateral,
+            &new_deleverager_risk_info
+                .current_risk_parameters
+                .usdc_collateral,
         );
         let old_deleverager_collateral = builder.select_bigint(
             is_deleverager_position_isolated,
             &tx_state.risk_infos[DELEVERAGER_ACCOUNT_ID]
                 .cross_risk_parameters
-                .collateral,
+                .usdc_collateral,
             &tx_state.risk_infos[DELEVERAGER_ACCOUNT_ID]
                 .current_risk_parameters
-                .collateral,
+                .usdc_collateral,
         );
         let deleverager_collateral_delta =
             builder.sub_bigint(&new_deleverager_collateral, &old_deleverager_collateral);
@@ -425,6 +446,7 @@ impl Apply for InternalDeleverageTxTarget {
             self.success,
             &deleverager_collateral_delta,
             &mut tx_state.strategies[DELEVERAGER_ACCOUNT_ID],
+            &mut tx_state.account_margined_assets[DELEVERAGER_ACCOUNT_ID][TX_ASSET_ID].balance,
         );
 
         // If deleverager position sign changes, update the register to cancel reduce only orders

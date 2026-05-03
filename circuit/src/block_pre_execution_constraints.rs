@@ -27,6 +27,10 @@ use crate::signed::signed_target::{CircuitBuilderSigned, SignedTarget};
 use crate::types::asset::{AssetTarget, AssetTargetWitness, all_assets_hash};
 use crate::types::config::{BIGU16_U64_LIMBS, Builder, C, D, F};
 use crate::types::constants::*;
+use crate::types::margined_asset::{
+    MarginedAssetTarget, MarginedAssetTargetWitness, all_margined_assets_hash,
+    connect_margined_assets,
+};
 use crate::types::market_details::{
     MarketDetailsTarget, MarketDetailsWitness, all_market_details_hash,
     all_public_market_details_hash, connect_market_details,
@@ -85,6 +89,7 @@ pub struct BlockPreExecutionTarget {
     pub old_system_config: SystemConfigTarget,
     pub register_stack_before: RegisterStackTarget,
     pub all_assets_before: [AssetTarget; ASSET_LIST_SIZE],
+    pub all_margined_assets_before: [MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
     pub all_market_details_before: [MarketDetailsTarget; POSITION_LIST_SIZE],
     pub state_metadata_target: StateMetadataTarget,
 
@@ -105,6 +110,7 @@ pub struct BlockPreExecutionTarget {
     pub old_state_root: HashOutTarget,
 
     pub all_market_details_after: [MarketDetailsTarget; POSITION_LIST_SIZE], // Public
+    pub all_margined_assets_after: [MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE], // Public
     pub new_state_metadata_target: StateMetadataTarget,                      // Public
     pub new_state_root: HashOutTarget,                                       // Public
     pub new_validium_root: HashOutTarget,                                    // Public
@@ -121,9 +127,14 @@ impl Circuit<C, F, D> for BlockPreExecutionCircuit {
 
         circuit.define_block_state_data_checks();
 
-        let (all_market_details_after, new_state_metadata) = circuit.define_block_pre_execution();
+        let (all_market_details_after, all_margined_assets_after, new_state_metadata) =
+            circuit.define_block_pre_execution();
 
-        circuit.define_post_block_pre_execution(&all_market_details_after, &new_state_metadata);
+        circuit.define_post_block_pre_execution(
+            &all_market_details_after,
+            &all_margined_assets_after,
+            &new_state_metadata,
+        );
 
         circuit.builder.perform_registered_range_checks();
 
@@ -167,6 +178,12 @@ impl Circuit<C, F, D> for BlockPreExecutionCircuit {
             .iter()
             .zip(block.all_assets.iter())
             .try_for_each(|(t, ai)| pw.set_asset_target(t, ai))?;
+
+        target
+            .all_margined_assets_before
+            .iter()
+            .zip(block.all_margined_assets.iter())
+            .try_for_each(|(t, mai)| pw.set_margined_asset_target(t, mai))?;
 
         target
             .all_market_details_before
@@ -213,6 +230,11 @@ impl BlockPreExecutionCircuit {
                     .collect::<Vec<_>>()
                     .try_into()
                     .unwrap(),
+                all_margined_assets_before: (0..MARGINED_ASSET_LIST_SIZE)
+                    .map(|_| MarginedAssetTarget::new(&mut builder))
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .unwrap(),
                 all_market_details_before: (0..POSITION_LIST_SIZE)
                     .map(|_| MarketDetailsTarget::new(&mut builder))
                     .collect::<Vec<_>>()
@@ -233,6 +255,11 @@ impl BlockPreExecutionCircuit {
 
                 all_market_details_after: (0..POSITION_LIST_SIZE)
                     .map(|_| MarketDetailsTarget::new(&mut builder))
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .unwrap(),
+                all_margined_assets_after: (0..MARGINED_ASSET_LIST_SIZE)
+                    .map(|_| MarginedAssetTarget::new(&mut builder))
                     .collect::<Vec<_>>()
                     .try_into()
                     .unwrap(),
@@ -261,6 +288,14 @@ impl BlockPreExecutionCircuit {
                 market.register_public_input(&mut self.builder);
             });
 
+        // Register margined assets
+        self.target
+            .all_margined_assets_after
+            .iter()
+            .for_each(|asset| {
+                asset.register_public_input(&mut self.builder);
+            });
+
         // Register state roots
         self.builder
             .register_public_hashout(self.target.old_state_root);
@@ -280,6 +315,9 @@ impl BlockPreExecutionCircuit {
         let current_all_market_details = self.target.all_market_details_before.clone();
         self.target.all_assets_hash =
             all_assets_hash(&mut self.builder, &self.target.all_assets_before);
+        let all_margined_assets_hash =
+            all_margined_assets_hash(&mut self.builder, &self.target.all_margined_assets_before);
+
         let old_all_market_details_hash =
             all_market_details_hash(&mut self.builder, &current_all_market_details);
         let old_state_metadata_hash = self.target.state_metadata_target.hash(&mut self.builder);
@@ -290,6 +328,7 @@ impl BlockPreExecutionCircuit {
             self.target.old_account_tree_root,
             self.target.old_market_tree_root,
             self.target.all_assets_hash,
+            all_margined_assets_hash,
             old_all_market_details_hash,
             old_state_metadata_hash,
             old_system_config_hash,
@@ -324,6 +363,7 @@ impl BlockPreExecutionCircuit {
         &mut self,
     ) -> (
         [MarketDetailsTarget; POSITION_LIST_SIZE],
+        [MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
         StateMetadataTarget,
     ) {
         let builder = &mut self.builder;
@@ -618,6 +658,24 @@ impl BlockPreExecutionCircuit {
             market_details
         });
 
+        let margined_assets_after = core::array::from_fn(|asset_index| {
+            builder.register_range_check(
+                self.target.price_updates.asset_index_price[asset_index],
+                ASSET_PRICE_BITS,
+            );
+
+            let mut margined_asset = self.target.all_margined_assets_before[asset_index].clone();
+
+            let should_update_asset_index_price = self.target.calculate_oracle_prices;
+            margined_asset.index_price = builder.select(
+                should_update_asset_index_price,
+                self.target.price_updates.asset_index_price[asset_index],
+                margined_asset.index_price,
+            );
+
+            margined_asset
+        });
+
         let mut new_state_metadata = self.target.state_metadata_target.clone();
 
         new_state_metadata.last_funding_round_timestamp = builder.select(
@@ -642,12 +700,17 @@ impl BlockPreExecutionCircuit {
             self.target.state_metadata_target.last_premium_timestamp,
         );
 
-        (market_details_after, new_state_metadata)
+        (
+            market_details_after,
+            margined_assets_after,
+            new_state_metadata,
+        )
     }
 
     fn define_post_block_pre_execution(
         &mut self,
         all_market_details_after: &[MarketDetailsTarget; POSITION_LIST_SIZE],
+        all_margined_assets_after: &[MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
         new_state_metadata: &StateMetadataTarget,
     ) {
         let old_system_config_hash = self.target.old_system_config.hash(&mut self.builder);
@@ -657,11 +720,14 @@ impl BlockPreExecutionCircuit {
         let new_state_metadata_hash = new_state_metadata.hash(&mut self.builder);
         let new_all_public_market_details_hash =
             all_public_market_details_hash(&mut self.builder, all_market_details_after);
+        let new_all_margined_assets_hash =
+            all_margined_assets_hash(&mut self.builder, all_margined_assets_after);
         let new_validium_root = self.builder.hash_n_to_one(&[
             old_register_stack_hash,
             self.target.old_account_tree_root,
             self.target.old_market_tree_root,
             self.target.all_assets_hash,
+            new_all_margined_assets_hash,
             new_all_market_details_hash,
             new_state_metadata_hash,
             old_system_config_hash,
@@ -691,6 +757,13 @@ impl BlockPreExecutionCircuit {
             .zip_eq(self.target.all_market_details_after.iter())
             .for_each(|(x, y)| {
                 connect_market_details(&mut self.builder, x, y);
+            });
+
+        all_margined_assets_after
+            .iter()
+            .zip_eq(self.target.all_margined_assets_after.iter())
+            .for_each(|(x, y)| {
+                connect_margined_assets(&mut self.builder, x, y);
             });
     }
 }

@@ -14,8 +14,8 @@ use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::hints::CircuitBuilderHints;
 use crate::liquidation::get_funding_delta_for_position_and_market;
 use crate::signed::signed_target::{CircuitBuilderSigned, SignedTarget};
-use crate::types::account_asset::AccountAssetTarget;
 use crate::types::account_position::{AccountPositionTarget, get_position_unrealized_pnl};
+use crate::types::asset::AssetTarget;
 use crate::types::config::{
     BIG_U64_LIMBS, BIG_U96_LIMBS, BIG_U128_LIMBS, BIGU16_U64_LIMBS, Builder, F,
 };
@@ -23,7 +23,6 @@ use crate::types::constants::*;
 use crate::types::market::MarketTarget;
 use crate::types::market_details::MarketDetailsTarget;
 use crate::types::risk_info::{RiskInfoTarget, RiskParametersTarget};
-use crate::types::tx_state::TxState;
 use crate::utils::CircuitBuilderUtils;
 
 pub struct ApplyTradeParams<'a> {
@@ -41,7 +40,7 @@ pub struct ApplyTradeParams<'a> {
 }
 
 pub struct ApplySpotTradeParams<'a> {
-    pub account_assets: &'a [[AccountAssetTarget; NB_ASSETS_PER_TX]; NB_ACCOUNTS_PER_TX],
+    pub assets: &'a [AssetTarget; 2], // [base, quote]
     pub fee_account_is_taker: BoolTarget,
     pub fee_account_is_maker: BoolTarget,
 }
@@ -49,18 +48,15 @@ pub struct ApplySpotTradeParams<'a> {
 pub fn apply_spot_trade(
     builder: &mut Builder,
     is_enabled: BoolTarget,
-    tx_state: &TxState,
     input: &ApplyTradeParams,
     spot_input: &ApplySpotTradeParams,
 ) -> (
-    BigIntTarget,   // taker_base_balance_delta
-    BigIntTarget,   // taker_quote_balance_delta
-    BigIntTarget,   // maker_base_balance_delta
-    BigIntTarget,   // maker_quote_balance_delta
-    BigIntTarget,   // fee_base_balance_delta
-    BigIntTarget,   // fee_quote_balance_delta
-    RiskInfoTarget, // new_taker_risk_info
-    RiskInfoTarget, // new_maker_risk_info
+    BigIntTarget, // taker_base_balance_delta
+    BigIntTarget, // taker_quote_balance_delta
+    BigIntTarget, // maker_base_balance_delta
+    BigIntTarget, // maker_quote_balance_delta
+    BigIntTarget, // fee_base_balance_delta
+    BigIntTarget, // fee_quote_balance_delta
 ) {
     let zero = builder.zero();
 
@@ -189,123 +185,6 @@ pub fn apply_spot_trade(
             ),
         });
 
-    // Update risk parameters for taker and maker
-    let is_taker_unified = builder.is_equal_constant(
-        tx_state.accounts[TAKER_ACCOUNT_ID].account_trading_mode,
-        ACCOUNT_ACCOUNT_TRADING_MODE_UNIFIED as u64,
-    );
-    let is_maker_unified = builder.is_equal_constant(
-        tx_state.accounts[MAKER_ACCOUNT_ID].account_trading_mode,
-        ACCOUNT_ACCOUNT_TRADING_MODE_UNIFIED as u64,
-    );
-
-    let is_taker_base_asset_unified_margin = builder.multi_and(&[
-        is_taker_unified,
-        tx_state.is_asset_used_as_margin[TAKER_ACCOUNT_ID][BASE_ASSET_ID],
-        is_enabled,
-    ]);
-    let is_taker_quote_asset_unified_margin = builder.multi_and(&[
-        is_taker_unified,
-        tx_state.is_asset_used_as_margin[TAKER_ACCOUNT_ID][QUOTE_ASSET_ID],
-        is_enabled,
-    ]);
-    let is_maker_base_asset_unified_margin = builder.multi_and(&[
-        is_maker_unified,
-        tx_state.is_asset_used_as_margin[MAKER_ACCOUNT_ID][BASE_ASSET_ID],
-        is_enabled,
-    ]);
-    let is_maker_quote_asset_unified_margin = builder.multi_and(&[
-        is_maker_unified,
-        tx_state.is_asset_used_as_margin[MAKER_ACCOUNT_ID][QUOTE_ASSET_ID],
-        is_enabled,
-    ]);
-
-    let taker_base_collateral_delta = builder.mul_bigint_by_bool(
-        &taker_base_balance_delta,
-        is_taker_base_asset_unified_margin,
-    );
-    let taker_quote_collateral_delta = builder.mul_bigint_by_bool(
-        &taker_quote_balance_delta,
-        is_taker_quote_asset_unified_margin,
-    );
-    let taker_collateral_delta = builder.add_bigint_non_carry(
-        &taker_base_collateral_delta,
-        &taker_quote_collateral_delta,
-        BIG_U96_LIMBS,
-    );
-
-    let maker_base_collateral_delta = builder.mul_bigint_by_bool(
-        &maker_base_balance_delta,
-        is_maker_base_asset_unified_margin,
-    );
-    let maker_quote_collateral_delta = builder.mul_bigint_by_bool(
-        &maker_quote_balance_delta,
-        is_maker_quote_asset_unified_margin,
-    );
-    let maker_collateral_delta = builder.add_bigint_non_carry(
-        &maker_base_collateral_delta,
-        &maker_quote_collateral_delta,
-        BIG_U96_LIMBS,
-    );
-
-    let new_taker_cross_risk_parameters = RiskParametersTarget {
-        collateral: builder.add_bigint_non_carry(
-            &taker_collateral_delta,
-            &input.taker_risk_info.cross_risk_parameters.collateral,
-            BIG_U96_LIMBS,
-        ),
-        collateral_with_funding: builder.add_bigint_non_carry(
-            &taker_collateral_delta,
-            &input
-                .taker_risk_info
-                .cross_risk_parameters
-                .collateral_with_funding,
-            BIG_U96_LIMBS,
-        ),
-        total_account_value: builder.add_bigint_non_carry(
-            &taker_collateral_delta,
-            &input
-                .taker_risk_info
-                .cross_risk_parameters
-                .total_account_value,
-            BIG_U96_LIMBS,
-        ),
-        ..input.taker_risk_info.cross_risk_parameters.clone()
-    };
-    let new_taker_risk_info = RiskInfoTarget {
-        cross_risk_parameters: new_taker_cross_risk_parameters.clone(),
-        current_risk_parameters: new_taker_cross_risk_parameters,
-    };
-
-    let new_maker_cross_risk_parameters = RiskParametersTarget {
-        collateral: builder.add_bigint_non_carry(
-            &maker_collateral_delta,
-            &input.maker_risk_info.cross_risk_parameters.collateral,
-            BIG_U96_LIMBS,
-        ),
-        collateral_with_funding: builder.add_bigint_non_carry(
-            &maker_collateral_delta,
-            &input
-                .maker_risk_info
-                .cross_risk_parameters
-                .collateral_with_funding,
-            BIG_U96_LIMBS,
-        ),
-        total_account_value: builder.add_bigint_non_carry(
-            &maker_collateral_delta,
-            &input
-                .maker_risk_info
-                .cross_risk_parameters
-                .total_account_value,
-            BIG_U96_LIMBS,
-        ),
-        ..input.maker_risk_info.cross_risk_parameters.clone()
-    };
-    let new_maker_risk_info = RiskInfoTarget {
-        cross_risk_parameters: new_maker_cross_risk_parameters.clone(),
-        current_risk_parameters: new_maker_cross_risk_parameters,
-    };
-
     (
         taker_base_balance_delta,
         taker_quote_balance_delta,
@@ -313,8 +192,6 @@ pub fn apply_spot_trade(
         maker_quote_balance_delta,
         fee_base_balance_delta,
         fee_quote_balance_delta,
-        new_taker_risk_info,
-        new_maker_risk_info,
     )
 }
 
@@ -367,17 +244,20 @@ pub fn apply_perps_trade(
 
     let new_taker_risk_info = RiskInfoTarget {
         cross_risk_parameters: RiskParametersTarget {
-            collateral: builder.add_bigint_non_carry(
+            usdc_collateral: builder.add_bigint_non_carry(
                 &taker_funding_cross_delta,
-                &input.taker_risk_info.cross_risk_parameters.collateral,
+                &input.taker_risk_info.cross_risk_parameters.usdc_collateral,
                 BIG_U96_LIMBS,
             ),
             ..input.taker_risk_info.cross_risk_parameters.clone()
         },
         current_risk_parameters: RiskParametersTarget {
-            collateral: builder.add_bigint_non_carry(
+            usdc_collateral: builder.add_bigint_non_carry(
                 &taker_funding_current_delta,
-                &input.taker_risk_info.current_risk_parameters.collateral,
+                &input
+                    .taker_risk_info
+                    .current_risk_parameters
+                    .usdc_collateral,
                 BIG_U96_LIMBS,
             ),
             ..input.taker_risk_info.current_risk_parameters.clone()
@@ -404,17 +284,20 @@ pub fn apply_perps_trade(
 
     let new_maker_risk_info = RiskInfoTarget {
         cross_risk_parameters: RiskParametersTarget {
-            collateral: builder.add_bigint_non_carry(
+            usdc_collateral: builder.add_bigint_non_carry(
                 &maker_funding_cross_delta,
-                &input.maker_risk_info.cross_risk_parameters.collateral,
+                &input.maker_risk_info.cross_risk_parameters.usdc_collateral,
                 BIG_U96_LIMBS,
             ),
             ..input.maker_risk_info.cross_risk_parameters.clone()
         },
         current_risk_parameters: RiskParametersTarget {
-            collateral: builder.add_bigint_non_carry(
+            usdc_collateral: builder.add_bigint_non_carry(
                 &maker_funding_current_delta,
-                &input.maker_risk_info.current_risk_parameters.collateral,
+                &input
+                    .maker_risk_info
+                    .current_risk_parameters
+                    .usdc_collateral,
                 BIG_U96_LIMBS,
             ),
             ..input.maker_risk_info.current_risk_parameters.clone()
@@ -633,18 +516,27 @@ pub fn apply_perps_trade(
         &taker_collateral_delta,
     );
     let new_taker_risk_info = RiskInfoTarget {
-        current_risk_parameters: new_taker_risk_info.current_risk_parameters.update(
-            builder,
-            &taker_collateral_delta,
-            &old_taker_position,
-            &taker_new_position,
-            input.market_details,
-            is_enabled,
-        ),
+        current_risk_parameters: new_taker_risk_info
+            .current_risk_parameters
+            .update_for_perps_trade(
+                builder,
+                &taker_collateral_delta,
+                &old_taker_position,
+                &taker_new_position,
+                input.market_details,
+                is_enabled,
+            ),
         // If cross_risk_parameters and current_risk_parameters are the same, then margin delta will be zero
         cross_risk_parameters: RiskParametersTarget {
-            collateral: builder.add_bigint_non_carry(
-                &new_taker_risk_info.cross_risk_parameters.collateral,
+            usdc_collateral: builder.add_bigint_non_carry(
+                &new_taker_risk_info.cross_risk_parameters.usdc_collateral,
+                &taker_cross_collateral_delta,
+                BIG_U96_LIMBS,
+            ),
+            usdc_collateral_with_funding: builder.add_bigint_non_carry(
+                &new_taker_risk_info
+                    .cross_risk_parameters
+                    .usdc_collateral_with_funding,
                 &taker_cross_collateral_delta,
                 BIG_U96_LIMBS,
             ),
@@ -652,6 +544,13 @@ pub fn apply_perps_trade(
                 &new_taker_risk_info
                     .cross_risk_parameters
                     .total_account_value,
+                &taker_cross_collateral_delta,
+                BIG_U96_LIMBS,
+            ),
+            total_account_liquidation_threshold: builder.add_bigint_non_carry(
+                &new_taker_risk_info
+                    .cross_risk_parameters
+                    .total_account_liquidation_threshold,
                 &taker_cross_collateral_delta,
                 BIG_U96_LIMBS,
             ),
@@ -670,18 +569,27 @@ pub fn apply_perps_trade(
         &maker_collateral_delta,
     );
     let new_maker_risk_info = RiskInfoTarget {
-        current_risk_parameters: new_maker_risk_info.current_risk_parameters.update(
-            builder,
-            &maker_collateral_delta,
-            &old_maker_position,
-            &maker_new_position,
-            input.market_details,
-            is_enabled,
-        ),
+        current_risk_parameters: new_maker_risk_info
+            .current_risk_parameters
+            .update_for_perps_trade(
+                builder,
+                &maker_collateral_delta,
+                &old_maker_position,
+                &maker_new_position,
+                input.market_details,
+                is_enabled,
+            ),
         // If cross_risk_parameters and current_risk_parameters are the same, then margin delta will be zero
         cross_risk_parameters: RiskParametersTarget {
-            collateral: builder.add_bigint_non_carry(
-                &new_maker_risk_info.cross_risk_parameters.collateral,
+            usdc_collateral: builder.add_bigint_non_carry(
+                &new_maker_risk_info.cross_risk_parameters.usdc_collateral,
+                &maker_cross_collateral_delta,
+                BIG_U96_LIMBS,
+            ),
+            usdc_collateral_with_funding: builder.add_bigint_non_carry(
+                &new_maker_risk_info
+                    .cross_risk_parameters
+                    .usdc_collateral_with_funding,
                 &maker_cross_collateral_delta,
                 BIG_U96_LIMBS,
             ),
@@ -689,6 +597,13 @@ pub fn apply_perps_trade(
                 &new_maker_risk_info
                     .cross_risk_parameters
                     .total_account_value,
+                &maker_cross_collateral_delta,
+                BIG_U96_LIMBS,
+            ),
+            total_account_liquidation_threshold: builder.add_bigint_non_carry(
+                &new_maker_risk_info
+                    .cross_risk_parameters
+                    .total_account_liquidation_threshold,
                 &maker_cross_collateral_delta,
                 BIG_U96_LIMBS,
             ),

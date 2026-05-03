@@ -223,10 +223,10 @@ impl L1CreateMarketTxTarget {
         builder.conditional_assert_lte(flag, self.default_initial_margin_fraction, margin_tick, 16);
 
         let fee_tick = builder.constant(F::from_canonical_u64(FEE_TICK));
-        builder.conditional_assert_lte(flag, self.liquidation_fee, fee_tick, 24);
+        builder.conditional_assert_lte(flag, self.liquidation_fee, fee_tick, 32);
 
         let funding_rate_tick = builder.constant(F::from_canonical_u32(FUNDING_RATE_TICK));
-        builder.conditional_assert_lte(flag, self.interest_rate, funding_rate_tick, 24);
+        builder.conditional_assert_lte(flag, self.interest_rate, funding_rate_tick, 32);
         builder.conditional_assert_lte(flag, self.funding_clamp_small, funding_rate_tick, 24);
         builder.conditional_assert_lte(flag, self.funding_clamp_big, funding_rate_tick, 24);
 
@@ -245,6 +245,15 @@ impl L1CreateMarketTxTarget {
         builder.conditional_assert_zero(flag, self.quote_asset_id);
         builder.conditional_assert_zero(flag, self.size_extension_multiplier);
         builder.conditional_assert_zero(flag, self.quote_extension_multiplier);
+
+        builder.conditional_assert_eq_constant(
+            flag,
+            tx_state.asset_indices[USDC_BASE_ASSET_ID],
+            USDC_ASSET_INDEX,
+        );
+        let is_usdc_asset_empty = tx_state.assets[USDC_BASE_ASSET_ID].is_empty(builder);
+        let should_be_false = builder.and(flag, is_usdc_asset_empty);
+        self.success = builder.and_not(self.success, should_be_false);
 
         let market_status_expired = builder.constant_from_u8(MARKET_STATUS_EXPIRED);
         let market_is_not_expired =
@@ -281,6 +290,17 @@ impl L1CreateMarketTxTarget {
         builder.conditional_assert_not_zero(flag, self.size_extension_multiplier);
         builder.conditional_assert_not_zero(flag, self.quote_extension_multiplier);
 
+        builder.conditional_assert_eq(
+            flag,
+            self.base_asset_id,
+            tx_state.asset_indices[BASE_ASSET_ID],
+        );
+        builder.conditional_assert_eq(
+            flag,
+            self.quote_asset_id,
+            tx_state.asset_indices[QUOTE_ASSET_ID],
+        );
+
         builder.conditional_assert_not_eq(flag, self.base_asset_id, self.quote_asset_id);
         let is_base_asset_empty = tx_state.assets[BASE_ASSET_ID].is_empty(builder);
         let is_quote_asset_empty = tx_state.assets[QUOTE_ASSET_ID].is_empty(builder);
@@ -301,16 +321,6 @@ impl Verify for L1CreateMarketTxTarget {
             self.success,
             self.market_index,
             tx_state.market.market_index,
-        );
-        builder.conditional_assert_eq(
-            self.success,
-            self.base_asset_id,
-            tx_state.asset_indices[BASE_ASSET_ID],
-        );
-        builder.conditional_assert_eq(
-            self.success,
-            self.quote_asset_id,
-            tx_state.asset_indices[QUOTE_ASSET_ID],
         );
 
         let is_perps_market_type = builder.is_equal_constant(self.market_type, MARKET_TYPE_PERPS);

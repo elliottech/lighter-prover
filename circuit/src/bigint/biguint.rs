@@ -892,6 +892,8 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilderBiguint<F, D> f
     }
 
     fn biguint_vector_diff(&mut self, new: &BigUintTarget, old: &BigUintTarget) -> BigUintTarget {
+        assert_eq!(new.num_limbs(), old.num_limbs());
+
         BigUintTarget {
             limbs: new
                 .limbs

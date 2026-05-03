@@ -188,16 +188,7 @@ impl AccountTarget {
             );
             elements.push(self.account_type);
 
-            elements.extend_from_slice(
-                &self
-                    .collateral
-                    .abs
-                    .limbs
-                    .iter()
-                    .map(|x| x.0)
-                    .collect::<Vec<_>>(),
-            );
-            elements.push(self.collateral.sign.target);
+            elements.extend_from_slice(&self.hash_margined_assets(builder).elements);
 
             let strategy_hash = {
                 let mut elements = vec![];
@@ -243,6 +234,26 @@ impl AccountTarget {
             builder.select_hash(is_empty, &empty_hash, &non_empty_pub_data_hash),
             is_empty,
         )
+    }
+
+    fn hash_margined_assets(&self, builder: &mut Builder) -> HashOutTarget {
+        let mut elements = vec![];
+
+        for margined_asset in &self.margined_assets {
+            elements.extend_from_slice(
+                &margined_asset
+                    .balance
+                    .abs
+                    .limbs
+                    .iter()
+                    .map(|x| x.0)
+                    .collect::<Vec<_>>(),
+            );
+            elements.push(margined_asset.balance.sign.target);
+            elements.push(margined_asset.margin_mode);
+        }
+
+        builder.hash_n_to_hash_no_pad::<Poseidon2Hash>(elements)
     }
 
     pub fn get_position_bucket_hashes(

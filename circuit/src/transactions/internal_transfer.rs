@@ -13,14 +13,11 @@ use crate::bigint::biguint::{BigUintTarget, CircuitBuilderBiguint, WitnessBigUin
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::comparison::CircuitBuilderSubtractiveComparison;
 use crate::deserializers;
-use crate::liquidation::get_asset_balance;
 use crate::tx_interface::{Apply, Verify};
 use crate::types::account::AccountTarget;
-use crate::types::config::{BIG_U64_LIMBS, BIG_U96_LIMBS, BIG_U128_LIMBS, Builder};
-use crate::types::constants::{
-    MAX_TRANSFER_BITS, NIL_STRATEGY_INDEX, PRODUCT_TYPE_PERPS, PRODUCT_TYPE_SPOT,
-    RECEIVER_ACCOUNT_ID, SENDER_ACCOUNT_ID, TRANSFER_ASSET, TX_ASSET_ID,
-};
+use crate::types::asset::is_universal_asset;
+use crate::types::config::{BIG_U64_LIMBS, BIG_U96_LIMBS, Builder};
+use crate::types::constants::*;
 use crate::types::tx_state::TxState;
 use crate::types::tx_type::TxTypeTargets;
 
@@ -157,42 +154,6 @@ impl Verify for InternalTransferTxTarget {
         self.extended_transfer_amount = builder.biguint_to_bigint(&extended_transfer_amount_big);
 
         self.is_spot = BoolTarget::new_unsafe(self.route_type);
-
-        let old_sender_balance = get_asset_balance(
-            builder,
-            self.route_type,
-            tx_state.accounts[SENDER_ACCOUNT_ID].is_unified_mode(),
-            &tx_state.risk_infos[SENDER_ACCOUNT_ID]
-                .cross_risk_parameters
-                .collateral,
-            &tx_state.account_assets[SENDER_ACCOUNT_ID][TX_ASSET_ID],
-            tx_state.is_asset_used_as_margin[SENDER_ACCOUNT_ID][TX_ASSET_ID],
-        );
-        let new_sender_balance =
-            builder.sub_bigint(&old_sender_balance, &self.extended_transfer_amount);
-        let (success, _) = builder.try_trim_biguint(&new_sender_balance.abs, BIG_U96_LIMBS);
-        self.success = builder.and(self.success, success);
-        let is_sign_negative = builder.is_sign_negative(new_sender_balance.sign);
-        let is_spot_and_negative = builder.and(self.is_spot, is_sign_negative);
-        self.success = builder.and_not(self.success, is_spot_and_negative);
-
-        let old_receiver_balance = get_asset_balance(
-            builder,
-            self.route_type,
-            tx_state.accounts[RECEIVER_ACCOUNT_ID].is_unified_mode(),
-            &tx_state.risk_infos[RECEIVER_ACCOUNT_ID]
-                .cross_risk_parameters
-                .collateral,
-            &tx_state.account_assets[RECEIVER_ACCOUNT_ID][TX_ASSET_ID],
-            tx_state.is_asset_used_as_margin[RECEIVER_ACCOUNT_ID][TX_ASSET_ID],
-        );
-        let new_receiver_balance = builder.add_bigint_non_carry(
-            &old_receiver_balance,
-            &self.extended_transfer_amount,
-            BIG_U128_LIMBS,
-        );
-        let (success, _) = builder.try_trim_biguint(&new_receiver_balance.abs, BIG_U128_LIMBS);
-        self.success = builder.and(self.success, success);
     }
 }
 
@@ -200,28 +161,133 @@ impl Apply for InternalTransferTxTarget {
     fn apply(&mut self, builder: &mut Builder, tx_state: &mut TxState) -> BoolTarget {
         let product_type =
             builder.select_constant(self.is_spot, PRODUCT_TYPE_SPOT, PRODUCT_TYPE_PERPS);
+        let is_asset_universal = is_universal_asset(builder, self.asset_index);
 
         let sender_asset_delta = builder.neg_bigint(&self.extended_transfer_amount);
-        AccountTarget::apply_asset_delta(
+
+        let mut margin_asset = tx_state.margined_asset[TX_ASSET_ID].clone();
+
+        let mut sender_account_asset =
+            tx_state.account_assets[SENDER_ACCOUNT_ID][TX_ASSET_ID].clone();
+        let mut sender_account_margined_asset =
+            tx_state.account_margined_assets[SENDER_ACCOUNT_ID][TX_ASSET_ID].clone();
+        let mut sender_strategy = tx_state.strategies[SENDER_ACCOUNT_ID].clone();
+
+        let mut receiver_account_asset =
+            tx_state.account_assets[RECEIVER_ACCOUNT_ID][TX_ASSET_ID].clone();
+        let mut receiver_account_margined_asset =
+            tx_state.account_margined_assets[RECEIVER_ACCOUNT_ID][TX_ASSET_ID].clone();
+        let mut receiver_strategy = tx_state.strategies[RECEIVER_ACCOUNT_ID].clone();
+
+        let is_sender_insurance_fund = builder.is_equal_constant(
+            tx_state.accounts[SENDER_ACCOUNT_ID].account_type,
+            INSURANCE_FUND_ACCOUNT_TYPE as u64,
+        );
+        let is_sender_unified = tx_state.accounts[SENDER_ACCOUNT_ID].is_unified_mode();
+        let is_sender_spot_balance_valid = AccountTarget::apply_asset_delta(
             builder,
             self.success,
             product_type,
-            &mut tx_state.accounts[SENDER_ACCOUNT_ID],
-            &mut tx_state.account_assets[SENDER_ACCOUNT_ID][TX_ASSET_ID],
+            self.asset_index,
+            &mut margin_asset,
             tx_state.is_asset_used_as_margin[SENDER_ACCOUNT_ID][TX_ASSET_ID],
             &sender_asset_delta,
-            &mut tx_state.strategies[SENDER_ACCOUNT_ID],
+            is_sender_unified,
+            is_sender_insurance_fund,
+            &mut sender_account_asset.balance,
+            &mut sender_account_margined_asset.balance,
+            &mut sender_strategy,
+            true,
         );
 
-        AccountTarget::apply_asset_delta(
+        let is_receiver_insurance_fund = builder.is_equal_constant(
+            tx_state.accounts[RECEIVER_ACCOUNT_ID].account_type,
+            INSURANCE_FUND_ACCOUNT_TYPE as u64,
+        );
+        let is_receiver_unified = tx_state.accounts[RECEIVER_ACCOUNT_ID].is_unified_mode();
+        let is_receiver_spot_balance_valid = AccountTarget::apply_asset_delta(
             builder,
             self.success,
             product_type,
-            &mut tx_state.accounts[RECEIVER_ACCOUNT_ID],
-            &mut tx_state.account_assets[RECEIVER_ACCOUNT_ID][TX_ASSET_ID],
+            self.asset_index,
+            &mut margin_asset,
             tx_state.is_asset_used_as_margin[RECEIVER_ACCOUNT_ID][TX_ASSET_ID],
             &self.extended_transfer_amount,
-            &mut tx_state.strategies[RECEIVER_ACCOUNT_ID],
+            is_receiver_unified,
+            is_receiver_insurance_fund,
+            &mut receiver_account_asset.balance,
+            &mut receiver_account_margined_asset.balance,
+            &mut receiver_strategy,
+            true,
+        );
+
+        self.success = builder.and(self.success, is_sender_spot_balance_valid);
+        let (success, sender_account_spot_balance) =
+            builder.try_trim_biguint(&sender_account_asset.balance, BIG_U96_LIMBS);
+        self.success = builder.and(self.success, success);
+        let (success, _) =
+            builder.try_trim_biguint(&sender_account_margined_asset.balance.abs, BIG_U96_LIMBS);
+        self.success = builder.and(self.success, success);
+        let sender_is_margin_balance_negative =
+            builder.is_sign_negative(sender_account_margined_asset.balance.sign);
+        let should_be_false =
+            builder.and_not(sender_is_margin_balance_negative, is_asset_universal);
+        self.success = builder.and_not(self.success, should_be_false);
+
+        self.success = builder.and(self.success, is_receiver_spot_balance_valid);
+        let (success, receiver_account_spot_balance) =
+            builder.try_trim_biguint(&receiver_account_asset.balance, BIG_U96_LIMBS);
+        self.success = builder.and(self.success, success);
+        let (success, _) =
+            builder.try_trim_biguint(&receiver_account_margined_asset.balance.abs, BIG_U96_LIMBS);
+        self.success = builder.and(self.success, success);
+        let receiver_is_margin_balance_negative =
+            builder.is_sign_negative(receiver_account_margined_asset.balance.sign);
+        let should_be_false =
+            builder.and_not(receiver_is_margin_balance_negative, is_asset_universal);
+        self.success = builder.and_not(self.success, should_be_false);
+
+        // Apply sender changes
+        tx_state.account_assets[SENDER_ACCOUNT_ID][TX_ASSET_ID].balance = builder.select_biguint(
+            self.success,
+            &sender_account_spot_balance,
+            &tx_state.account_assets[SENDER_ACCOUNT_ID][TX_ASSET_ID].balance,
+        );
+        tx_state.account_margined_assets[SENDER_ACCOUNT_ID][TX_ASSET_ID].balance = builder
+            .select_bigint(
+                self.success,
+                &sender_account_margined_asset.balance,
+                &tx_state.account_margined_assets[SENDER_ACCOUNT_ID][TX_ASSET_ID].balance,
+            );
+        tx_state.strategies[SENDER_ACCOUNT_ID] = builder.select_bigint(
+            self.success,
+            &sender_strategy,
+            &tx_state.strategies[SENDER_ACCOUNT_ID],
+        );
+
+        // Apply receiver changes
+        tx_state.account_assets[RECEIVER_ACCOUNT_ID][TX_ASSET_ID].balance = builder.select_biguint(
+            self.success,
+            &receiver_account_spot_balance,
+            &tx_state.account_assets[RECEIVER_ACCOUNT_ID][TX_ASSET_ID].balance,
+        );
+        tx_state.account_margined_assets[RECEIVER_ACCOUNT_ID][TX_ASSET_ID].balance = builder
+            .select_bigint(
+                self.success,
+                &receiver_account_margined_asset.balance,
+                &tx_state.account_margined_assets[RECEIVER_ACCOUNT_ID][TX_ASSET_ID].balance,
+            );
+        tx_state.strategies[RECEIVER_ACCOUNT_ID] = builder.select_bigint(
+            self.success,
+            &receiver_strategy,
+            &tx_state.strategies[RECEIVER_ACCOUNT_ID],
+        );
+
+        // Update margined asset info's total supplied amount
+        tx_state.margined_asset[TX_ASSET_ID].total_supplied_amount = builder.select_biguint(
+            self.success,
+            &margin_asset.total_supplied_amount,
+            &tx_state.margined_asset[TX_ASSET_ID].total_supplied_amount,
         );
 
         tx_state.register_stack.pop_front(builder, self.success);

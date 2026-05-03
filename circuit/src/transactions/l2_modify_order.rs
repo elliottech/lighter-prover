@@ -13,7 +13,7 @@ use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::comparison::CircuitBuilderSubtractiveComparison;
 use crate::eddsa::gadgets::base_field::QuinticExtensionTarget;
 use crate::eddsa::schnorr::hash_to_quintic_extension_circuit;
-use crate::liquidation::get_available_asset_balance_const;
+use crate::liquidation::get_available_asset_balance;
 use crate::matching_engine::{
     decrement_locked_balance_for_order, decrement_order_count_in_place,
     get_locked_amount_and_ask_asset_index, get_next_order_nonce, trigger_child_orders,
@@ -482,21 +482,28 @@ impl Verify for L2ModifyOrderTxTarget {
                 ask_asset_index,
             );
 
-            let base_asset_available_balance = get_available_asset_balance_const(
+            let _spot = builder.constant_u64(PRODUCT_TYPE_SPOT);
+            let base_asset_available_balance = get_available_asset_balance(
                 builder,
-                PRODUCT_TYPE_SPOT,
+                _spot,
+                tx_state.asset_indices[BASE_ASSET_ID],
                 &tx_state.accounts[OWNER_ACCOUNT_ID],
                 &tx_state.account_assets[OWNER_ACCOUNT_ID][BASE_ASSET_ID],
                 tx_state.is_asset_used_as_margin[OWNER_ACCOUNT_ID][BASE_ASSET_ID],
                 &tx_state.risk_infos[OWNER_ACCOUNT_ID].cross_risk_parameters,
+                &tx_state.margined_asset[BASE_ASSET_ID],
+                &tx_state.account_margined_assets[OWNER_ACCOUNT_ID][BASE_ASSET_ID].balance,
             );
-            let quote_asset_available_balance = get_available_asset_balance_const(
+            let quote_asset_available_balance = get_available_asset_balance(
                 builder,
-                PRODUCT_TYPE_SPOT,
+                _spot,
+                tx_state.asset_indices[QUOTE_ASSET_ID],
                 &tx_state.accounts[OWNER_ACCOUNT_ID],
                 &tx_state.account_assets[OWNER_ACCOUNT_ID][QUOTE_ASSET_ID],
                 tx_state.is_asset_used_as_margin[OWNER_ACCOUNT_ID][QUOTE_ASSET_ID],
                 &tx_state.risk_infos[OWNER_ACCOUNT_ID].cross_risk_parameters,
+                &tx_state.margined_asset[QUOTE_ASSET_ID],
+                &tx_state.account_margined_assets[OWNER_ACCOUNT_ID][QUOTE_ASSET_ID].balance,
             );
 
             let available_balance = builder.select_biguint(

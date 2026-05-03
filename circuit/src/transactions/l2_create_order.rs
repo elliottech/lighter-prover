@@ -13,13 +13,11 @@ use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::comparison::CircuitBuilderSubtractiveComparison;
 use crate::eddsa::gadgets::base_field::QuinticExtensionTarget;
 use crate::eddsa::schnorr::hash_to_quintic_extension_circuit;
-use crate::hash_utils::CircuitBuilderHashUtils;
-use crate::liquidation::get_available_asset_balance_const;
+use crate::liquidation::get_available_asset_balance;
 use crate::matching_engine::{
     get_locked_amount_and_ask_asset_index, get_next_order_nonce, increment_order_count_in_place,
     is_not_valid_reduce_only_direction,
 };
-use crate::merkle_helpers::{account_client_order_index_to_merkle_path, try_verify_merkle_proof};
 use crate::tx_attributes::{
     ATTRIBUTE_TYPE_INTEGRATOR_FEE_COLLECTOR_INDEX, ATTRIBUTE_TYPE_INTEGRATOR_MAKER_FEE,
     ATTRIBUTE_TYPE_INTEGRATOR_TAKER_FEE,
@@ -133,24 +131,6 @@ impl L2CreateOrderTxTarget {
             success: BoolTarget::default(),
             is_perps_market: BoolTarget::default(),
         }
-    }
-
-    fn is_client_order_index_unique(
-        &self,
-        builder: &mut Builder,
-        tx_state: &TxState,
-        client_order_index: Target,
-    ) -> BoolTarget {
-        let empty_hash = builder.zero_hash_out();
-        let account_orders_merkle_path_for_cloid =
-            account_client_order_index_to_merkle_path(builder, client_order_index);
-        try_verify_merkle_proof(
-            builder,
-            &tx_state.accounts[0].account_orders_root,
-            empty_hash,
-            tx_state.taker_client_order_proof,
-            account_orders_merkle_path_for_cloid,
-        )
     }
 
     fn get_in_progress_order_register(
@@ -327,6 +307,12 @@ impl Verify for L2CreateOrderTxTarget {
             tx_state.market.quote_asset_id,
             tx_state.asset_indices[QUOTE_ASSET_ID],
         );
+        let perps_flag = builder.and(is_enabled, self.is_perps_market);
+        builder.conditional_assert_eq_constant(
+            perps_flag,
+            tx_state.asset_indices[TX_ASSET_ID],
+            USDC_ASSET_INDEX,
+        );
 
         // TimeInForce - Either IOC (0), GTT (1) or POST_ONLY (2)
         let is_time_in_force_valid = builder.multi_or(&[is_ioc, is_gtt, is_post_only]);
@@ -464,11 +450,8 @@ impl Verify for L2CreateOrderTxTarget {
             self.trigger_status,
         );
 
-        let is_unique_cloid =
-            self.is_client_order_index_unique(builder, tx_state, self.client_order_index);
-        let is_zero_cloid = builder.is_zero(self.client_order_index);
-        let cloid_check = builder.or(is_unique_cloid, is_zero_cloid);
-        self.success = builder.and(self.success, cloid_check);
+        // Client order id uniqueness check
+        self.success = builder.and(self.success, tx_state.is_cloid_unique[0]);
 
         // Verify order base amounts
         self.calculated_base_amount = self.base_amount;
@@ -546,21 +529,28 @@ impl Verify for L2CreateOrderTxTarget {
                 ask_asset_index,
             );
 
-            let base_asset_available_balance = get_available_asset_balance_const(
+            let _spot = builder.constant_u64(PRODUCT_TYPE_SPOT);
+            let base_asset_available_balance = get_available_asset_balance(
                 builder,
-                PRODUCT_TYPE_SPOT,
+                _spot,
+                tx_state.asset_indices[BASE_ASSET_ID],
                 &tx_state.accounts[OWNER_ACCOUNT_ID],
                 &tx_state.account_assets[OWNER_ACCOUNT_ID][BASE_ASSET_ID],
                 tx_state.is_asset_used_as_margin[OWNER_ACCOUNT_ID][BASE_ASSET_ID],
                 &tx_state.risk_infos[OWNER_ACCOUNT_ID].cross_risk_parameters,
+                &tx_state.margined_asset[BASE_ASSET_ID],
+                &tx_state.account_margined_assets[OWNER_ACCOUNT_ID][BASE_ASSET_ID].balance,
             );
-            let quote_asset_available_balance = get_available_asset_balance_const(
+            let quote_asset_available_balance = get_available_asset_balance(
                 builder,
-                PRODUCT_TYPE_SPOT,
+                _spot,
+                tx_state.asset_indices[QUOTE_ASSET_ID],
                 &tx_state.accounts[OWNER_ACCOUNT_ID],
                 &tx_state.account_assets[OWNER_ACCOUNT_ID][QUOTE_ASSET_ID],
                 tx_state.is_asset_used_as_margin[OWNER_ACCOUNT_ID][QUOTE_ASSET_ID],
                 &tx_state.risk_infos[OWNER_ACCOUNT_ID].cross_risk_parameters,
+                &tx_state.margined_asset[QUOTE_ASSET_ID],
+                &tx_state.account_margined_assets[OWNER_ACCOUNT_ID][QUOTE_ASSET_ID].balance,
             );
             let available_balance = builder.select_biguint(
                 is_base_asset,

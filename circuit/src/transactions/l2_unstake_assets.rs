@@ -146,7 +146,6 @@ impl Verify for L2UnstakeAssetsTxTarget {
             tx_state.accounts[SYSTEM_CONFIG_ACCOUNT_ID].account_index,
         );
 
-        // Limit to lit
         builder.conditional_assert_eq_constant(
             is_enabled,
             tx_state.asset_indices[TX_ASSET_ID],
@@ -284,11 +283,11 @@ impl Verify for L2UnstakeAssetsTxTarget {
             ]);
 
             // Because LIT can't be used as margin, we can use asset balance directly without considering unified accounts
-            let (new_staking_pool_balance, fail) = builder.try_sub_biguint(
+            let (new_staking_pool_balance, borrow) = builder.try_sub_biguint(
                 &tx_state.account_assets[SUB_ACCOUNT_ID][TX_ASSET_ID].balance,
                 &self.balance_diff,
             );
-            builder.conditional_assert_zero_u32(staked_limit_check_flag, fail);
+            builder.conditional_assert_zero_u32(staked_limit_check_flag, borrow);
 
             // Allow LIT_TO_MINT_SHARES_MULTIPLIER USDC minted per LIT staked, verify that remaining principal amount can sustain it.
             let staked_lit_amount = get_shares_asset_value_for_staking_pool(
@@ -362,11 +361,11 @@ impl Apply for L2UnstakeAssetsTxTarget {
         }
 
         // Pool balance updates
-        let (new_sub_account_balance, fail) = builder.try_sub_biguint(
+        let (new_sub_account_balance, borrow) = builder.try_sub_biguint(
             &tx_state.account_assets[SUB_ACCOUNT_ID][TX_ASSET_ID].balance,
             &self.balance_diff,
         );
-        builder.conditional_assert_zero_u32(self.success, fail);
+        builder.conditional_assert_zero_u32(self.success, borrow);
         tx_state.account_assets[SUB_ACCOUNT_ID][TX_ASSET_ID].balance = builder.select_biguint(
             self.success,
             &new_sub_account_balance,

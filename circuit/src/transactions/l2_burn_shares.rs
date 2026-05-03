@@ -163,6 +163,12 @@ impl Verify for L2BurnSharesTxTarget {
             tx_state.accounts[SUB_ACCOUNT_ID].master_account_index,
         );
 
+        builder.conditional_assert_eq_constant(
+            is_enabled,
+            tx_state.asset_indices[USDC_BASE_ASSET_ID],
+            USDC_ASSET_INDEX,
+        );
+
         // Enforce min burn period for llp
         {
             let is_not_operator = builder.not(self.is_operator);
@@ -329,12 +335,15 @@ impl Apply for L2BurnSharesTxTarget {
             self.success,
             &positive_collateral_delta,
             &mut tx_state.strategies[OWNER_ACCOUNT_ID],
+            &mut tx_state.account_margined_assets[OWNER_ACCOUNT_ID][USDC_MARGIN_ASSET_INDEX]
+                .balance,
         );
         tx_state.accounts[SUB_ACCOUNT_ID].apply_collateral_delta(
             builder,
             self.success,
             &negative_collateral_delta,
             &mut tx_state.strategies[SUB_ACCOUNT_ID],
+            &mut tx_state.account_margined_assets[SUB_ACCOUNT_ID][USDC_MARGIN_ASSET_INDEX].balance,
         );
 
         {

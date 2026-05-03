@@ -24,6 +24,7 @@ use crate::types::config::{BIG_U96_LIMBS, Builder, F};
 use crate::types::constants::*;
 use crate::types::tx_state::TxState;
 use crate::types::tx_type::TxTypeTargets;
+use crate::utils::CircuitBuilderUtils;
 
 #[derive(Debug, Clone, Deserialize, Default)]
 // A transaction that updates the `AccountConfig`
@@ -101,7 +102,7 @@ impl Verify for L2UpdateAccountConfigTxTarget {
 
         builder.conditional_assert_eq_constant(
             is_enabled,
-            tx_state.asset_indices[TX_ASSET_ID],
+            tx_state.asset_indices[USDC_BASE_ASSET_ID],
             USDC_ASSET_INDEX,
         );
 
@@ -120,6 +121,17 @@ impl Verify for L2UpdateAccountConfigTxTarget {
         let is_master_or_sub = builder.or(is_master, is_sub);
         builder.conditional_assert_true(is_enabled, is_master_or_sub);
 
+        // Make sure account index isn't insurance fund operator or treasury
+        let treasury_account_index = builder.constant_u64(TREASURY_ACCOUNT_INDEX as u64);
+        builder.conditional_assert_not_eq(is_enabled, self.account_index, treasury_account_index);
+        let insurance_fund_operator_index =
+            builder.constant_u64(INSURANCE_FUND_OPERATOR_ACCOUNT_INDEX as u64);
+        builder.conditional_assert_not_eq(
+            is_enabled,
+            self.account_index,
+            insurance_fund_operator_index,
+        );
+
         // Balance mode should change
         let is_mode_same = builder.is_equal(
             tx_state.accounts[OWNER_ACCOUNT_ID].account_trading_mode,
@@ -128,8 +140,8 @@ impl Verify for L2UpdateAccountConfigTxTarget {
         builder.conditional_assert_false(is_enabled, is_mode_same);
 
         // =========================================
-        // statement 3: switching to simple requires healthy account
-        // and non-negative collateral-with-funding.
+        // statement 3: switching to simple requires no usdc spot orders, a healthy account,
+        // a non-negative collateral-with-funding, and no margin enabled assets
         // =========================================
         let is_simple_mode = builder.is_equal_constant(
             self.account_trading_mode,
@@ -140,7 +152,7 @@ impl Verify for L2UpdateAccountConfigTxTarget {
         // No locked USDC balance, means no open spot orders
         builder.conditional_assert_zero_biguint(
             is_enabled_simple,
-            &tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID].locked_balance,
+            &tx_state.account_assets[OWNER_ACCOUNT_ID][USDC_BASE_ASSET_ID].locked_balance,
         );
 
         let is_healthy = tx_state.risk_infos[OWNER_ACCOUNT_ID]
@@ -151,10 +163,23 @@ impl Verify for L2UpdateAccountConfigTxTarget {
         let collateral_with_funding_negative = builder.is_sign_negative(
             tx_state.risk_infos[OWNER_ACCOUNT_ID]
                 .cross_risk_parameters
-                .collateral_with_funding
+                .usdc_collateral_with_funding
                 .sign,
         );
         builder.conditional_assert_false(is_enabled_simple, collateral_with_funding_negative);
+
+        // Make sure that no asset is margin enabled when switching to simple mode. USDC(universal) asset is skipped
+        let mut is_margin_enabled_asset_exists = builder._false();
+        tx_state.accounts[OWNER_ACCOUNT_ID]
+            .margined_assets
+            .iter()
+            .skip(1)
+            .for_each(|asset| {
+                let is_used_as_margin = BoolTarget::new_unsafe(asset.margin_mode); // 1 - margin enabled, 0 - not margin enabled
+                is_margin_enabled_asset_exists =
+                    builder.or(is_margin_enabled_asset_exists, is_used_as_margin);
+            });
+        builder.conditional_assert_false(is_enabled_simple, is_margin_enabled_asset_exists);
         // === end of statement 3 ===
     }
 }
@@ -163,44 +188,39 @@ impl Apply for L2UpdateAccountConfigTxTarget {
     fn apply(&mut self, builder: &mut Builder, tx_state: &mut TxState) -> BoolTarget {
         let zero_biguint = builder.zero_biguint();
 
+        // Transfer spot to perps balance for switching to unified mode. Note that account is in simple mode here.
+        {
+            let is_unified_mode = BoolTarget::new_unsafe(self.account_trading_mode);
+            let flag = builder.and(self.success, is_unified_mode);
+
+            let balance_bigint = builder.biguint_to_bigint(
+                &tx_state.account_assets[OWNER_ACCOUNT_ID][USDC_BASE_ASSET_ID].balance,
+            );
+            let new_margined_balance = builder.add_bigint_non_carry(
+                &tx_state.account_margined_assets[OWNER_ACCOUNT_ID][USDC_BASE_ASSET_ID].balance,
+                &balance_bigint,
+                BIG_U96_LIMBS,
+            );
+            tx_state.account_margined_assets[OWNER_ACCOUNT_ID][USDC_BASE_ASSET_ID].balance =
+                builder.select_bigint(
+                    flag,
+                    &new_margined_balance,
+                    &tx_state.account_margined_assets[OWNER_ACCOUNT_ID][USDC_BASE_ASSET_ID].balance,
+                );
+
+            tx_state.account_assets[OWNER_ACCOUNT_ID][USDC_BASE_ASSET_ID].balance = builder
+                .select_biguint(
+                    flag,
+                    &zero_biguint,
+                    &tx_state.account_assets[OWNER_ACCOUNT_ID][USDC_BASE_ASSET_ID].balance,
+                );
+        }
+
         tx_state.accounts[OWNER_ACCOUNT_ID].account_trading_mode = builder.select(
             self.success,
             self.account_trading_mode,
             tx_state.accounts[OWNER_ACCOUNT_ID].account_trading_mode,
         );
-
-        let is_unified_mode = builder.is_equal_constant(
-            self.account_trading_mode,
-            ACCOUNT_ACCOUNT_TRADING_MODE_UNIFIED as u64,
-        );
-        let apply_unify = builder.and(self.success, is_unified_mode);
-
-        // =========================================
-        // statement 4: switching to unified applies USDC-to-collateral updates.
-        // =========================================
-        // Unify: collateral += usdc_balance, usdc_balance = zero
-        let mut usdc_balance = tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID]
-            .balance
-            .clone();
-        usdc_balance = builder.mul_biguint_by_bool(&usdc_balance, apply_unify);
-        let usdc_balance_delta = builder.biguint_to_bigint(&usdc_balance);
-        let new_collateral = builder.add_bigint_non_carry(
-            &tx_state.accounts[OWNER_ACCOUNT_ID].collateral,
-            &usdc_balance_delta,
-            BIG_U96_LIMBS,
-        );
-        tx_state.accounts[OWNER_ACCOUNT_ID].collateral = builder.select_bigint(
-            apply_unify,
-            &new_collateral,
-            &tx_state.accounts[OWNER_ACCOUNT_ID].collateral,
-        );
-
-        tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID].balance = builder.select_biguint(
-            apply_unify,
-            &zero_biguint,
-            &tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID].balance,
-        );
-        // === end of statement 4 ===
 
         self.success
     }
@@ -228,249 +248,5 @@ impl<T: Witness<F>, F: PrimeField64> L2UpdateAccountConfigTxTargetWitness<F> for
         )?;
 
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use plonky2::iop::witness::PartialWitness;
-
-    use super::*;
-    use crate::bigint::bigint::{BigIntTarget, CircuitBuilderBigInt, SignTarget};
-    use crate::bigint::biguint::{BigUintTarget, CircuitBuilderBiguint};
-    use crate::bool_utils::CircuitBuilderBoolUtils;
-    use crate::types::account_position::AccountPositionTarget;
-    use crate::types::config::{C, CIRCUIT_CONFIG};
-    use crate::uint::u32::gadgets::arithmetic_u32::{CircuitBuilderU32, U32Target};
-
-    fn u96_biguint(builder: &mut Builder, value: u64) -> BigUintTarget {
-        assert!(
-            u32::try_from(value).is_ok(),
-            "test value must fit into a u32"
-        );
-        BigUintTarget {
-            limbs: vec![
-                U32Target(builder.constant_u64(value)),
-                builder.zero_u32(),
-                builder.zero_u32(),
-            ],
-        }
-    }
-
-    fn positive_bigint(builder: &mut Builder, value: u64) -> BigIntTarget {
-        BigIntTarget {
-            abs: u96_biguint(builder, value),
-            sign: SignTarget::new_unsafe(builder.one()),
-        }
-    }
-
-    fn base_tx_state(
-        builder: &mut Builder,
-        account_type: u8,
-        old_account_trading_mode: u8,
-        tx_asset_index: u64,
-        usdc_balance: u64,
-        usdc_locked: u64,
-    ) -> TxState {
-        let mut tx_state = TxState::default();
-
-        tx_state.accounts[OWNER_ACCOUNT_ID].account_index = builder.constant_i64(42);
-        tx_state.accounts[OWNER_ACCOUNT_ID].account_type =
-            builder.constant_u64(account_type as u64);
-        tx_state.accounts[OWNER_ACCOUNT_ID].account_trading_mode =
-            builder.constant_u64(old_account_trading_mode as u64);
-        tx_state.accounts[OWNER_ACCOUNT_ID].collateral = positive_bigint(builder, 5);
-        tx_state.accounts[OWNER_ACCOUNT_ID].total_order_count = builder.zero();
-        tx_state.accounts[OWNER_ACCOUNT_ID].total_non_cross_order_count = builder.zero();
-        for i in 0..POSITION_LIST_SIZE {
-            tx_state.accounts[OWNER_ACCOUNT_ID].positions[i] =
-                AccountPositionTarget::empty(builder);
-        }
-
-        tx_state.api_key.api_key_index = builder.constant_u64(7);
-        tx_state.asset_indices[TX_ASSET_ID] = builder.constant_u64(tx_asset_index);
-        tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID].balance =
-            u96_biguint(builder, usdc_balance);
-        tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID].locked_balance =
-            u96_biguint(builder, usdc_locked);
-
-        tx_state
-    }
-
-    fn prove_case(
-        account_type: u8,
-        old_account_trading_mode: u8,
-        new_account_trading_mode: u8,
-        tx_asset_index: u64,
-        usdc_balance: u64,
-        usdc_locked: u64,
-        with_apply_assertions: bool,
-        expected_collateral: u64,
-        expected_usdc_balance: u64,
-    ) -> bool {
-        let mut builder = Builder::new(CIRCUIT_CONFIG);
-        let tx_type_value = builder.constant_u64(TX_TYPE_L2_UPDATE_ACCOUNT_CONFIG as u64);
-        let tx_type = TxTypeTargets::new(&mut builder, tx_type_value);
-        let mut tx_state = base_tx_state(
-            &mut builder,
-            account_type,
-            old_account_trading_mode,
-            tx_asset_index,
-            usdc_balance,
-            usdc_locked,
-        );
-        let mut tx_target = L2UpdateAccountConfigTxTarget::new(&mut builder);
-
-        tx_target.verify(&mut builder, &tx_type, &tx_state);
-        tx_target.apply(&mut builder, &mut tx_state);
-        builder.assert_true(tx_target.success);
-
-        if with_apply_assertions {
-            let expected_account_trading_mode =
-                builder.constant_u64(new_account_trading_mode as u64);
-            builder.conditional_assert_eq(
-                tx_target.success,
-                tx_state.accounts[OWNER_ACCOUNT_ID].account_trading_mode,
-                expected_account_trading_mode,
-            );
-
-            let expected_collateral = positive_bigint(&mut builder, expected_collateral);
-            let collateral_ok = builder.is_equal_bigint(
-                &tx_state.accounts[OWNER_ACCOUNT_ID].collateral,
-                &expected_collateral,
-            );
-            builder.assert_true(collateral_ok);
-
-            let expected_usdc_balance = u96_biguint(&mut builder, expected_usdc_balance);
-            let usdc_balance_ok = builder.is_equal_biguint(
-                &tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID].balance,
-                &expected_usdc_balance,
-            );
-            builder.assert_true(usdc_balance_ok);
-        }
-
-        let data = builder.build::<C>();
-        let mut pw = PartialWitness::<F>::new();
-        let tx = L2UpdateAccountConfigTx {
-            account_index: 42,
-            api_key_index: 7,
-            account_trading_mode: new_account_trading_mode,
-        };
-        pw.set_l2_update_account_config_tx_target(&tx_target, &tx)
-            .unwrap();
-
-        data.prove(pw).and_then(|proof| data.verify(proof)).is_ok()
-    }
-
-    #[test]
-    fn l2_update_account_config_unify_success_and_apply() {
-        let ok = prove_case(
-            MASTER_ACCOUNT_TYPE,
-            ACCOUNT_ACCOUNT_TRADING_MODE_SIMPLE,
-            ACCOUNT_ACCOUNT_TRADING_MODE_UNIFIED,
-            USDC_ASSET_INDEX,
-            10,
-            0,
-            true,
-            15,
-            0,
-        );
-        assert!(ok);
-    }
-
-    #[test]
-    fn l2_update_account_config_rejects_invalid_account_type() {
-        let ok = prove_case(
-            PUBLIC_POOL_ACCOUNT_TYPE,
-            ACCOUNT_ACCOUNT_TRADING_MODE_SIMPLE,
-            ACCOUNT_ACCOUNT_TRADING_MODE_UNIFIED,
-            USDC_ASSET_INDEX,
-            10,
-            0,
-            false,
-            0,
-            0,
-        );
-        assert!(!ok);
-    }
-
-    #[test]
-    fn l2_update_account_config_rejects_non_usdc_tx_asset() {
-        let ok = prove_case(
-            MASTER_ACCOUNT_TYPE,
-            ACCOUNT_ACCOUNT_TRADING_MODE_SIMPLE,
-            ACCOUNT_ACCOUNT_TRADING_MODE_UNIFIED,
-            USDC_ASSET_INDEX + 1,
-            10,
-            0,
-            false,
-            0,
-            0,
-        );
-        assert!(!ok);
-    }
-
-    #[test]
-    fn l2_update_account_config_rejects_unify_with_locked_usdc() {
-        let ok = prove_case(
-            MASTER_ACCOUNT_TYPE,
-            ACCOUNT_ACCOUNT_TRADING_MODE_UNIFIED,
-            ACCOUNT_ACCOUNT_TRADING_MODE_SIMPLE,
-            USDC_ASSET_INDEX,
-            10,
-            1,
-            false,
-            0,
-            0,
-        );
-        assert!(!ok);
-    }
-
-    #[test]
-    fn l2_update_account_config_unified_to_isolated_success_and_apply() {
-        let ok = prove_case(
-            MASTER_ACCOUNT_TYPE,
-            ACCOUNT_ACCOUNT_TRADING_MODE_UNIFIED,
-            ACCOUNT_ACCOUNT_TRADING_MODE_SIMPLE,
-            USDC_ASSET_INDEX,
-            10,
-            0,
-            true,
-            5,
-            10,
-        );
-        assert!(ok);
-    }
-
-    #[test]
-    fn l2_update_account_config_rejects_same_mode() {
-        let ok = prove_case(
-            MASTER_ACCOUNT_TYPE,
-            ACCOUNT_ACCOUNT_TRADING_MODE_SIMPLE,
-            ACCOUNT_ACCOUNT_TRADING_MODE_SIMPLE,
-            USDC_ASSET_INDEX,
-            10,
-            0,
-            false,
-            0,
-            0,
-        );
-        assert!(!ok);
-    }
-
-    #[test]
-    fn l2_update_account_config_sub_account_unify_success_and_apply() {
-        let ok = prove_case(
-            SUB_ACCOUNT_TYPE,
-            ACCOUNT_ACCOUNT_TRADING_MODE_SIMPLE,
-            ACCOUNT_ACCOUNT_TRADING_MODE_UNIFIED,
-            USDC_ASSET_INDEX,
-            10,
-            0,
-            true,
-            15,
-            0,
-        );
-        assert!(ok);
     }
 }

@@ -23,7 +23,7 @@ use crate::eddsa::schnorr::hash_to_quintic_extension_circuit;
 use crate::liquidation::get_available_asset_balance;
 use crate::tx_interface::{Apply, TxHash, Verify};
 use crate::types::account::AccountTarget;
-use crate::types::asset::ensure_valid_asset_index;
+use crate::types::asset::{ensure_valid_asset_index, is_universal_asset};
 use crate::types::config::{BIG_U64_LIMBS, BIG_U96_LIMBS, Builder, F};
 use crate::types::constants::*;
 use crate::types::tx_state::TxState;
@@ -188,14 +188,11 @@ impl Verify for L2TransferTxTarget {
 
         let lit_asset_index = builder.constant_u64(LIT_ASSET_INDEX);
         let is_lit_asset = builder.is_equal(self.asset_index, lit_asset_index);
-        // Fee asset either be USDC or empty depending on the main asset being USDC or not
+
         let usdc_asset_index = builder.constant_u64(USDC_ASSET_INDEX);
         let is_usdc_asset = builder.is_equal(self.asset_index, usdc_asset_index);
-        // If asset index is usdc, then the second asset slots will be empty assets.
-        let usdc_asset_flag = builder.and(is_enabled, is_usdc_asset);
-        let second_asset_is_empty = tx_state.assets[FEE_ASSET_ID].is_empty(builder);
-        builder.conditional_assert_true(usdc_asset_flag, second_asset_is_empty);
-        // If asset index is not usdc, then the second asset slots will be usdc assets because of the fee
+
+        // If asset index is not USDC, then the second asset slots will be usdc assets to collect transfer fee
         let non_usdc_asset_flag = builder.and_not(is_enabled, is_usdc_asset);
         builder.conditional_assert_eq(
             non_usdc_asset_flag,
@@ -205,14 +202,16 @@ impl Verify for L2TransferTxTarget {
 
         // Self transfer is only possible with different route types. If account is unified, both route types are point to the same balance, so it is not allowed.
         let is_same_account = builder.is_equal(self.from_account_index, self.to_account_index);
-        let mut is_same_route_type = builder.is_equal(self.from_route_type, self.to_route_type);
-        let is_account_unified = builder.is_equal_constant(
-            tx_state.accounts[SENDER_ACCOUNT_ID].account_trading_mode,
-            ACCOUNT_ACCOUNT_TRADING_MODE_UNIFIED as u64,
-        );
-        is_same_route_type = builder.or(is_same_route_type, is_account_unified);
+        let is_same_route_type = builder.is_equal(self.from_route_type, self.to_route_type);
         let is_invalid_self_transfer = builder.and(is_same_account, is_same_route_type);
         builder.conditional_assert_false(is_enabled, is_invalid_self_transfer);
+
+        // Unified accounts can't transfer universal assets between spot and perps balances
+        let is_account_unified = tx_state.accounts[SENDER_ACCOUNT_ID].is_unified_mode();
+        let is_asset_universal = is_universal_asset(builder, self.asset_index);
+        let should_be_false =
+            builder.multi_and(&[is_same_account, is_account_unified, is_asset_universal]);
+        builder.conditional_assert_false(is_enabled, should_be_false);
 
         // Treasury account cannot transfer to non-treasury accounts
         let is_sender_treasury_account = builder.is_equal_constant(
@@ -259,11 +258,6 @@ impl Verify for L2TransferTxTarget {
             tx_state.is_asset_used_as_margin[RECEIVER_ACCOUNT_ID][TX_ASSET_ID],
         );
         builder.conditional_assert_false(is_enabled, is_invalid_to_route_type);
-
-        // Can only be usdc asset for from/to perps transfers
-        let is_perps = builder.or(is_from_perps, is_to_perps);
-        let is_to_perps_invalid_route = builder.and_not(is_perps, is_usdc_asset);
-        builder.conditional_assert_false(self.success, is_to_perps_invalid_route);
 
         // Verify that receiver account exists
         let is_receiver_new_account = tx_state.is_new_account[RECEIVER_ACCOUNT_ID];
@@ -375,19 +369,32 @@ impl Verify for L2TransferTxTarget {
         let sender_asset_balance = get_available_asset_balance(
             builder,
             sender_product_type,
+            self.asset_index,
             &tx_state.accounts[SENDER_ACCOUNT_ID],
             &tx_state.account_assets[SENDER_ACCOUNT_ID][TX_ASSET_ID],
             tx_state.is_asset_used_as_margin[SENDER_ACCOUNT_ID][TX_ASSET_ID],
             &tx_state.risk_infos[SENDER_ACCOUNT_ID].cross_risk_parameters,
+            &tx_state.margined_asset[TX_ASSET_ID],
+            &tx_state.account_margined_assets[SENDER_ACCOUNT_ID][TX_ASSET_ID].balance,
+        );
+        let is_self_transfer_and_spot = builder.and(is_same_account, is_from_spot);
+        // Use whole spot balance(including locked balance) if users move assets from spot to perps in the same account
+        let sender_available_asset_balance = builder.select_biguint(
+            is_self_transfer_and_spot,
+            &tx_state.account_assets[SENDER_ACCOUNT_ID][TX_ASSET_ID].balance,
+            &sender_asset_balance,
         );
 
         let sender_available_usdc = get_available_asset_balance(
             builder,
             sender_product_type,
+            usdc_asset_index,
             &tx_state.accounts[SENDER_ACCOUNT_ID],
             &tx_state.account_assets[SENDER_ACCOUNT_ID][FEE_ASSET_ID],
             tx_state.is_asset_used_as_margin[SENDER_ACCOUNT_ID][FEE_ASSET_ID],
             &tx_state.risk_infos[SENDER_ACCOUNT_ID].cross_risk_parameters,
+            &tx_state.margined_asset[FEE_ASSET_ID],
+            &tx_state.account_margined_assets[SENDER_ACCOUNT_ID][FEE_ASSET_ID].balance,
         );
 
         // Sender balance checks
@@ -404,7 +411,7 @@ impl Verify for L2TransferTxTarget {
             builder.conditional_assert_lte_biguint(
                 flag_if_asset_is_usdc,
                 &extended_usdc_amount,
-                &sender_asset_balance,
+                &sender_available_asset_balance,
             );
 
             // Asset is not usdc - amount is paid from asset balance, fee from usdc balance
@@ -412,7 +419,7 @@ impl Verify for L2TransferTxTarget {
             builder.conditional_assert_lte_biguint(
                 flag_if_asset_is_not_usdc,
                 &self.extended_transfer_amount,
-                &sender_asset_balance,
+                &sender_available_asset_balance,
             );
             builder.conditional_assert_lte_biguint(
                 flag_if_asset_is_not_usdc,
@@ -430,18 +437,14 @@ impl Apply for L2TransferTxTarget {
         let is_usdc_asset = builder.is_equal_constant(self.asset_index, USDC_ASSET_INDEX);
         let is_success_and_not_usdc_asset = builder.and_not(self.success, is_usdc_asset);
 
+        let is_sender_receiver_same =
+            builder.and_not(self.success, tx_state.is_sender_receiver_different);
+
         // Sender collateral/balance deltas
         {
             let is_from_perps = builder.is_equal_constant(self.from_route_type, ROUTE_TYPE_PERPS);
             let sender_product_type =
                 builder.select_constant(is_from_perps, PRODUCT_TYPE_PERPS, PRODUCT_TYPE_SPOT);
-
-            let sender_is_fee_account = builder.is_equal(
-                tx_state.accounts[SENDER_ACCOUNT_ID].account_index,
-                tx_state.accounts[FEE_ACCOUNT_ID].account_index,
-            );
-            let sender_is_fee_account_and_success =
-                builder.and(sender_is_fee_account, self.success);
 
             let mut extended_total_amount = self.extended_transfer_amount.clone();
             let extended_asset_fee =
@@ -454,16 +457,40 @@ impl Apply for L2TransferTxTarget {
             let mut sender_asset_delta = builder.biguint_to_bigint(&extended_total_amount);
             sender_asset_delta = builder.neg_bigint(&sender_asset_delta);
 
+            let is_insurance_fund = builder.is_equal_constant(
+                tx_state.accounts[SENDER_ACCOUNT_ID].account_type,
+                INSURANCE_FUND_ACCOUNT_TYPE as u64,
+            );
+            let is_unified = tx_state.accounts[SENDER_ACCOUNT_ID].is_unified_mode();
+
             // Transfer
+            let raw_flag = builder.and_not(is_sender_receiver_same, is_usdc_asset);
+            AccountTarget::apply_asset_delta_raw(
+                builder,
+                raw_flag,
+                sender_product_type,
+                tx_state.asset_indices[TX_ASSET_ID],
+                &mut tx_state.margined_asset[TX_ASSET_ID],
+                &mut tx_state.account_assets[SENDER_ACCOUNT_ID][TX_ASSET_ID].balance,
+                &sender_asset_delta,
+                &mut tx_state.account_margined_assets[SENDER_ACCOUNT_ID][TX_ASSET_ID].balance,
+                false,
+            );
+            let not_raw_flag = builder.and_not(self.success, raw_flag);
             AccountTarget::apply_asset_delta(
                 builder,
-                self.success,
+                not_raw_flag,
                 sender_product_type,
-                &mut tx_state.accounts[SENDER_ACCOUNT_ID],
-                &mut tx_state.account_assets[SENDER_ACCOUNT_ID][TX_ASSET_ID],
+                tx_state.asset_indices[TX_ASSET_ID],
+                &mut tx_state.margined_asset[TX_ASSET_ID],
                 tx_state.is_asset_used_as_margin[SENDER_ACCOUNT_ID][TX_ASSET_ID],
                 &sender_asset_delta,
+                is_unified,
+                is_insurance_fund,
+                &mut tx_state.account_assets[SENDER_ACCOUNT_ID][TX_ASSET_ID].balance,
+                &mut tx_state.account_margined_assets[SENDER_ACCOUNT_ID][TX_ASSET_ID].balance,
                 &mut tx_state.strategies[SENDER_ACCOUNT_ID],
+                false,
             );
 
             // USDC fee - if asset is not USDC
@@ -473,25 +500,49 @@ impl Apply for L2TransferTxTarget {
                 builder,
                 is_success_and_not_usdc_asset,
                 sender_product_type,
-                &mut tx_state.accounts[SENDER_ACCOUNT_ID],
-                &mut tx_state.account_assets[SENDER_ACCOUNT_ID][FEE_ASSET_ID],
+                tx_state.asset_indices[FEE_ASSET_ID],
+                &mut tx_state.margined_asset[FEE_ASSET_ID],
                 tx_state.is_asset_used_as_margin[SENDER_ACCOUNT_ID][FEE_ASSET_ID],
                 &sender_usdc_fee_amount,
+                is_unified,
+                is_insurance_fund,
+                &mut tx_state.account_assets[SENDER_ACCOUNT_ID][FEE_ASSET_ID].balance,
+                &mut tx_state.account_margined_assets[SENDER_ACCOUNT_ID][FEE_ASSET_ID].balance,
                 &mut tx_state.strategies[SENDER_ACCOUNT_ID],
+                false,
             );
 
             // Collect fee - if sender and fee accounts are same. Fee is always collected into perps balance
-            let sender_fee_collateral_delta = builder.biguint_to_bigint(&self.extended_fee_amount);
-            AccountTarget::apply_asset_delta_const(
-                builder,
-                sender_is_fee_account_and_success,
-                PRODUCT_TYPE_PERPS,
-                &mut tx_state.accounts[SENDER_ACCOUNT_ID],
-                None,
-                tx_state.is_asset_used_as_margin[SENDER_ACCOUNT_ID][FEE_ASSET_ID],
-                &sender_fee_collateral_delta,
-                &mut tx_state.strategies[SENDER_ACCOUNT_ID],
-            );
+            {
+                let sender_is_fee_account = builder.is_equal(
+                    tx_state.accounts[SENDER_ACCOUNT_ID].account_index,
+                    tx_state.accounts[FEE_ACCOUNT_ID].account_index,
+                );
+                let sender_is_fee_account_and_success =
+                    builder.and(sender_is_fee_account, self.success);
+
+                let sender_fee_collateral_delta =
+                    builder.biguint_to_bigint(&self.extended_fee_amount);
+
+                // Collect fee to TX_ASSET_ID for usdc transfers, to FEE_ASSET_ID for non-usdc transfers.
+                let usdc_flag = builder.and(sender_is_fee_account_and_success, is_usdc_asset);
+                tx_state.accounts[SENDER_ACCOUNT_ID].apply_collateral_delta(
+                    builder,
+                    usdc_flag,
+                    &sender_fee_collateral_delta,
+                    &mut tx_state.strategies[SENDER_ACCOUNT_ID],
+                    &mut tx_state.account_margined_assets[SENDER_ACCOUNT_ID][TX_ASSET_ID].balance,
+                );
+                let non_usdc_flag =
+                    builder.and_not(sender_is_fee_account_and_success, is_usdc_asset);
+                tx_state.accounts[SENDER_ACCOUNT_ID].apply_collateral_delta(
+                    builder,
+                    non_usdc_flag,
+                    &sender_fee_collateral_delta,
+                    &mut tx_state.strategies[SENDER_ACCOUNT_ID],
+                    &mut tx_state.account_margined_assets[SENDER_ACCOUNT_ID][FEE_ASSET_ID].balance,
+                );
+            }
         }
 
         // Increase balance for receiver
@@ -500,54 +551,78 @@ impl Apply for L2TransferTxTarget {
             let receiver_product_type =
                 builder.select_constant(is_perps, PRODUCT_TYPE_PERPS, PRODUCT_TYPE_SPOT);
 
-            let receiver_is_fee_account = builder.is_equal(
-                tx_state.accounts[RECEIVER_ACCOUNT_ID].account_index,
-                tx_state.accounts[FEE_ACCOUNT_ID].account_index,
-            );
-            let receiver_is_fee_account_and_success =
-                builder.and(receiver_is_fee_account, self.success);
-
             let receiver_asset_delta = builder.biguint_to_bigint(&self.extended_transfer_amount);
 
-            // Transfer
-            AccountTarget::apply_asset_delta(
-                builder,
-                self.success,
-                receiver_product_type,
-                &mut tx_state.accounts[RECEIVER_ACCOUNT_ID],
-                &mut tx_state.account_assets[RECEIVER_ACCOUNT_ID][TX_ASSET_ID],
-                tx_state.is_asset_used_as_margin[RECEIVER_ACCOUNT_ID][TX_ASSET_ID],
-                &receiver_asset_delta,
-                &mut tx_state.strategies[RECEIVER_ACCOUNT_ID],
+            let is_insurance_fund = builder.is_equal_constant(
+                tx_state.accounts[RECEIVER_ACCOUNT_ID].account_type,
+                INSURANCE_FUND_ACCOUNT_TYPE as u64,
             );
+            let is_unified = tx_state.accounts[RECEIVER_ACCOUNT_ID].is_unified_mode();
 
             // Transfer - apply to sender if they are the same account
-            let is_sender_receiver_same =
-                builder.and_not(self.success, tx_state.is_sender_receiver_different);
-            AccountTarget::apply_asset_delta(
+            AccountTarget::apply_asset_delta_raw(
                 builder,
                 is_sender_receiver_same,
                 receiver_product_type,
-                &mut tx_state.accounts[SENDER_ACCOUNT_ID],
-                &mut tx_state.account_assets[SENDER_ACCOUNT_ID][TX_ASSET_ID],
-                tx_state.is_asset_used_as_margin[SENDER_ACCOUNT_ID][TX_ASSET_ID],
+                tx_state.asset_indices[TX_ASSET_ID],
+                &mut tx_state.margined_asset[TX_ASSET_ID],
+                &mut tx_state.account_assets[SENDER_ACCOUNT_ID][TX_ASSET_ID].balance,
                 &receiver_asset_delta,
-                &mut tx_state.strategies[SENDER_ACCOUNT_ID],
+                &mut tx_state.account_margined_assets[SENDER_ACCOUNT_ID][TX_ASSET_ID].balance,
+                true,
+            );
+
+            // Transfer
+            let is_sender_receiver_different_flag =
+                builder.and_not(self.success, is_sender_receiver_same);
+            AccountTarget::apply_asset_delta(
+                builder,
+                is_sender_receiver_different_flag,
+                receiver_product_type,
+                tx_state.asset_indices[TX_ASSET_ID],
+                &mut tx_state.margined_asset[TX_ASSET_ID],
+                tx_state.is_asset_used_as_margin[RECEIVER_ACCOUNT_ID][TX_ASSET_ID],
+                &receiver_asset_delta,
+                is_unified,
+                is_insurance_fund,
+                &mut tx_state.account_assets[RECEIVER_ACCOUNT_ID][TX_ASSET_ID].balance,
+                &mut tx_state.account_margined_assets[RECEIVER_ACCOUNT_ID][TX_ASSET_ID].balance,
+                &mut tx_state.strategies[RECEIVER_ACCOUNT_ID],
+                false,
             );
 
             // Collect fee - if receiver and fee accounts are same. Fee is always collected into perps balance
-            let receiver_fee_collateral_delta =
-                builder.biguint_to_bigint(&self.extended_fee_amount);
-            AccountTarget::apply_asset_delta_const(
-                builder,
-                receiver_is_fee_account_and_success,
-                PRODUCT_TYPE_PERPS,
-                &mut tx_state.accounts[RECEIVER_ACCOUNT_ID],
-                None,
-                tx_state.is_asset_used_as_margin[RECEIVER_ACCOUNT_ID][FEE_ASSET_ID],
-                &receiver_fee_collateral_delta,
-                &mut tx_state.strategies[RECEIVER_ACCOUNT_ID],
-            );
+            {
+                let receiver_is_fee_account = builder.is_equal(
+                    tx_state.accounts[RECEIVER_ACCOUNT_ID].account_index,
+                    tx_state.accounts[FEE_ACCOUNT_ID].account_index,
+                );
+                let receiver_is_fee_account_and_success =
+                    builder.and(receiver_is_fee_account, self.success);
+
+                let receiver_fee_collateral_delta =
+                    builder.biguint_to_bigint(&self.extended_fee_amount);
+
+                // Collect fee to TX_ASSET_ID for usdc transfers, to FEE_ASSET_ID for non-usdc transfers.
+                let usdc_flag = builder.and(receiver_is_fee_account_and_success, is_usdc_asset);
+                tx_state.accounts[RECEIVER_ACCOUNT_ID].apply_collateral_delta(
+                    builder,
+                    usdc_flag,
+                    &receiver_fee_collateral_delta,
+                    &mut tx_state.strategies[RECEIVER_ACCOUNT_ID],
+                    &mut tx_state.account_margined_assets[RECEIVER_ACCOUNT_ID][TX_ASSET_ID].balance,
+                );
+                let non_usdc_flag =
+                    builder.and_not(receiver_is_fee_account_and_success, is_usdc_asset);
+                tx_state.accounts[RECEIVER_ACCOUNT_ID].apply_collateral_delta(
+                    builder,
+                    non_usdc_flag,
+                    &receiver_fee_collateral_delta,
+                    &mut tx_state.strategies[RECEIVER_ACCOUNT_ID],
+                    &mut tx_state.account_margined_assets[RECEIVER_ACCOUNT_ID][FEE_ASSET_ID]
+                        .balance,
+                );
+            }
         }
 
         // Increase balance for fee account (if not sender or receiver)
@@ -555,16 +630,22 @@ impl Apply for L2TransferTxTarget {
         {
             let fee_collateral_delta = builder.biguint_to_bigint(&self.extended_fee_amount);
 
-            // Collect fee
-            AccountTarget::apply_asset_delta_const(
+            // Collect fee to TX_ASSET_ID for usdc transfers, to FEE_ASSET_ID for non-usdc transfers.
+            let usdc_flag = builder.and(self.success, is_usdc_asset);
+            tx_state.accounts[FEE_ACCOUNT_ID].apply_collateral_delta(
                 builder,
-                self.success,
-                PRODUCT_TYPE_PERPS,
-                &mut tx_state.accounts[FEE_ACCOUNT_ID],
-                None,
-                tx_state.is_asset_used_as_margin[FEE_ACCOUNT_ID][FEE_ASSET_ID],
+                usdc_flag,
                 &fee_collateral_delta,
                 &mut tx_state.strategies[FEE_ACCOUNT_ID],
+                &mut tx_state.account_margined_assets[FEE_ACCOUNT_ID][TX_ASSET_ID].balance,
+            );
+            let non_usdc_flag = builder.and_not(self.success, is_usdc_asset);
+            tx_state.accounts[FEE_ACCOUNT_ID].apply_collateral_delta(
+                builder,
+                non_usdc_flag,
+                &fee_collateral_delta,
+                &mut tx_state.strategies[FEE_ACCOUNT_ID],
+                &mut tx_state.account_margined_assets[FEE_ACCOUNT_ID][FEE_ASSET_ID].balance,
             );
         }
 

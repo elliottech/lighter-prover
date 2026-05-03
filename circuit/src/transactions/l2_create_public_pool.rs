@@ -14,7 +14,7 @@ use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::comparison::CircuitBuilderSubtractiveComparison;
 use crate::eddsa::gadgets::base_field::QuinticExtensionTarget;
 use crate::eddsa::schnorr::hash_to_quintic_extension_circuit;
-use crate::liquidation::get_available_asset_balance_const;
+use crate::liquidation::get_available_asset_balance;
 use crate::tx_interface::{Apply, TxHash, Verify};
 use crate::types::config::{BIG_U96_LIMBS, Builder, F};
 use crate::types::constants::*;
@@ -196,6 +196,12 @@ impl Verify for L2CreatePublicPoolTxTarget {
             ACCOUNT_ACCOUNT_TRADING_MODE_SIMPLE as u64,
         );
 
+        let is_insurance_fund_and_enabled =
+            builder.and(is_insurance_fund_operator_account, is_enabled);
+        builder.conditional_assert_zero(is_insurance_fund_and_enabled, self.operator_fee);
+        builder
+            .conditional_assert_zero(is_insurance_fund_and_enabled, self.min_operator_share_rate);
+
         let initial_pool_share_value = builder.constant_u64(INITIAL_POOL_SHARE_VALUE);
         let pool_usdc_value = builder.mul(self.initial_total_shares, initial_pool_share_value);
         let pool_usdc_value_big = builder.target_to_biguint(pool_usdc_value);
@@ -205,13 +211,18 @@ impl Verify for L2CreatePublicPoolTxTarget {
             &BigUintTarget::from(usdc_to_collateral_multiplier),
             BIG_U96_LIMBS,
         );
-        let available_collateral_to_transfer = get_available_asset_balance_const(
+
+        let _perps = builder.constant_u64(PRODUCT_TYPE_PERPS);
+        let available_collateral_to_transfer = get_available_asset_balance(
             builder,
-            PRODUCT_TYPE_PERPS,
+            _perps,
+            tx_state.asset_indices[TX_ASSET_ID],
             &tx_state.accounts[MASTER_ACCOUNT_ID],
             &tx_state.account_assets[MASTER_ACCOUNT_ID][TX_ASSET_ID],
             tx_state.is_asset_used_as_margin[MASTER_ACCOUNT_ID][TX_ASSET_ID],
             &tx_state.risk_infos[MASTER_ACCOUNT_ID].cross_risk_parameters,
+            &tx_state.margined_asset[TX_ASSET_ID],
+            &tx_state.account_margined_assets[MASTER_ACCOUNT_ID][TX_ASSET_ID].balance,
         );
         builder.conditional_assert_lte_biguint(
             is_enabled,
@@ -265,6 +276,7 @@ impl Apply for L2CreatePublicPoolTxTarget {
             self.success,
             &self.collateral_delta,
             &mut tx_state.strategies[SUB_ACCOUNT_ID],
+            &mut tx_state.account_margined_assets[SUB_ACCOUNT_ID][TX_ASSET_ID].balance,
         );
 
         let owner_collateral_delta = builder.neg_bigint(&self.collateral_delta);
@@ -273,6 +285,7 @@ impl Apply for L2CreatePublicPoolTxTarget {
             self.success,
             &owner_collateral_delta,
             &mut tx_state.strategies[MASTER_ACCOUNT_ID],
+            &mut tx_state.account_margined_assets[MASTER_ACCOUNT_ID][TX_ASSET_ID].balance,
         );
 
         self.success

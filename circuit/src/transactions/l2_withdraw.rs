@@ -181,10 +181,13 @@ impl Verify for L2WithdrawTxTarget {
         let available_balance = get_available_asset_balance(
             builder,
             product_type,
+            self.asset_index,
             &tx_state.accounts[OWNER_ACCOUNT_ID],
             &tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID],
             tx_state.is_asset_used_as_margin[OWNER_ACCOUNT_ID][TX_ASSET_ID],
             &tx_state.risk_infos[OWNER_ACCOUNT_ID].cross_risk_parameters,
+            &tx_state.margined_asset[TX_ASSET_ID],
+            &tx_state.account_margined_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID].balance,
         );
         // === end of statement 1 ===
 
@@ -216,15 +219,22 @@ impl Apply for L2WithdrawTxTarget {
             builder.select_constant(is_route_spot, PRODUCT_TYPE_SPOT, PRODUCT_TYPE_PERPS);
         let withdraw_delta = builder.negative_biguint(&self.extended_amount);
 
+        let _false = builder._false();
+        let is_unified = tx_state.accounts[OWNER_ACCOUNT_ID].is_unified_mode();
         AccountTarget::apply_asset_delta(
             builder,
             self.success,
             product_type,
-            &mut tx_state.accounts[OWNER_ACCOUNT_ID],
-            &mut tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID],
+            self.asset_index,
+            &mut tx_state.margined_asset[TX_ASSET_ID],
             tx_state.is_asset_used_as_margin[OWNER_ACCOUNT_ID][TX_ASSET_ID],
             &withdraw_delta,
+            is_unified,
+            _false,
+            &mut tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID].balance,
+            &mut tx_state.account_margined_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID].balance,
             &mut tx_state.strategies[OWNER_ACCOUNT_ID],
+            false,
         );
 
         self.success

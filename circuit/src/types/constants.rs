@@ -35,6 +35,9 @@ pub const PRODUCT_TYPE_SPOT: u64 = 1;
 
 pub const MARKET_INDEX_BITS: usize = 12;
 
+pub const GLOBAL_SUPPLY_CAP_BITS: usize = 60;
+pub const USER_SUPPLY_CAP_BITS: usize = 60;
+
 pub const ORDER_NONCE_BITS: usize = 48;
 pub const ORDER_BASE_AMOUNT_BITS: usize = 48;
 pub const ORDER_PRICE_BITS: usize = 32;
@@ -46,6 +49,8 @@ pub const ORDER_INDEX_BITS: usize = 56;
 pub const MAX_ORDER_QUOTE_AMOUNT: u64 = (1 << 48) - 1;
 pub const MAX_ORDER_BASE_AMOUNT: u64 = (1 << ORDER_BASE_AMOUNT_BITS) - 1;
 pub const MAX_ORDER_PRICE: u64 = (1 << 32) - 1;
+
+pub const ASSET_PRICE_BITS: usize = 56;
 
 pub const MIN_CLIENT_ORDER_INDEX: i64 = 1;
 pub const MAX_CLIENT_ORDER_INDEX: i64 = (1 << 48) - 1;
@@ -108,10 +113,10 @@ pub const EMPTY_ORDER_BOOK_TREE_ROOT: HashOut<F> = const_hash_out([
 ]);
 
 pub const EMPTY_ACCOUNT_HASH: HashOut<F> = const_hash_out([
-    14392890145472191659,
-    2908530609512515206,
-    10530419883902713688,
-    12796262307803934181,
+    4915815754874637843,
+    13340589046232056959,
+    2288143452309297546,
+    3402452211644817020,
 ]);
 
 /// Tx Types
@@ -157,6 +162,7 @@ pub const TX_TYPE_L2_UPDATE_ACCOUNT_ASSET_CONFIG: u8 = 42;
 pub const TX_TYPE_L2_STRATEGY_TRANSFER: u8 = 43;
 pub const TX_TYPE_L2_UPDATE_MARKET_CONFIG: u8 = 44;
 pub const TX_TYPE_L2_APPROVE_INTEGRATOR: u8 = 45;
+pub const TX_TYPE_L2_UPDATE_ASSET_CONFIG: u8 = 48;
 
 // Internal
 pub const TX_TYPE_INTERNAL_CLAIM_ORDER: u8 = 21;
@@ -168,6 +174,7 @@ pub const TX_TYPE_INTERNAL_LIQUIDATE_POSITION: u8 = 26;
 pub const TX_TYPE_INTERNAL_CREATE_ORDER: u8 = 27;
 pub const TX_TYPE_INTERNAL_PENDING_UNLOCK: u8 = 39;
 pub const TX_TYPE_INTERNAL_INTEGRATOR_OPERATIONS: u8 = 46;
+pub const TX_TYPE_INTERNAL_LIQUIDATE_SPOT: u8 = 47;
 
 // Priority request pub data
 pub const PRIORITY_PUB_DATA_TYPE_L1_DEPOSIT: u8 = 41;
@@ -230,20 +237,25 @@ pub const MARGIN_FRACTION_MULTIPLIER: u32 = USDC_TO_COLLATERAL_MULTIPLIER / MARG
 pub const MARGIN_FRACTION_BITS: usize = 16;
 pub const SHARE_TICK: u64 = 10_000;
 pub const SHARE_RATE_BITS: usize = 16;
+pub const ASSET_MARGIN_TICK: u64 = 10_000;
+pub const ASSET_MARGIN_TO_FEE_TICK_MULTIPLIER: u64 = FEE_TICK / ASSET_MARGIN_TICK;
 
 pub const MARKET_OPEN_INTEREST_BITS: usize = 56; // max open interest is 2^56 - 1
 pub const MARKET_OPEN_INTEREST_NOTIONAL_BITS: usize = 56; // max open interest notional is 2^56 - 1
 pub const MARKET_OPEN_INTEREST_NOTIONAL: u64 = (1 << MARKET_OPEN_INTEREST_NOTIONAL_BITS) - 1;
 pub const MARKET_OPEN_INTEREST: u64 = (1 << MARKET_OPEN_INTEREST_BITS) - 1;
 
+pub const NB_CLOID_UNIQUENESS_CHECK_PER_TX: usize = 3;
 pub const NB_ACCOUNTS_PER_TX: usize = 3;
-pub const NB_ACCOUNT_ORDERS_PATHS_PER_TX: usize = 3;
+pub const NB_ACCOUNT_ORDERS_PATHS_PER_TX: usize = 5;
 pub const NB_ASSETS_PER_TX: usize = 2;
-pub const NB_POSSIBLE_POOL_SHARE_SLOTS: usize = 2;
 pub const NB_STRATEGIES: usize = 1 << STRATEGY_INDEX_BITS;
 
 pub const TREASURY_ACCOUNT_INDEX: usize = 0;
 pub const INSURANCE_FUND_OPERATOR_ACCOUNT_INDEX: usize = 1;
+
+pub const MAX_INDEX_PRICE_DIVIDER: u64 = (1 << 56) - 1;
+pub const MAX_ASSET_PRICE_BITS: usize = 56;
 
 // L1 Account address
 pub const NIL_L1_ADDRESS: u64 = 0;
@@ -254,6 +266,7 @@ pub const MIN_ACCOUNT_INDEX: i64 = 0;
 pub const STRATEGY_INDEX_BITS: usize = 3;
 pub const DEFAULT_STRATEGY_INDEX: usize = 0;
 pub const NIL_STRATEGY_INDEX: usize = 8;
+pub const MARGIN_STRATEGY_INDEX: usize = 1;
 
 /// Before changing these, see [`crate::transactions::l2_change_pubkey::L2ChangePubKeyTxTarget::verify()`]
 pub const MAX_ACCOUNT_INDEX: i64 = 281474976710654; // 2^48 - 2
@@ -333,10 +346,14 @@ pub const MAX_PENDING_UNLOCKS: usize = 8;
 
 pub const ASSET_LIST_SIZE_BITS: usize = 6;
 pub const ASSET_LIST_SIZE: usize = 1 << ASSET_LIST_SIZE_BITS; // first and last slots unused
+pub const MARGINED_ASSET_LIST_SIZE_BITS: usize = 3;
+pub const MARGINED_ASSET_LIST_SIZE: usize = 7; // Last element is actually empty, reserved for nil
+pub const NIL_MARGIN_ASSET_INDEX: u64 = 7;
 
 pub const NATIVE_ASSET_INDEX: u64 = 1;
 pub const LIT_ASSET_INDEX: u64 = 2;
 pub const USDC_ASSET_INDEX: u64 = 3;
+pub const USDC_MARGIN_ASSET_INDEX: usize = 0;
 pub const MIN_ASSET_INDEX: u64 = 1;
 pub const MAX_ASSET_INDEX: u64 = 62;
 pub const NIL_ASSET_INDEX: u64 = 0;
@@ -347,11 +364,6 @@ pub const EXTENSION_MULTIPLIER_BITS: usize = 56;
 pub const MAX_EXTENSION_MULTIPLIER: u64 = (1 << EXTENSION_MULTIPLIER_BITS) - 1;
 pub const MAX_WITHDRAWAL_AMOUNT: u64 = MAX_EXCHANGE_ASSET_BALANCE;
 pub const MAX_TRANSFER_AMOUNT: u64 = MAX_EXCHANGE_ASSET_BALANCE;
-
-pub const MAX_MARGIN_ASSET_COUNT: usize = 1;
-
-pub const MARGIN_ASSET_LIST_SIZE_BITS: usize = 4;
-pub const MARGIN_ASSET_LIST_SIZE: usize = 1 << MARGIN_ASSET_LIST_SIZE_BITS; // 16
 
 pub const MIN_ASSET_BALANCE: i128 = 0i128;
 pub const MAX_ASSET_BALANCE: i128 = ((1i128) << COLLATERAL_BITS) - 1;
@@ -485,6 +497,7 @@ pub const OWNER_ACCOUNT_ID: usize = 0;
 
 pub const LIQUIDITY_POOL_ACCOUNT_ID: usize = 0;
 pub const STAKING_POOL_ACCOUNT_ID: usize = 1;
+pub const OLD_LIQUIDITY_POOL_ACCOUNT_ID: usize = STAKING_POOL_ACCOUNT_ID;
 pub const SYSTEM_CONFIG_ACCOUNT_ID: usize = 2;
 
 pub const TAKER_ACCOUNT_ID: usize = 0;
@@ -504,10 +517,12 @@ pub const DELEVERAGER_ACCOUNT_ID: usize = 1;
 pub const TX_ASSET_ID: usize = 0;
 pub const FEE_ASSET_ID: usize = 1;
 
-pub const STAKE_ASSET_ID: usize = 1;
-
 pub const BASE_ASSET_ID: usize = 0;
 pub const QUOTE_ASSET_ID: usize = 1;
+
+pub const USDC_BASE_ASSET_ID: usize = 0;
+pub const SHARE_OWNER_ACCOUNT_ID: usize = 1;
+pub const STAKE_ASSET_ID: usize = 1;
 
 pub const OWNER_OR_POOL_ACCOUNT_ID_1: usize = 0;
 pub const OWNER_OR_POOL_ACCOUNT_ID_2: usize = 1;

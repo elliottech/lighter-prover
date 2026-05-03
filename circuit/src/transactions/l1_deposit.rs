@@ -22,7 +22,7 @@ use crate::deserializers;
 use crate::tx_interface::{Apply, OnChainPubData, PriorityOperationsPubData, Verify};
 use crate::types::account::AccountTarget;
 use crate::types::asset::ensure_valid_asset_index;
-use crate::types::config::{BIG_U64_LIMBS, BIG_U96_LIMBS, BIG_U128_LIMBS, BIG_U160_LIMBS, Builder};
+use crate::types::config::{BIG_U64_LIMBS, BIG_U96_LIMBS, BIG_U160_LIMBS, Builder};
 use crate::types::constants::*;
 use crate::types::target_pub_data_helper::*;
 use crate::types::tx_state::TxState;
@@ -187,26 +187,36 @@ impl Verify for L1DepositTxTarget {
         // Sequencer is allowed to accept only a portion of the USDC amount
         builder.conditional_assert_lte_biguint(is_enabled, &self.accepted_amount, &self.amount);
 
-        let is_accepted_amount_zero = builder.is_zero_biguint(&self.accepted_amount);
-        let is_accepted_amount_non_zero = builder.not(is_accepted_amount_zero);
+        self.is_new_account = builder.and(is_enabled, tx_state.is_new_account[OWNER_ACCOUNT_ID]);
 
-        // If sequencer accepted non-zero amount, asset should be exist in the system
-        let is_asset_empty = tx_state.assets[TX_ASSET_ID].is_empty(builder);
-        let asset_existence_check =
-            builder.multi_and(&[is_accepted_amount_non_zero, self.is_enabled]);
-        builder.conditional_assert_false(asset_existence_check, is_asset_empty);
+        // Accepted amount checks
+        {
+            /*
+                Following conditions will lead accepted amount to be zero, as well as skipping account creation
+                - Asset is empty
+                - Route type is PERPS but asset is not margin-enabled
+            */
+            let is_asset_empty = tx_state.assets[TX_ASSET_ID].is_empty(builder);
+            let is_perps = builder.is_equal_constant(self.route_type, ROUTE_TYPE_PERPS);
+            let is_perps_but_not_margin_enabled = builder.and_not(
+                is_perps,
+                tx_state.is_asset_used_as_margin[OWNER_ACCOUNT_ID][TX_ASSET_ID],
+            );
+            let skip_account_creation =
+                builder.multi_or(&[is_asset_empty, is_perps_but_not_margin_enabled]);
+            let is_accepted_amount_zero = builder.is_zero_biguint(&self.accepted_amount);
+            // a => b = !a || b
+            let not_flag = builder.not(skip_account_creation);
+            let should_be_true = builder.or(not_flag, is_accepted_amount_zero);
+            builder.conditional_assert_true(is_enabled, should_be_true);
 
-        let is_perps = builder.is_equal_constant(self.route_type, ROUTE_TYPE_PERPS);
-        let margin_mode_check =
-            builder.multi_and(&[is_accepted_amount_non_zero, self.is_enabled, is_perps]);
-        let is_asset_margin_enabled =
-            tx_state.is_asset_used_as_margin[OWNER_ACCOUNT_ID][TX_ASSET_ID];
-        builder.conditional_assert_true(margin_mode_check, is_asset_margin_enabled);
+            // Do not create a new account in this case
+            self.is_new_account = builder.and_not(self.is_new_account, skip_account_creation);
+        }
+
         // nil account index is reserved and always should be empty
         let nil_account_index = builder.constant_i64(NIL_ACCOUNT_INDEX);
         builder.conditional_assert_not_eq(is_enabled, self.account_index, nil_account_index);
-
-        self.is_new_account = builder.and(self.success, tx_state.is_new_account[OWNER_ACCOUNT_ID]);
 
         let is_l1_address_match = builder.is_equal_biguint(
             &self.l1_address,
@@ -220,53 +230,32 @@ impl Verify for L1DepositTxTarget {
 
 impl Apply for L1DepositTxTarget {
     fn apply(&mut self, builder: &mut Builder, tx_state: &mut TxState) -> BoolTarget {
-        let is_perps = builder.is_equal_constant(self.route_type, ROUTE_TYPE_PERPS);
-        let is_spot = builder.not(is_perps);
-        let is_account_isolated = builder.is_equal_constant(
-            tx_state.accounts[OWNER_ACCOUNT_ID].account_trading_mode,
-            ACCOUNT_ACCOUNT_TRADING_MODE_SIMPLE as u64,
-        );
-        let is_account_unified = builder.not(is_account_isolated);
-        let is_asset_used_as_margin =
-            tx_state.is_asset_used_as_margin[OWNER_ACCOUNT_ID][TX_ASSET_ID];
-        let unified_spot =
-            builder.multi_and(&[is_spot, is_account_unified, is_asset_used_as_margin]);
-        let use_collateral_as_source_balance = builder.or(is_perps, unified_spot);
-
-        let source_balance = {
-            let balance_bigint = builder
-                .biguint_to_bigint(&tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID].balance);
-            builder.select_bigint(
-                use_collateral_as_source_balance,
-                &tx_state.accounts[OWNER_ACCOUNT_ID].collateral,
-                &balance_bigint,
-            )
-        };
-
-        let extended_balance_delta_biguint = builder.mul_biguint_non_carry(
+        let extended_balance_delta = builder.mul_biguint_non_carry(
             &self.accepted_amount,
             &tx_state.assets[TX_ASSET_ID].extension_multiplier,
             BIG_U96_LIMBS,
         );
-        // Do addition in larger limb size to prevent overflow, and if overflow happens, reject deposit.
-        let extended_balance_delta = builder.biguint_to_bigint(&extended_balance_delta_biguint);
-        let balance_after =
-            builder.add_bigint_non_carry(&source_balance, &extended_balance_delta, BIG_U128_LIMBS);
+        let extended_balance_delta_big = builder.biguint_to_bigint(&extended_balance_delta);
+        let is_delta_zero = builder.is_zero_bigint(&extended_balance_delta_big);
 
-        // If sequencer accepted non-zero amount, balance after should not exceed the cap.
-        let (trim_success, _) = builder.try_trim_biguint(&balance_after.abs, BIG_U96_LIMBS);
-        builder.conditional_assert_true(self.success, trim_success);
-
-        let product_type = builder.select_constant(is_perps, PRODUCT_TYPE_PERPS, PRODUCT_TYPE_SPOT);
+        // Avoid failures from checks in apply_asset_delta when accepted amount is zero.
+        let apply_delta_flag = builder.and_not(self.success, is_delta_zero);
+        let _false = builder._false();
+        let is_account_unified = tx_state.accounts[OWNER_ACCOUNT_ID].is_unified_mode();
         AccountTarget::apply_asset_delta(
             builder,
-            self.success,
-            product_type,
-            &mut tx_state.accounts[OWNER_ACCOUNT_ID],
-            &mut tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID],
-            is_asset_used_as_margin,
-            &extended_balance_delta,
+            apply_delta_flag,
+            self.route_type,
+            tx_state.asset_indices[TX_ASSET_ID],
+            &mut tx_state.margined_asset[TX_ASSET_ID],
+            tx_state.is_asset_used_as_margin[OWNER_ACCOUNT_ID][TX_ASSET_ID],
+            &extended_balance_delta_big,
+            is_account_unified,
+            _false,
+            &mut tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID].balance,
+            &mut tx_state.account_margined_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID].balance,
             &mut tx_state.strategies[OWNER_ACCOUNT_ID],
+            false, // sequencer should accept zero if this operation is overflowed
         );
 
         // Handle account creation
