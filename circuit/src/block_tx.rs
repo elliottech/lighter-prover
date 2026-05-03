@@ -14,10 +14,8 @@ use crate::types::asset::{ASSET_SIZE, Asset, AssetTarget};
 use crate::types::change_pub_key::{
     CHANGE_PK_PUBLIC_INPUTS_LEN, ChangePubKeyMessage, ChangePubKeyMessageTarget,
 };
-use crate::types::constants::{
-    ASSET_LIST_SIZE, MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX,
-    ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE, POSITION_LIST_SIZE,
-};
+use crate::types::constants::*;
+use crate::types::margined_asset::{MARGINED_ASSET_SIZE, MarginedAsset, MarginedAssetTarget};
 use crate::types::market_details::{MARKET_DETAIL_SIZE, MarketDetails, MarketDetailsTarget};
 use crate::types::register::{REGISTER_INFO_SIZE, RegisterStack, RegisterStackTarget};
 use crate::types::system_config::{SYSTEM_CONFIG_SIZE, SystemConfig, SystemConfigTarget};
@@ -33,6 +31,7 @@ where
     pub old_system_config: SystemConfig,
     pub register_stack_before: RegisterStack,
     pub all_assets_before: [Asset; ASSET_LIST_SIZE],
+    pub all_margined_assets_before: [MarginedAsset; MARGINED_ASSET_LIST_SIZE],
     pub all_market_details_before: [MarketDetails; POSITION_LIST_SIZE],
 
     pub old_account_tree_root: HashOut<F>,
@@ -52,6 +51,7 @@ where
     pub old_system_config: SystemConfig,
     pub register_stack_before: RegisterStack,
     pub all_assets_before: [Asset; ASSET_LIST_SIZE],
+    pub all_margined_assets_before: [MarginedAsset; MARGINED_ASSET_LIST_SIZE],
     pub all_market_details_before: [MarketDetails; POSITION_LIST_SIZE],
 
     pub old_account_tree_root: HashOut<F>,
@@ -62,6 +62,7 @@ where
     pub new_system_config: SystemConfig,
     pub register_stack_after: RegisterStack,
     pub all_assets_after: [Asset; ASSET_LIST_SIZE],
+    pub all_margined_assets_after: [MarginedAsset; MARGINED_ASSET_LIST_SIZE],
     pub all_market_details_after: [MarketDetails; POSITION_LIST_SIZE],
 
     pub new_account_tree_root: HashOut<F>,
@@ -89,7 +90,11 @@ where
         let old_assets_start = 16;
         let old_assets_end = old_assets_start + ASSET_LIST_SIZE * ASSET_SIZE;
 
-        let old_market_details_start = old_assets_end;
+        let old_margined_assets_start = old_assets_end;
+        let old_margined_assets_end =
+            old_margined_assets_start + MARGINED_ASSET_LIST_SIZE * MARGINED_ASSET_SIZE;
+
+        let old_market_details_start = old_margined_assets_end;
         let old_market_details_end =
             old_market_details_start + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE;
 
@@ -102,7 +107,11 @@ where
         let assets_start = old_register_end + 16;
         let assets_end = assets_start + ASSET_LIST_SIZE * ASSET_SIZE;
 
-        let market_details_start = assets_end;
+        let margined_assets_start = assets_end;
+        let margined_assets_end =
+            margined_assets_start + MARGINED_ASSET_LIST_SIZE * MARGINED_ASSET_SIZE;
+
+        let market_details_start = margined_assets_end;
         let market_details_end = market_details_start + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE;
 
         let change_pub_key_message_start = market_details_end;
@@ -164,6 +173,16 @@ where
                         ..old_assets_start + (asset_index + 1) * ASSET_SIZE],
                 )
             }),
+            all_margined_assets_before: core::array::from_fn(|margined_asset_index| {
+                MarginedAsset::from_public_inputs(
+                    margined_asset_index as u8,
+                    &public_inputs[old_margined_assets_start
+                        + margined_asset_index * MARGINED_ASSET_SIZE
+                        ..old_margined_assets_start
+                            + (margined_asset_index + 1) * MARGINED_ASSET_SIZE],
+                )
+            }),
+
             all_market_details_before: core::array::from_fn(|market_index| {
                 MarketDetails::from_public_inputs(
                     market_index as u16,
@@ -211,6 +230,14 @@ where
                         ..assets_start + (asset_index + 1) * ASSET_SIZE],
                 )
             }),
+            all_margined_assets_after: core::array::from_fn(|margined_asset_index| {
+                MarginedAsset::from_public_inputs(
+                    margined_asset_index as u8,
+                    &public_inputs[margined_assets_start
+                        + margined_asset_index * MARGINED_ASSET_SIZE
+                        ..margined_assets_start + (margined_asset_index + 1) * MARGINED_ASSET_SIZE],
+                )
+            }),
             all_market_details_after: core::array::from_fn(|market_index| {
                 MarketDetails::from_public_inputs(
                     market_index as u16,
@@ -256,6 +283,7 @@ pub struct BlockTxWitnessTarget {
     pub old_system_config: SystemConfigTarget,
     pub register_stack_before: RegisterStackTarget,
     pub all_assets_before: [AssetTarget; ASSET_LIST_SIZE],
+    pub all_margined_assets_before: [MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
     pub all_market_details_before: [MarketDetailsTarget; POSITION_LIST_SIZE],
 
     pub old_account_tree_root: HashOutTarget,
@@ -266,6 +294,7 @@ pub struct BlockTxWitnessTarget {
     pub new_system_config: SystemConfigTarget,
     pub register_stack_after: RegisterStackTarget,
     pub all_assets_after: [AssetTarget; ASSET_LIST_SIZE],
+    pub all_margined_assets_after: [MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
     pub all_market_details_after: [MarketDetailsTarget; POSITION_LIST_SIZE],
 
     pub new_account_tree_root: HashOutTarget,
@@ -291,7 +320,11 @@ impl BlockTxWitnessTarget {
         let old_assets_start = 16;
         let old_assets_end = old_assets_start + ASSET_LIST_SIZE * ASSET_SIZE;
 
-        let old_market_details_start = old_assets_end;
+        let old_margined_assets_start = old_assets_end;
+        let old_margined_assets_end =
+            old_margined_assets_start + MARGINED_ASSET_LIST_SIZE * MARGINED_ASSET_SIZE;
+
+        let old_market_details_start = old_margined_assets_end;
         let old_market_details_end =
             old_market_details_start + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE;
 
@@ -304,7 +337,11 @@ impl BlockTxWitnessTarget {
         let assets_start = old_register_end + 16;
         let assets_end = assets_start + ASSET_LIST_SIZE * ASSET_SIZE;
 
-        let market_details_start = assets_end;
+        let margined_assets_start = assets_end;
+        let margined_assets_end =
+            margined_assets_start + MARGINED_ASSET_LIST_SIZE * MARGINED_ASSET_SIZE;
+
+        let market_details_start = margined_assets_end;
         let market_details_end = market_details_start + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE;
 
         let change_pub_key_message_start = market_details_end;
@@ -351,6 +388,13 @@ impl BlockTxWitnessTarget {
                         ..old_assets_start + (asset_index + 1) * ASSET_SIZE],
                 )
             }),
+            all_margined_assets_before: core::array::from_fn(|margined_asset_index| {
+                MarginedAssetTarget::from_public_inputs(
+                    &pis[old_margined_assets_start + margined_asset_index * MARGINED_ASSET_SIZE
+                        ..old_margined_assets_start
+                            + (margined_asset_index + 1) * MARGINED_ASSET_SIZE],
+                )
+            }),
             all_market_details_before: core::array::from_fn(|market_index| {
                 MarketDetailsTarget::from_public_inputs(
                     pis[old_market_details_start + market_index * MARKET_DETAIL_SIZE
@@ -383,6 +427,12 @@ impl BlockTxWitnessTarget {
                 AssetTarget::from_public_inputs(
                     &pis[assets_start + asset_index * ASSET_SIZE
                         ..assets_start + (asset_index + 1) * ASSET_SIZE],
+                )
+            }),
+            all_margined_assets_after: core::array::from_fn(|margined_asset_index| {
+                MarginedAssetTarget::from_public_inputs(
+                    &pis[margined_assets_start + margined_asset_index * MARGINED_ASSET_SIZE
+                        ..margined_assets_start + (margined_asset_index + 1) * MARGINED_ASSET_SIZE],
                 )
             }),
             all_market_details_after: core::array::from_fn(|market_index| {

@@ -9,7 +9,6 @@ use crate::bigint::bigint::{BigIntTarget, CircuitBuilderBigInt, SignTarget};
 use crate::bigint::biguint::{BigUintTarget, CircuitBuilderBiguint};
 use crate::bigint::comparison::CircuitBuilderBiguintSubtractiveComparison;
 use crate::bigint::div_rem::CircuitBuilderBiguintDivRem;
-use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::types::account::AccountTarget;
 use crate::types::account_asset::AccountAssetTarget;
 use crate::types::account_position::AccountPositionTarget;
@@ -17,6 +16,8 @@ use crate::types::config::{
     BIG_U64_LIMBS, BIG_U96_LIMBS, BIG_U128_LIMBS, BIGU16_U64_LIMBS, Builder,
 };
 use crate::types::constants::*;
+use crate::types::margined_asset::MarginedAssetTarget;
+use crate::types::market::MarketTarget;
 use crate::types::market_details::MarketDetailsTarget;
 use crate::types::risk_info::RiskParametersTarget;
 use crate::uint::u32::gadgets::arithmetic_u32::CircuitBuilderU32;
@@ -55,6 +56,46 @@ pub fn get_funding_delta_for_position_and_market(
     }
 }
 
+pub fn get_asset_zero_price(
+    builder: &mut Builder,
+    order_book: &MarketTarget,
+    margined_asset: &MarginedAssetTarget,
+) -> Target {
+    let size_extension_multiplier = builder.target_to_biguint(order_book.size_extension_multiplier);
+    let quote_extension_multiplier =
+        builder.target_to_biguint(order_book.quote_extension_multiplier);
+    let index_price_divider = builder.target_to_biguint(margined_asset.index_price_divider);
+    let index_price = builder.target_to_biguint_single_limb_unsafe(margined_asset.index_price);
+    let liquidation_factor =
+        builder.target_to_biguint_single_limb_unsafe(margined_asset.liquidation_factor);
+    let asset_margin_tick_big = builder.constant_biguint(&BigUint::from(ASSET_MARGIN_TICK));
+
+    let multiplier =
+        builder.mul_biguint_non_carry(&size_extension_multiplier, &index_price, BIG_U96_LIMBS);
+    let divider = builder.mul_biguint_non_carry(
+        &quote_extension_multiplier,
+        &index_price_divider,
+        BIG_U128_LIMBS,
+    );
+
+    let numerator = builder.mul_biguint_non_carry(&multiplier, &liquidation_factor, BIG_U128_LIMBS);
+    let denominator =
+        builder.mul_biguint_non_carry(&divider, &asset_margin_tick_big, BIG_U128_LIMBS);
+
+    let zero_price_big = builder.ceil_div_biguint(&numerator, &denominator);
+
+    let max_order_price_big =
+        builder.constant_biguint(&BigUint::from_u64(MAX_ORDER_PRICE).unwrap());
+    let should_trim = builder.is_gt_biguint(&zero_price_big, &max_order_price_big);
+
+    let zero_price = builder
+        .select_biguint(should_trim, &max_order_price_big, &zero_price_big)
+        .limbs[0]
+        .0;
+    let is_zero_price_zero = builder.is_zero(zero_price);
+    builder.add(zero_price, is_zero_price_zero.target)
+}
+
 #[allow(non_snake_case)]
 pub fn get_position_zero_price(
     builder: &mut Builder,
@@ -86,13 +127,13 @@ pub fn get_position_zero_price(
 
     let B = builder.mul_biguint_non_carry(
         &mark_price_times_margin_fraction,
-        &risk_info.total_account_value.abs,
+        &risk_info.total_account_liquidation_threshold.abs,
         BIG_U128_LIMBS,
     );
     let B = BigIntTarget {
         abs: B,
         sign: SignTarget::new_unsafe(builder.mul_many([
-            risk_info.total_account_value.sign.target,
+            risk_info.total_account_liquidation_threshold.sign.target,
             position.position.sign.target,
         ])),
     };
@@ -175,12 +216,12 @@ pub fn get_position_zero_quote(
         builder.mul_biguint(&notional_value, &maintenance_margin_fraction);
     let B = builder.mul_biguint(
         &notional_times_margin_fraction,
-        &risk_info.total_account_value.abs,
+        &risk_info.total_account_liquidation_threshold.abs,
     );
     let B = BigIntTarget {
         abs: B,
         sign: SignTarget::new_unsafe(builder.mul_many([
-            risk_info.total_account_value.sign.target,
+            risk_info.total_account_liquidation_threshold.sign.target,
             position.position.sign.target,
         ])),
     };
@@ -208,164 +249,151 @@ pub fn get_position_zero_quote(
     }
 }
 
-// Returns the balance of the asset in context of product type.
-pub fn get_asset_balance(
-    builder: &mut Builder,
-    product_type: Target,
-    is_account_unified: BoolTarget,
-    collateral: &BigIntTarget,
-    account_asset: &AccountAssetTarget,
-    is_asset_used_as_margin: BoolTarget,
-) -> BigIntTarget {
-    let asset_balance = builder.biguint_to_bigint(&account_asset.balance);
-
-    let is_spot = BoolTarget::new_unsafe(product_type);
-    let is_perps = builder.not(is_spot);
-
-    let is_unified_and_margin = builder.and(is_account_unified, is_asset_used_as_margin);
-    let is_simple_and_perps = builder.and_not(is_perps, is_account_unified);
-    let is_collateral = builder.or(is_unified_and_margin, is_simple_and_perps);
-
-    builder.select_bigint(is_collateral, collateral, &asset_balance)
-}
-
-// Returns the balance of the asset in context of product type, which is constant at circuit generation time.
-pub fn get_asset_balance_const(
-    builder: &mut Builder,
-    product_type: u64,
-    account: &AccountTarget,
-    account_asset: &AccountAssetTarget,
-    is_asset_used_as_margin: BoolTarget,
-) -> BigIntTarget {
-    if product_type == PRODUCT_TYPE_PERPS {
-        account.collateral.clone()
-    } else {
-        let is_account_isolated = builder.is_equal_constant(
-            account.account_trading_mode,
-            ACCOUNT_ACCOUNT_TRADING_MODE_SIMPLE as u64,
-        );
-        let is_account_unified = builder.not(is_account_isolated);
-
-        let is_unified_and_margin = builder.and(is_account_unified, is_asset_used_as_margin);
-
-        let asset_balance = builder.biguint_to_bigint(&account_asset.balance);
-
-        builder.select_bigint(is_unified_and_margin, &account.collateral, &asset_balance)
-    }
-}
-
-// Returns the available balance of the asset in context of product type, which is constant at circuit generation time.
-pub fn get_available_asset_balance_const(
-    builder: &mut Builder,
-    product_type: u64,
-    account: &AccountTarget,
-    account_asset: &AccountAssetTarget,
-    is_asset_used_as_margin: BoolTarget,
-    risk_info: &RiskParametersTarget,
-) -> BigUintTarget {
-    let zero_big = builder.zero_biguint();
-
-    let is_account_isolated = builder.is_equal_constant(
-        account.account_trading_mode,
-        ACCOUNT_ACCOUNT_TRADING_MODE_SIMPLE as u64,
-    );
-    let is_account_unified = builder.not(is_account_isolated);
-
-    let is_unified_and_not_margin = builder.and_not(is_account_unified, is_asset_used_as_margin);
-
-    let available_cross_collateral = get_available_collateral(builder, risk_info);
-
-    let return_available_asset_balance = builder.or(is_account_isolated, is_unified_and_not_margin);
-
-    let (available_cross_collateral_minus_locked, borrow) =
-        builder.try_sub_biguint(&available_cross_collateral, &account_asset.locked_balance);
-    let available_cross_collateral_minus_locked = builder.select_biguint(
-        BoolTarget::new_unsafe(borrow.0),
-        &zero_big,
-        &available_cross_collateral_minus_locked,
-    );
-
-    let available_cross_collateral = builder.select_biguint(
-        is_account_unified,
-        &available_cross_collateral_minus_locked,
-        &available_cross_collateral,
-    );
-
-    if product_type == PRODUCT_TYPE_PERPS {
-        available_cross_collateral
-    } else {
-        let available_asset_balance = account_asset.get_available_balance(builder);
-
-        builder.select_biguint(
-            return_available_asset_balance,
-            &available_asset_balance,
-            &available_cross_collateral,
-        )
-    }
-}
-
 // Returns the available balance of the asset in context of product type
 pub fn get_available_asset_balance(
     builder: &mut Builder,
     product_type: Target,
+    asset_index: Target,
     account: &AccountTarget,
     account_asset: &AccountAssetTarget,
     is_asset_used_as_margin: BoolTarget,
     risk_info: &RiskParametersTarget,
+    margin_asset: &MarginedAssetTarget,
+    margin_balance: &BigIntTarget,
 ) -> BigUintTarget {
-    let zero_big = builder.zero_biguint();
-
     let is_product_spot = BoolTarget::new_unsafe(product_type);
+    let is_product_perps = builder.not(is_product_spot);
     let is_account_unified = account.is_unified_mode();
-    let is_not_margin = builder.not(is_asset_used_as_margin);
 
-    // spot = (unified && 'margin) || ('unified && spot)
-    let return_available_asset_balance =
-        builder.select_bool(is_account_unified, is_not_margin, is_product_spot);
-
+    let available_margin_balance = get_available_margin_balance(
+        builder,
+        asset_index,
+        risk_info,
+        margin_asset,
+        margin_balance,
+    );
     let available_asset_balance = account_asset.get_available_balance(builder);
-    let available_cross_collateral = {
-        let available_cross_collateral = get_available_collateral(builder, risk_info);
-        let locked_balance_delta =
-            builder.select_biguint(is_account_unified, &account_asset.locked_balance, &zero_big);
-        let (result, borrow) =
-            builder.try_sub_biguint(&available_cross_collateral, &locked_balance_delta);
-        builder.select_biguint(BoolTarget::new_unsafe(borrow.0), &zero_big, &result)
-    };
 
-    builder.select_biguint(
-        return_available_asset_balance,
+    let result_if_simple = builder.select_biguint(
+        is_product_spot,
         &available_asset_balance,
-        &available_cross_collateral,
-    )
+        &available_margin_balance,
+    );
+
+    let mut result_if_unified_margin = available_margin_balance.clone();
+    let asset_balance = builder.mul_biguint_by_bool(&account_asset.balance, is_product_spot);
+    result_if_unified_margin =
+        builder.add_biguint_non_carry(&result_if_unified_margin, &asset_balance, BIG_U96_LIMBS);
+
+    let locked_balance = account_asset.locked_balance.clone();
+    let balance = builder.mul_biguint_by_bool(&account_asset.balance, is_product_perps);
+    // For spot, we should subtract the locked balance
+    // For perps, we should subtract the locked balance from margin side.
+    let (excess_amount, borrow) = builder.try_sub_biguint(&locked_balance, &balance);
+    let success = builder.not(BoolTarget::new_unsafe(borrow.0));
+    let excess_amount = builder.mul_biguint_by_bool(&excess_amount, success);
+    // If borrow is zero, the subtract `excess_amount` from `result_if_unified_margin`
+    let (result, borrow) = builder.try_sub_biguint(&result_if_unified_margin, &excess_amount);
+    let success = builder.not(BoolTarget::new_unsafe(borrow.0));
+    result_if_unified_margin = builder.mul_biguint_by_bool(&result, success);
+
+    let result_if_unified = builder.select_biguint(
+        is_asset_used_as_margin,
+        &result_if_unified_margin,
+        &available_asset_balance,
+    );
+
+    builder.select_biguint(is_account_unified, &result_if_unified, &result_if_simple)
 }
 
-pub fn get_available_collateral(
+pub fn get_available_usdc_collateral(
     builder: &mut Builder,
     risk_info: &RiskParametersTarget,
 ) -> BigUintTarget {
     let neg_one = builder.neg_one();
 
     let is_healthy = risk_info.is_healthy(builder);
-    let (mut available_collateral, borrow) = builder.try_sub_biguint(
+    let (mut available_margin_in_usdc, borrow) = builder.try_sub_biguint(
         &risk_info.total_account_value.abs,
         &risk_info.initial_margin_requirement,
     );
     builder.conditional_assert_zero_u32(is_healthy, borrow);
 
-    available_collateral = builder.mul_biguint_by_bool(&available_collateral, is_healthy);
+    available_margin_in_usdc = builder.mul_biguint_by_bool(&available_margin_in_usdc, is_healthy);
 
-    let collateral_with_funding = risk_info.collateral_with_funding.clone();
+    let collateral_with_funding = risk_info.usdc_collateral_with_funding.clone();
     let is_collateral_with_funding_non_negative =
         builder.is_not_equal(collateral_with_funding.sign.target, neg_one);
 
-    available_collateral = builder.mul_biguint_by_bool(
-        &available_collateral,
+    available_margin_in_usdc = builder.mul_biguint_by_bool(
+        &available_margin_in_usdc,
         is_collateral_with_funding_non_negative,
     );
 
-    // If collateral_with_funding is negative, then available_collateral is zero. So minimum is zero
-    builder.min_biguint(&available_collateral, &collateral_with_funding.abs)
+    // If collateral_with_funding is negative, then available_margin_in_usdc is zero. So minimum is zero
+    builder.min_biguint(&available_margin_in_usdc, &collateral_with_funding.abs)
+}
+
+pub fn get_available_margin_balance(
+    builder: &mut Builder,
+    asset_index: Target,
+    risk_info: &RiskParametersTarget,
+    margin_asset: &MarginedAssetTarget,
+    margin_balance: &BigIntTarget,
+) -> BigUintTarget {
+    let neg_one = builder.neg_one();
+
+    let is_asset_usdc = builder.is_equal_constant(asset_index, USDC_ASSET_INDEX);
+
+    let is_healthy = risk_info.is_healthy(builder);
+    let (mut available_margin_in_usdc, borrow) = builder.try_sub_biguint(
+        &risk_info.total_account_value.abs,
+        &risk_info.initial_margin_requirement,
+    );
+    builder.conditional_assert_zero_u32(is_healthy, borrow);
+
+    available_margin_in_usdc = builder.mul_biguint_by_bool(&available_margin_in_usdc, is_healthy);
+
+    let margin_balance_non_negative = builder.is_not_equal(margin_balance.sign.target, neg_one);
+
+    available_margin_in_usdc =
+        builder.mul_biguint_by_bool(&available_margin_in_usdc, margin_balance_non_negative);
+
+    let asset_index_price = margin_asset.index_price;
+    let is_asset_index_price_is_not_zero = builder.is_not_zero(asset_index_price);
+
+    available_margin_in_usdc =
+        builder.mul_biguint_by_bool(&available_margin_in_usdc, is_asset_index_price_is_not_zero);
+
+    let index_price_divider_big = builder.target_to_biguint(margin_asset.index_price_divider);
+    let asset_margin_tick = builder.constant_biguint(&BigUint::from(ASSET_MARGIN_TICK));
+    let multiplier =
+        builder.mul_biguint_non_carry(&index_price_divider_big, &asset_margin_tick, BIG_U96_LIMBS);
+    let asset_index_price_big = builder.target_to_biguint(asset_index_price);
+    let loan_to_value_big =
+        builder.target_to_biguint_single_limb_unsafe(margin_asset.loan_to_value);
+    let divider =
+        builder.mul_biguint_non_carry(&asset_index_price_big, &loan_to_value_big, BIG_U96_LIMBS);
+    let mut available_margin_native =
+        builder.mul_biguint_non_carry(&available_margin_in_usdc, &multiplier, BIG_U128_LIMBS);
+    available_margin_native = builder.div_biguint(&available_margin_native, &divider);
+    available_margin_native = builder.trim_biguint(&available_margin_native, BIG_U96_LIMBS);
+
+    let result_non_usdc = builder.min_biguint(&available_margin_native, &margin_balance.abs);
+
+    let collateral_with_funding = risk_info.usdc_collateral_with_funding.clone();
+    let is_collateral_with_funding_non_negative =
+        builder.is_not_equal(collateral_with_funding.sign.target, neg_one);
+
+    available_margin_in_usdc = builder.mul_biguint_by_bool(
+        &available_margin_in_usdc,
+        is_collateral_with_funding_non_negative,
+    );
+
+    // If collateral_with_funding is negative, then available_margin_in_usdc is zero. So minimum is zero
+    let result_usdc = builder.min_biguint(&available_margin_in_usdc, &collateral_with_funding.abs);
+
+    builder.select_biguint(is_asset_usdc, &result_usdc, &result_non_usdc)
 }
 
 pub fn get_shares_asset_value_for_staking_pool(
@@ -439,7 +467,7 @@ pub fn get_available_shares_to_burn_for_public_pool(
     risk_info: &RiskParametersTarget,
     pool_account: &AccountTarget,
 ) -> Target {
-    let available_collateral = get_available_collateral(builder, risk_info);
+    let available_collateral = get_available_usdc_collateral(builder, risk_info);
     let big_total_shares = builder.target_to_biguint(pool_account.public_pool_info.total_shares);
     let available_collateral_mul_total_shares =
         builder.mul_biguint(&available_collateral, &big_total_shares);

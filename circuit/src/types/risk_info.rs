@@ -1,25 +1,28 @@
 // Copyright (c) Elliot Technologies, Inc.
 // SPDX-License-Identifier: BUSL-1.1
 
+use itertools::Itertools;
 use num::BigUint;
 use plonky2::iop::target::{BoolTarget, Target};
 
 use super::account::AccountTarget;
 use super::account_position::{AccountPositionTarget, get_position_unrealized_pnl};
 use super::config::{BIG_U96_LIMBS, Builder};
-use super::constants::{
-    BANKRUPTCY, MARGIN_FRACTION_MULTIPLIER, POSITION_LIST_SIZE, USDC_TO_COLLATERAL_MULTIPLIER,
-};
+use super::constants::*;
 use super::market_details::{MarketDetailsTarget, select_market_details};
 use crate::bigint::big_u16::{CircuitBuilderBigIntU16, CircuitBuilderBiguint16};
 use crate::bigint::bigint::{BigIntTarget, CircuitBuilderBigInt, SignTarget};
 use crate::bigint::biguint::{BigUintTarget, CircuitBuilderBiguint};
 use crate::bigint::comparison::CircuitBuilderBiguintSubtractiveComparison;
+use crate::bigint::div_rem::CircuitBuilderBiguintDivRem;
 use crate::bigint::unsafe_big::{CircuitBuilderUnsafeBig, UnsafeBigTarget};
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::circuit_logger::CircuitBuilderLogging;
 use crate::signed::signed_target::CircuitBuilderSigned;
-use crate::types::config::{BIG_U64_LIMBS, BIGU16_U112_LIMBS};
+use crate::types::account_margined_asset::AccountMarginedAssetTarget;
+use crate::types::asset::is_universal_asset;
+use crate::types::config::{BIG_U64_LIMBS, BIG_U128_LIMBS, BIG_U160_LIMBS, BIGU16_U112_LIMBS};
+use crate::types::margined_asset::MarginedAssetTarget;
 use crate::uint::u32::gadgets::arithmetic_u32::{CircuitBuilderU32, U32Target};
 use crate::utils::CircuitBuilderUtils;
 
@@ -30,12 +33,13 @@ pub struct RiskInfoTarget {
     // If current market is isolated, this will be the risk parameters for the isolated market, otherwise it will be the same as cross_risk_parameters
     pub current_risk_parameters: RiskParametersTarget,
 }
-
 #[derive(Debug, Clone, Default)]
 pub struct RiskParametersTarget {
-    pub collateral: BigIntTarget,              // 96 bits
-    pub collateral_with_funding: BigIntTarget, // 96 bits
-    pub total_account_value: BigIntTarget,     // 96 bits
+    pub usdc_collateral: BigIntTarget,                     // 96 bits
+    pub usdc_collateral_with_funding: BigIntTarget,        // 96 bits
+    pub usdc_portfolio_value: BigIntTarget,                // 96 bits
+    pub total_account_value: BigIntTarget,                 // 96 bits
+    pub total_account_liquidation_threshold: BigIntTarget, // 96 bits
     pub initial_margin_requirement: BigUintTarget,
     pub maintenance_margin_requirement: BigUintTarget,
     pub close_out_margin_requirement: BigUintTarget,
@@ -48,11 +52,50 @@ impl RiskInfoTarget {
         position: &AccountPositionTarget,
         current_market_details: &MarketDetailsTarget,
         all_market_details: &[MarketDetailsTarget; POSITION_LIST_SIZE],
+        all_margined_assets: &[MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
         strategy_index: Target, // Assumed not to be nil strategy index
     ) -> Self {
-        let usdc_to_collateral_multiplier =
-            BigUintTarget::from(builder.constant_u32(USDC_TO_COLLATERAL_MULTIPLIER));
+        let cross_risk_parameters = RiskParametersTarget::new_cross(
+            builder,
+            account,
+            all_market_details,
+            all_margined_assets,
+            strategy_index,
+        );
+        let isolated_risk_parameters = RiskParametersTarget::new_isolated(
+            builder,
+            strategy_index,
+            position,
+            current_market_details,
+        );
 
+        let current_risk_parameters = RiskParametersTarget::select(
+            builder,
+            position.is_isolated_unsafe(),
+            &isolated_risk_parameters,
+            &cross_risk_parameters,
+        );
+
+        Self {
+            cross_risk_parameters,
+            current_risk_parameters,
+        }
+
+        // Self {
+        //     cross_risk_parameters: RiskParametersTarget::default(),
+        //     current_risk_parameters: RiskParametersTarget::default(),
+        // }
+    }
+}
+
+impl RiskParametersTarget {
+    fn new_cross(
+        builder: &mut Builder,
+        account: &AccountTarget,
+        all_market_details: &[MarketDetailsTarget; POSITION_LIST_SIZE],
+        all_margined_assets: &[MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
+        strategy_index: Target,
+    ) -> Self {
         let (position_base_notional_values, cross_position_base_notional_value) =
             get_cross_position_base_notional_values(
                 builder,
@@ -60,7 +103,80 @@ impl RiskInfoTarget {
                 all_market_details,
                 strategy_index,
             );
+        let usdc_to_collateral_multiplier =
+            BigUintTarget::from(builder.constant_u32(USDC_TO_COLLATERAL_MULTIPLIER));
+        let cross_position_notional_value = builder.mul_bigint_with_biguint_non_carry(
+            &cross_position_base_notional_value,
+            &usdc_to_collateral_multiplier,
+            BIG_U96_LIMBS,
+        );
+        let cross_funding = get_cross_unrealized_funding(
+            builder,
+            &account.positions,
+            all_market_details,
+            strategy_index,
+        );
+        let cross_position_notional_with_funding = builder.add_bigint_non_carry(
+            &cross_position_notional_value,
+            &cross_funding,
+            BIG_U96_LIMBS,
+        );
+        let cross_usdc_collateral =
+            account.get_margined_asset_balance_const(USDC_MARGIN_ASSET_INDEX);
+        let usdc_portfolio_value = builder.add_bigint_non_carry(
+            &cross_position_notional_with_funding,
+            &cross_usdc_collateral,
+            BIG_U96_LIMBS,
+        );
 
+        let (total_asset_value, total_asset_liquidation_threshold) =
+            get_base_total_asset_values(builder, &account.margined_assets, all_margined_assets);
+
+        Self {
+            usdc_collateral_with_funding: builder.add_bigint_non_carry(
+                &cross_usdc_collateral,
+                &cross_funding,
+                BIG_U96_LIMBS,
+            ),
+            usdc_collateral: cross_usdc_collateral,
+            total_account_value: builder.add_bigint_non_carry(
+                &total_asset_value,
+                &usdc_portfolio_value,
+                BIG_U96_LIMBS,
+            ),
+            total_account_liquidation_threshold: builder.add_bigint_non_carry(
+                &total_asset_liquidation_threshold,
+                &usdc_portfolio_value,
+                BIG_U96_LIMBS,
+            ),
+            usdc_portfolio_value,
+            initial_margin_requirement: get_initial_margin_requirement(
+                builder,
+                &account.positions,
+                &position_base_notional_values,
+                all_market_details,
+            ),
+            maintenance_margin_requirement: get_maintenance_margin_requirement(
+                builder,
+                &account.positions,
+                &position_base_notional_values,
+                all_market_details,
+            ),
+            close_out_margin_requirement: get_close_out_margin_requirement(
+                builder,
+                &account.positions,
+                &position_base_notional_values,
+                all_market_details,
+            ),
+        }
+    }
+
+    fn new_isolated(
+        builder: &mut Builder,
+        strategy_index: Target,
+        position: &AccountPositionTarget,
+        current_market_details: &MarketDetailsTarget,
+    ) -> Self {
         let (isolated_position_notional, isolated_position_base_notinal_value) = {
             let zero = builder.zero();
             let one = builder.one();
@@ -89,36 +205,17 @@ impl RiskInfoTarget {
             )
         };
 
-        let cross_position_notional_value = builder.mul_bigint_with_biguint_non_carry(
-            &cross_position_base_notional_value,
-            &usdc_to_collateral_multiplier,
-            BIG_U96_LIMBS,
-        );
-
+        let usdc_to_collateral_multiplier =
+            BigUintTarget::from(builder.constant_u32(USDC_TO_COLLATERAL_MULTIPLIER));
         let isolated_position_notional_value = builder.mul_bigint_with_biguint_non_carry(
             &isolated_position_base_notinal_value,
             &usdc_to_collateral_multiplier,
             BIG_U96_LIMBS,
         );
-
-        let cross_funding = get_cross_unrealized_funding(
-            builder,
-            &account.positions,
-            all_market_details,
-            strategy_index,
-        );
         let isolated_funding =
             position_unrealized_funding(builder, position, current_market_details);
 
-        let cross_collateral = account.collateral.clone();
-        let cross_collateral_with_funding =
-            builder.add_bigint_non_carry(&cross_collateral, &cross_funding, BIG_U96_LIMBS);
-        let cross_total_account_value = builder.add_bigint_non_carry(
-            &cross_collateral_with_funding,
-            &cross_position_notional_value,
-            BIG_U96_LIMBS,
-        );
-
+        // For isolated margin, we only have USDC as a margin.
         let isolated_collateral = position.allocated_margin.clone();
         let isolated_collateral_with_funding =
             builder.add_bigint_non_carry(&isolated_collateral, &isolated_funding, BIG_U96_LIMBS);
@@ -128,84 +225,48 @@ impl RiskInfoTarget {
             BIG_U96_LIMBS,
         );
 
-        let cross_initial_margin_requirement = get_initial_margin_requirement(
-            builder,
-            &account.positions,
-            &position_base_notional_values,
-            all_market_details,
-        );
-
-        let cross_maintenance_margin_requirement = get_maintenance_margin_requirement(
-            builder,
-            &account.positions,
-            &position_base_notional_values,
-            all_market_details,
-        );
-
-        let cross_close_out_margin_requirement = get_close_out_margin_requirement(
-            builder,
-            &account.positions,
-            &position_base_notional_values,
-            all_market_details,
-        );
-
-        let cross_risk_parameters = RiskParametersTarget {
-            collateral: cross_collateral,
-            total_account_value: cross_total_account_value,
-            collateral_with_funding: cross_collateral_with_funding,
-            initial_margin_requirement: cross_initial_margin_requirement,
-            maintenance_margin_requirement: cross_maintenance_margin_requirement,
-            close_out_margin_requirement: cross_close_out_margin_requirement,
-        };
-
         let (
-            isolated_initial_margin_requirement,
-            isolated_maintenance_margin_requirement,
-            isolated_close_out_margin_requirement,
+            initial_margin_requirement,
+            maintenance_margin_requirement,
+            close_out_margin_requirement,
         ) = position_margin_requirements(
             builder,
             position,
             &isolated_position_notional,
             current_market_details,
         );
-        let isolated_risk_parameters = RiskParametersTarget {
-            collateral: isolated_collateral,
-            total_account_value: isolated_total_account_value,
-            collateral_with_funding: isolated_collateral_with_funding,
-            initial_margin_requirement: isolated_initial_margin_requirement,
-            maintenance_margin_requirement: isolated_maintenance_margin_requirement,
-            close_out_margin_requirement: isolated_close_out_margin_requirement,
-        };
 
-        let current_risk_parameters = RiskParametersTarget::select(
-            builder,
-            position.is_isolated_unsafe(),
-            &isolated_risk_parameters,
-            &cross_risk_parameters,
-        );
+        Self {
+            usdc_collateral: isolated_collateral,
+            usdc_collateral_with_funding: isolated_collateral_with_funding,
+            total_account_value: isolated_total_account_value.clone(),
 
-        RiskInfoTarget {
-            cross_risk_parameters,
-            current_risk_parameters,
+            usdc_portfolio_value: isolated_total_account_value.clone(),
+            total_account_liquidation_threshold: isolated_total_account_value.clone(),
+
+            initial_margin_requirement,
+            maintenance_margin_requirement,
+            close_out_margin_requirement,
         }
-
-        // RiskInfoTarget {
-        //     cross_risk_parameters: RiskParametersTarget::default(),
-        //     current_risk_parameters: RiskParametersTarget::default(),
-        // }
     }
-}
 
-impl RiskParametersTarget {
     pub fn print(&self, builder: &mut Builder, tag: &str) {
-        builder.println_bigint(&self.collateral, &format!("{} collateral", tag));
+        builder.println_bigint(&self.usdc_collateral, &format!("{} collateral", tag));
         builder.println_bigint(
-            &self.collateral_with_funding,
+            &self.usdc_collateral_with_funding,
             &format!("{} collateral with funding", tag),
         );
         builder.println_bigint(
             &self.total_account_value,
             &format!("{} total account value", tag),
+        );
+        builder.println_bigint(
+            &self.usdc_portfolio_value,
+            &format!("{} total portfolio value", tag),
+        );
+        builder.println_bigint(
+            &self.total_account_liquidation_threshold,
+            &format!("{} total account liquidation value", tag),
         );
         builder.println_biguint(
             &self.initial_margin_requirement,
@@ -224,18 +285,21 @@ impl RiskParametersTarget {
     pub fn get_health(&self, builder: &mut Builder) -> Target {
         let neg_one = builder.neg_one();
 
-        let is_tav_negative = builder.is_equal(self.total_account_value.sign.target, neg_one);
+        let is_tav_negative = builder.is_equal(
+            self.total_account_liquidation_threshold.sign.target,
+            neg_one,
+        );
 
         let initial_margin_gt = builder.is_lt_biguint(
             &self.total_account_value.abs,
             &self.initial_margin_requirement,
         );
         let maintenance_margin_gt = builder.is_lt_biguint(
-            &self.total_account_value.abs,
+            &self.total_account_liquidation_threshold.abs,
             &self.maintenance_margin_requirement,
         );
         let close_out_margin_gt = builder.is_lt_biguint(
-            &self.total_account_value.abs,
+            &self.total_account_liquidation_threshold.abs,
             &self.close_out_margin_requirement,
         );
 
@@ -262,29 +326,17 @@ impl RiskParametersTarget {
         builder.and(tav_is_not_negative, abs_tav_gte_initial_margin)
     }
 
-    /// Returns true if health < PRE_LIQUIDATION
-    pub fn is_not_in_liquidation(&self, builder: &mut Builder) -> BoolTarget {
-        let neg_one = builder.neg_one();
-        let tav_is_not_negative =
-            builder.is_not_equal(self.total_account_value.sign.target, neg_one);
-        let abs_tav_gte_maintenance_margin = builder.is_gte_biguint(
-            &self.total_account_value.abs,
-            &self.maintenance_margin_requirement,
-        );
-        builder.and(tav_is_not_negative, abs_tav_gte_maintenance_margin)
-    }
-
     fn is_health_improved(&self, builder: &mut Builder, new: &Self) -> BoolTarget {
         let left_side = builder.mul_bigint_with_biguint_non_carry(
-            &self.total_account_value,
+            &self.total_account_liquidation_threshold,
             &new.maintenance_margin_requirement,
-            self.total_account_value.abs.limbs.len()
+            self.total_account_liquidation_threshold.abs.limbs.len()
                 + new.maintenance_margin_requirement.limbs.len(),
         );
         let right_side = builder.mul_bigint_with_biguint_non_carry(
-            &new.total_account_value,
+            &new.total_account_liquidation_threshold,
             &self.maintenance_margin_requirement,
-            new.total_account_value.abs.limbs.len()
+            new.total_account_liquidation_threshold.abs.limbs.len()
                 + self.maintenance_margin_requirement.limbs.len(),
         );
 
@@ -293,7 +345,6 @@ impl RiskParametersTarget {
 
     pub fn is_valid_risk_change(&self, builder: &mut Builder, new: &Self) -> BoolTarget {
         // 1. If new account collateral is not within [-2^96, 2^96], return false
-
         // 2. If the account is below initial margin requirement, health should improve
         // 3. If the account is above initial margin, it should stay above initial margin requirement
 
@@ -310,15 +361,152 @@ impl RiskParametersTarget {
 
     pub fn is_in_liquidation(&self, builder: &mut Builder) -> BoolTarget {
         let neg_one = builder.neg_one();
-        let is_tav_negative = builder.is_equal(self.total_account_value.sign.target, neg_one);
+        let is_talt_negative = builder.is_equal(
+            self.total_account_liquidation_threshold.sign.target,
+            neg_one,
+        );
         let is_tav_abs_less_than_mmr = builder.is_lt_biguint(
-            &self.total_account_value.abs,
+            &self.total_account_liquidation_threshold.abs,
             &self.maintenance_margin_requirement,
         );
-        builder.or(is_tav_negative, is_tav_abs_less_than_mmr)
+        builder.or(is_talt_negative, is_tav_abs_less_than_mmr)
     }
 
-    pub fn update(
+    /// Caller must make sure asset is margin enabled (account is unified and margin is enabled; or asset is universal)
+    pub fn update_for_spot_trade(
+        &mut self,
+        builder: &mut Builder,
+        is_enabled: BoolTarget,
+        asset_index: Target,
+        margined_asset: &MarginedAssetTarget,
+        old_margin_balance: &BigIntTarget,
+        new_margin_balance: &BigIntTarget,
+    ) {
+        let is_asset_usdc = builder.is_equal_constant(asset_index, USDC_ASSET_INDEX);
+
+        // Handle USDC
+        {
+            let flag = builder.and(is_enabled, is_asset_usdc);
+
+            let delta = {
+                let delta = builder.sub_bigint(new_margin_balance, old_margin_balance);
+                builder.mul_bigint_by_bool(&delta, flag)
+            };
+
+            self.usdc_collateral =
+                builder.add_bigint_non_carry(&self.usdc_collateral, &delta, BIG_U96_LIMBS);
+            self.usdc_collateral_with_funding = builder.add_bigint_non_carry(
+                &self.usdc_collateral_with_funding,
+                &delta,
+                BIG_U96_LIMBS,
+            );
+            self.usdc_portfolio_value =
+                builder.add_bigint_non_carry(&self.usdc_portfolio_value, &delta, BIG_U96_LIMBS);
+            self.total_account_value =
+                builder.add_bigint_non_carry(&self.total_account_value, &delta, BIG_U96_LIMBS);
+            self.total_account_liquidation_threshold = builder.add_bigint_non_carry(
+                &self.total_account_liquidation_threshold,
+                &delta,
+                BIG_U96_LIMBS,
+            );
+        }
+
+        // Handle margin enabled non-universal assets
+        {
+            let flag = builder.and_not(is_enabled, is_asset_usdc);
+
+            let old_margin_balance = builder.mul_bigint_by_bool(old_margin_balance, flag);
+            let new_margin_balance = builder.mul_bigint_by_bool(new_margin_balance, flag);
+
+            let asset_index_price =
+                builder.target_to_biguint_single_limb_unsafe(margined_asset.index_price);
+            let asset_ltv_big =
+                builder.target_to_biguint_single_limb_unsafe(margined_asset.loan_to_value);
+            let asset_lt_big =
+                builder.target_to_biguint_single_limb_unsafe(margined_asset.liquidation_threshold);
+
+            let old_multiplier = builder.mul_bigint_with_biguint_non_carry(
+                &old_margin_balance,
+                &asset_index_price,
+                BIG_U128_LIMBS,
+            );
+            let old_multiplier_ltv = builder.mul_bigint_with_biguint_non_carry(
+                &old_multiplier,
+                &asset_ltv_big,
+                BIG_U160_LIMBS,
+            );
+            let old_multiplier_lt = builder.mul_bigint_with_biguint_non_carry(
+                &old_multiplier,
+                &asset_lt_big,
+                BIG_U160_LIMBS,
+            );
+
+            let new_multiplier = builder.mul_bigint_with_biguint_non_carry(
+                &new_margin_balance,
+                &asset_index_price,
+                BIG_U128_LIMBS,
+            );
+            let new_multiplier_ltv = builder.mul_bigint_with_biguint_non_carry(
+                &new_multiplier,
+                &asset_ltv_big,
+                BIG_U160_LIMBS,
+            );
+            let new_multiplier_lt = builder.mul_bigint_with_biguint_non_carry(
+                &new_multiplier,
+                &asset_lt_big,
+                BIG_U160_LIMBS,
+            );
+
+            let divider = {
+                let asset_margin_tick = builder.constant_biguint(&BigUint::from(ASSET_MARGIN_TICK));
+                let index_price_divider =
+                    builder.target_to_biguint(margined_asset.index_price_divider);
+                builder.mul_biguint_non_carry(
+                    &asset_margin_tick,
+                    &index_price_divider,
+                    BIG_U96_LIMBS,
+                )
+            };
+            let mut old_asset_ltv = builder.div_bigint_by_biguint(&old_multiplier_ltv, &divider);
+            let mut old_asset_lt = builder.div_bigint_by_biguint(&old_multiplier_lt, &divider);
+            let mut new_asset_ltv = builder.div_bigint_by_biguint(&new_multiplier_ltv, &divider);
+            let mut new_asset_lt = builder.div_bigint_by_biguint(&new_multiplier_lt, &divider);
+
+            {
+                let mut success: BoolTarget;
+                let mut success_assertions = vec![];
+                (success, old_asset_ltv.abs) =
+                    builder.try_trim_biguint(&old_asset_ltv.abs, BIG_U96_LIMBS);
+                success_assertions.push(success);
+                (success, old_asset_lt.abs) =
+                    builder.try_trim_biguint(&old_asset_lt.abs, BIG_U96_LIMBS);
+                success_assertions.push(success);
+                (success, new_asset_ltv.abs) =
+                    builder.try_trim_biguint(&new_asset_ltv.abs, BIG_U96_LIMBS);
+                success_assertions.push(success);
+                (success, new_asset_lt.abs) =
+                    builder.try_trim_biguint(&new_asset_lt.abs, BIG_U96_LIMBS);
+                success_assertions.push(success);
+                let all_success = builder.multi_and(&success_assertions);
+                builder.conditional_assert_true(is_enabled, all_success);
+            }
+
+            let tav_delta =
+                builder.sub_bigint_non_carry(&new_asset_ltv, &old_asset_ltv, BIG_U96_LIMBS);
+            self.total_account_value =
+                builder.add_bigint_non_carry(&self.total_account_value, &tav_delta, BIG_U96_LIMBS);
+
+            let talt_delta =
+                builder.sub_bigint_non_carry(&new_asset_lt, &old_asset_lt, BIG_U96_LIMBS);
+            self.total_account_liquidation_threshold = builder.add_bigint_non_carry(
+                &self.total_account_liquidation_threshold,
+                &talt_delta,
+                BIG_U96_LIMBS,
+            );
+        }
+    }
+
+    pub fn update_for_perps_trade(
         &self,
         builder: &mut Builder,
         collateral_delta: &BigIntTarget,
@@ -350,16 +538,26 @@ impl RiskParametersTarget {
 
         // Apply collateral delta
         let collateral =
-            builder.add_bigint_non_carry(&self.collateral, &collateral_delta, BIG_U96_LIMBS);
+            builder.add_bigint_non_carry(&self.usdc_collateral, &collateral_delta, BIG_U96_LIMBS);
         let collateral_with_funding = builder.add_bigint_non_carry(
-            &self.collateral_with_funding,
+            &self.usdc_collateral_with_funding,
             &collateral_delta,
             BIG_U96_LIMBS,
         );
 
         // Apply total account value delta
+        let mut usdc_portfolio_value = builder.add_bigint_non_carry(
+            &self.usdc_portfolio_value,
+            &collateral_delta,
+            BIG_U96_LIMBS,
+        );
         let mut total_account_value = builder.add_bigint_non_carry(
             &self.total_account_value,
+            &collateral_delta,
+            BIG_U96_LIMBS,
+        );
+        let mut total_account_liquidation_threshold = builder.add_bigint_non_carry(
+            &self.total_account_liquidation_threshold,
             &collateral_delta,
             BIG_U96_LIMBS,
         );
@@ -393,8 +591,18 @@ impl RiskParametersTarget {
             BIG_U96_LIMBS,
         );
 
+        usdc_portfolio_value = builder.add_bigint_non_carry(
+            &usdc_portfolio_value,
+            &total_account_value_delta,
+            BIG_U96_LIMBS,
+        );
         total_account_value = builder.add_bigint_non_carry(
             &total_account_value,
+            &total_account_value_delta,
+            BIG_U96_LIMBS,
+        );
+        total_account_liquidation_threshold = builder.add_bigint_non_carry(
+            &total_account_liquidation_threshold,
             &total_account_value_delta,
             BIG_U96_LIMBS,
         );
@@ -504,21 +712,31 @@ impl RiskParametersTarget {
         builder.conditional_assert_zero(is_enabled, sub_success.0);
 
         Self {
-            collateral,
+            usdc_collateral: collateral,
+            usdc_collateral_with_funding: collateral_with_funding,
+            usdc_portfolio_value,
             total_account_value,
+            total_account_liquidation_threshold,
             initial_margin_requirement,
             maintenance_margin_requirement,
             close_out_margin_requirement,
-            collateral_with_funding,
         }
     }
 
     pub fn select(builder: &mut Builder, flag: BoolTarget, a: &Self, b: &Self) -> Self {
-        let collateral = builder.select_bigint(flag, &a.collateral, &b.collateral);
-        let collateral_with_funding =
-            builder.select_bigint(flag, &a.collateral_with_funding, &b.collateral_with_funding);
+        let usdc_collateral = builder.select_bigint(flag, &a.usdc_collateral, &b.usdc_collateral);
+        let usdc_collateral_with_funding = builder.select_bigint(
+            flag,
+            &a.usdc_collateral_with_funding,
+            &b.usdc_collateral_with_funding,
+        );
         let total_account_value =
             builder.select_bigint(flag, &a.total_account_value, &b.total_account_value);
+        let total_account_liquidation_threshold = builder.select_bigint(
+            flag,
+            &a.total_account_liquidation_threshold,
+            &b.total_account_liquidation_threshold,
+        );
         let initial_margin_requirement = builder.select_biguint(
             flag,
             &a.initial_margin_requirement,
@@ -534,11 +752,15 @@ impl RiskParametersTarget {
             &a.close_out_margin_requirement,
             &b.close_out_margin_requirement,
         );
+        let usdc_portfolio_value =
+            builder.select_bigint(flag, &a.usdc_portfolio_value, &b.usdc_portfolio_value);
 
         Self {
-            collateral,
-            collateral_with_funding,
+            usdc_collateral,
+            usdc_collateral_with_funding,
+            usdc_portfolio_value,
             total_account_value,
+            total_account_liquidation_threshold,
             initial_margin_requirement,
             maintenance_margin_requirement,
             close_out_margin_requirement,
@@ -858,4 +1080,93 @@ fn get_close_out_margin_requirement(
     let cross_value = builder.unsafe_big32_to_biguint(&cross_value, BIG_U96_LIMBS);
 
     builder.mul_biguint_non_carry(&cross_value, &margin_fraction_multiplier, BIG_U96_LIMBS)
+}
+
+fn get_base_total_asset_values(
+    builder: &mut Builder,
+    account_margined_assets: &[AccountMarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
+    margined_assets: &[MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
+) -> (BigIntTarget, BigIntTarget) {
+    let asset_margin_tick = builder.constant_biguint(&BigUint::from(ASSET_MARGIN_TICK));
+
+    let mut total_account_asset_value = UnsafeBigTarget {
+        limbs: vec![builder.zero(); BIG_U96_LIMBS],
+    };
+    let mut total_account_liquidation_threshold = UnsafeBigTarget {
+        limbs: vec![builder.zero(); BIG_U96_LIMBS],
+    };
+
+    // Skip USDC
+    account_margined_assets
+        .iter()
+        .skip(1)
+        .zip_eq(margined_assets.iter().skip(1))
+        .for_each(|(account_asset_balance, margined_asset)| {
+            let is_universal_asset = is_universal_asset(builder, margined_asset.asset_index);
+            let is_not_universal_asset = builder.not(is_universal_asset);
+            let index_price = builder.mul_bool(is_not_universal_asset, margined_asset.index_price);
+            let index_price = builder.target_to_biguint(index_price);
+            let mut index_price_divider =
+                builder.target_to_biguint(margined_asset.index_price_divider);
+            index_price_divider = builder.mul_biguint_non_carry(
+                &index_price_divider,
+                &asset_margin_tick,
+                BIG_U96_LIMBS,
+            );
+
+            let loan_to_value =
+                builder.target_to_biguint_single_limb_unsafe(margined_asset.loan_to_value);
+            let liquidation_threshold =
+                builder.target_to_biguint_single_limb_unsafe(margined_asset.liquidation_threshold);
+
+            // Asset balance can be negative only for USDC and we this branch is not active for USDC, so using absolute value here is ok.
+            let balance_to_usdc = builder.mul_biguint_non_carry(
+                &index_price,
+                &account_asset_balance.balance.abs,
+                BIG_U96_LIMBS,
+            );
+
+            let balance_loan_to_value =
+                builder.mul_biguint_non_carry(&balance_to_usdc, &loan_to_value, BIG_U128_LIMBS);
+            let balance_liquidation_threshold = builder.mul_biguint_non_carry(
+                &balance_to_usdc,
+                &liquidation_threshold,
+                BIG_U128_LIMBS,
+            );
+
+            let normalized_balance_loan_to_value = {
+                let mut result = builder.div_biguint(&balance_loan_to_value, &index_price_divider);
+                let success: BoolTarget;
+                (success, result) = builder.try_trim_biguint(&result, BIG_U96_LIMBS);
+                builder.assert_true(success);
+                builder.unsafe_big_from_biguint(&result)
+            };
+            let normalized_balance_liquidation_threshold = {
+                let mut result =
+                    builder.div_biguint(&balance_liquidation_threshold, &index_price_divider);
+                let success: BoolTarget;
+                (success, result) = builder.try_trim_biguint(&result, BIG_U96_LIMBS);
+                builder.assert_true(success);
+                builder.unsafe_big_from_biguint(&result)
+            };
+
+            total_account_asset_value = builder.add_unsafe_big(
+                &total_account_asset_value,
+                &normalized_balance_loan_to_value,
+            );
+            total_account_liquidation_threshold = builder.add_unsafe_big(
+                &total_account_liquidation_threshold,
+                &normalized_balance_liquidation_threshold,
+            );
+        });
+
+    let total_account_asset_value =
+        builder.unsafe_big32_to_biguint(&total_account_asset_value, BIG_U96_LIMBS);
+    let total_account_liquidation_threshold =
+        builder.unsafe_big32_to_biguint(&total_account_liquidation_threshold, BIG_U96_LIMBS);
+
+    (
+        builder.biguint_to_bigint(&total_account_asset_value),
+        builder.biguint_to_bigint(&total_account_liquidation_threshold),
+    )
 }

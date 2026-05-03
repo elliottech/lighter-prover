@@ -155,18 +155,6 @@ impl Verify for L2CancelOrderTxTarget {
             tx_state.account_order.price,
             tx_state.order.price_index,
         );
-
-        let health = tx_state.risk_infos[OWNER_ACCOUNT_ID]
-            .current_risk_parameters
-            .get_health(builder);
-        let healthy = builder.constant_from_u8(HEALTHY);
-        let is_healthy = builder.is_equal(health, healthy);
-        let pre_liquidation = builder.constant_from_u8(PRE_LIQUIDATION);
-        let is_pre_liquidation = builder.is_equal(health, pre_liquidation);
-        let healthy_or_pre_liquidation = builder.or(is_healthy, is_pre_liquidation);
-        let is_perps = builder.is_equal_constant(tx_state.market.market_type, MARKET_TYPE_PERPS);
-        let health_check_flag = builder.and(is_enabled, is_perps);
-        builder.conditional_assert_true(health_check_flag, healthy_or_pre_liquidation);
     }
 }
 

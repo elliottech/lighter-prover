@@ -142,6 +142,12 @@ impl Verify for L1BurnSharesTxTarget {
             tx_state.accounts[SUB_ACCOUNT_ID].master_account_index,
         );
 
+        builder.conditional_assert_eq_constant(
+            self.is_enabled,
+            tx_state.asset_indices[USDC_BASE_ASSET_ID],
+            USDC_ASSET_INDEX,
+        );
+
         // Enforce min burn period for llp
         {
             let is_not_operator = builder.not(self.is_operator);
@@ -318,14 +324,15 @@ impl Verify for L1BurnSharesTxTarget {
         );
         self.big_collateral_amount = builder.biguint_to_bigint(&biguint_collateral_amount);
 
-        // Verify that the collateral after burning shares can fit 96 bits
-        let collateral_after_burn = builder.add_bigint_non_carry(
-            &tx_state.accounts[OWNER_ACCOUNT_ID].collateral,
+        // Verify that the usdc margin balance after burning shares can fit 96 bits
+        let usdc_margin_balance = builder.add_bigint_non_carry(
+            &tx_state.accounts[OWNER_ACCOUNT_ID]
+                .get_margined_asset_balance_const(USDC_MARGIN_ASSET_INDEX),
             &self.big_collateral_amount,
             BIG_U128_LIMBS,
         );
         let (is_valid_new_collateral, _) =
-            builder.try_trim_biguint(&collateral_after_burn.abs, BIG_U96_LIMBS);
+            builder.try_trim_biguint(&usdc_margin_balance.abs, BIG_U96_LIMBS);
         self.success = builder.and(self.success, is_valid_new_collateral);
     }
 }
@@ -339,6 +346,8 @@ impl Apply for L1BurnSharesTxTarget {
                 self.success,
                 &self.big_collateral_amount,
                 &mut tx_state.strategies[OWNER_ACCOUNT_ID],
+                &mut tx_state.account_margined_assets[OWNER_ACCOUNT_ID][USDC_MARGIN_ASSET_INDEX]
+                    .balance,
             );
 
             let neg_big_collateral_amount = builder.neg_bigint(&self.big_collateral_amount);
@@ -347,6 +356,8 @@ impl Apply for L1BurnSharesTxTarget {
                 self.success,
                 &neg_big_collateral_amount,
                 &mut tx_state.strategies[SUB_ACCOUNT_ID],
+                &mut tx_state.account_margined_assets[SUB_ACCOUNT_ID][USDC_MARGIN_ASSET_INDEX]
+                    .balance,
             );
 
             let new_total_shares = builder.sub(

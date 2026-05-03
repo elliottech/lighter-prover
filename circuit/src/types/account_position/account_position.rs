@@ -384,7 +384,10 @@ pub fn random_access_account_position(
         margin_mode: builder.random_access(access_index, v.iter().map(|x| x.margin_mode).collect()),
         allocated_margin: builder.random_access_bigint(
             access_index,
-            v.iter().map(|x| x.allocated_margin.clone()).collect(),
+            v.iter()
+                .map(|x| x.allocated_margin.clone())
+                .collect::<Vec<BigIntTarget>>()
+                .as_ref(),
             BIG_U96_LIMBS,
         ),
     }

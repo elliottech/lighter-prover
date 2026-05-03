@@ -150,17 +150,10 @@ impl Verify for InternalLiquidatePositionTxTarget {
 
         let base_amount_big = builder.target_to_biguint(self.base_amount);
         let quote_big = builder.mul_biguint(&base_amount_big, &zero_price_big);
-        let quote_multiplier_big =
-            builder.target_to_biguint_single_limb_unsafe(tx_state.market_details.quote_multiplier);
-        let normalized_quote_big = builder.mul_biguint(&quote_big, &quote_multiplier_big);
 
         let max_quote_amount_big =
             builder.constant_biguint(&BigUint::from_u64(MAX_ORDER_QUOTE_AMOUNT).unwrap());
-        builder.conditional_assert_lte_biguint(
-            is_enabled,
-            &normalized_quote_big,
-            &max_quote_amount_big,
-        );
+        builder.conditional_assert_lte_biguint(is_enabled, &quote_big, &max_quote_amount_big);
 
         self.zero_price = builder.biguint_to_target_unsafe(&zero_price_big);
     }

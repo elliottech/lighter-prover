@@ -18,6 +18,7 @@ use crate::transactions::internal_create_order::InternalCreateOrderTx;
 use crate::transactions::internal_deleverage::InternalDeleverageTx;
 use crate::transactions::internal_exit_position::InternalExitPositionTx;
 use crate::transactions::internal_liquidate_position::InternalLiquidatePositionTx;
+use crate::transactions::internal_liquidate_spot::InternalLiquidateSpotTx;
 use crate::transactions::internal_pending_unlock::InternalPendingUnlockTx;
 use crate::transactions::internal_transfer::InternalTransferTx;
 use crate::transactions::l1_burn_shares::L1BurnSharesTx;
@@ -48,7 +49,9 @@ use crate::transactions::l2_stake_assets::L2StakeAssetsTx;
 use crate::transactions::l2_strategy_transfer::L2StrategyTransferTx;
 use crate::transactions::l2_transfer::L2TransferTx;
 use crate::transactions::l2_unstake_assets::L2UnstakeAssetsTx;
+use crate::transactions::l2_update_account_asset_config::L2UpdateAccountAssetConfigTx;
 use crate::transactions::l2_update_account_config::L2UpdateAccountConfigTx;
+use crate::transactions::l2_update_asset_config::L2UpdateAssetConfigTx;
 use crate::transactions::l2_update_leverage::L2UpdateLeverageTx;
 use crate::transactions::l2_update_margin::L2UpdateMarginTx;
 use crate::transactions::l2_update_market_config::L2UpdateMarketConfigTx;
@@ -212,6 +215,14 @@ where
     #[serde(default)]
     pub l2_approve_integrator_tx: L2ApproveIntegratorTx,
 
+    #[serde(rename = "2uaac")]
+    #[serde(default)]
+    pub l2_update_account_asset_config_tx: L2UpdateAccountAssetConfigTx,
+
+    #[serde(rename = "2uasc")]
+    #[serde(default)]
+    pub l2_update_asset_config_tx: L2UpdateAssetConfigTx,
+
     #[serde(rename = "Ic")]
     #[serde(default)]
     pub internal_claim_order_tx: InternalClaimOrderTx,
@@ -247,6 +258,10 @@ where
     #[serde(rename = "Icr")]
     #[serde(default)]
     pub internal_create_order_tx: InternalCreateOrderTx,
+
+    #[serde(rename = "Ils")]
+    #[serde(default)]
+    pub internal_liquidate_spot_tx: InternalLiquidateSpotTx,
 
     #[serde(rename = "nonce", default)]
     pub nonce: i64,
@@ -301,6 +316,7 @@ where
     pub order_before: Order,
 
     #[serde(rename = "aab")]
+    #[serde(deserialize_with = "deserializers::account_assets_before")]
     #[serde(default)]
     pub account_assets_before: [[AccountAsset; NB_ASSETS_PER_TX]; NB_ACCOUNTS_PER_TX],
 

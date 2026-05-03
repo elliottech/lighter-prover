@@ -282,9 +282,8 @@ impl Apply for L2ApproveIntegratorTxTarget {
         for i in 0..MAX_APPROVED_INTEGRATORS {
             let is_empty = new_approved_integrators[i].is_empty(builder);
 
-            let integrator = &tx_state.accounts[OWNER_ACCOUNT_ID].approved_integrators[i];
             let is_same_integrator = builder.is_equal(
-                integrator.integrator_account_index,
+                new_approved_integrators[i].integrator_account_index,
                 self.integrator_account_index,
             );
 

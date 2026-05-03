@@ -13,9 +13,7 @@ use crate::bigint::comparison::CircuitBuilderBiguintSubtractiveComparison;
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::eddsa::gadgets::base_field::QuinticExtensionTarget;
 use crate::eddsa::schnorr::hash_to_quintic_extension_circuit;
-use crate::liquidation::{
-    get_available_asset_balance_const, get_shares_asset_value_for_staking_pool,
-};
+use crate::liquidation::{get_available_asset_balance, get_shares_asset_value_for_staking_pool};
 use crate::tx_interface::{Apply, TxHash, Verify};
 use crate::types::config::{BIG_U64_LIMBS, BIG_U96_LIMBS, Builder, F};
 use crate::types::constants::*;
@@ -123,7 +121,6 @@ impl Verify for L2StakeAssetsTxTarget {
             tx_state.accounts[SUB_ACCOUNT_ID].account_index,
         );
 
-        // Limit to lit
         builder.conditional_assert_eq_constant(
             is_enabled,
             tx_state.asset_indices[TX_ASSET_ID],
@@ -187,13 +184,18 @@ impl Verify for L2StakeAssetsTxTarget {
             &tx_state.assets[TX_ASSET_ID].extension_multiplier,
             BIG_U96_LIMBS,
         );
-        let asset_balance = get_available_asset_balance_const(
+
+        let _spot = builder.constant_u64(PRODUCT_TYPE_SPOT);
+        let asset_balance = get_available_asset_balance(
             builder,
-            PRODUCT_TYPE_SPOT,
+            _spot,
+            tx_state.asset_indices[TX_ASSET_ID],
             &tx_state.accounts[OWNER_ACCOUNT_ID],
             &tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID],
             tx_state.is_asset_used_as_margin[OWNER_ACCOUNT_ID][TX_ASSET_ID],
             &tx_state.risk_infos[OWNER_ACCOUNT_ID].cross_risk_parameters,
+            &tx_state.margined_asset[TX_ASSET_ID],
+            &tx_state.account_margined_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID].balance,
         );
         builder.conditional_assert_lte_biguint(
             is_enabled,
@@ -232,11 +234,11 @@ impl Verify for L2StakeAssetsTxTarget {
 impl Apply for L2StakeAssetsTxTarget {
     fn apply(&mut self, builder: &mut Builder, tx_state: &mut TxState) -> BoolTarget {
         // Asset Balance deltas - Because LIT asset can't be used as margin, we don't need to handle unified accounts here
-        let (new_owner_balance, fail) = builder.try_sub_biguint(
+        let (new_owner_balance, borrow) = builder.try_sub_biguint(
             &tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID].balance,
             &self.balance_to_mint_shares,
         );
-        builder.conditional_assert_zero_u32(self.success, fail);
+        builder.conditional_assert_zero_u32(self.success, borrow);
         tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID].balance = builder.select_biguint(
             self.success,
             &new_owner_balance,

@@ -16,10 +16,7 @@ use crate::liquidation::get_funding_delta_for_position_and_market;
 use crate::tx_interface::{Apply, Verify};
 use crate::types::account_position::{AccountPositionTarget, get_position_unrealized_pnl};
 use crate::types::config::{BIG_U96_LIMBS, Builder, F};
-use crate::types::constants::{
-    EMPTY_ORDER_BOOK_TREE_ROOT, EXECUTE_TRANSACTION, MARKET_STATUS_EXPIRED, MARKET_TYPE_PERPS,
-    OWNER_ACCOUNT_ID, USDC_TO_COLLATERAL_MULTIPLIER,
-};
+use crate::types::constants::*;
 use crate::types::market::{MarketTarget, select_market};
 use crate::types::market_details::{MarketDetailsTarget, select_market_details};
 use crate::types::tx_state::TxState;
@@ -72,6 +69,12 @@ impl Verify for InternalExitPositionTxTarget {
             is_enabled,
             self.market_index,
             tx_state.market.perps_market_index,
+        );
+
+        builder.conditional_assert_eq_constant(
+            is_enabled,
+            tx_state.asset_indices[TX_ASSET_ID],
+            USDC_ASSET_INDEX,
         );
 
         let execute_transaction_type = builder.constant(F::from_canonical_u8(EXECUTE_TRANSACTION));
@@ -133,6 +136,7 @@ impl Apply for InternalExitPositionTxTarget {
             self.success,
             &collateral_delta,
             &mut tx_state.strategies[OWNER_ACCOUNT_ID],
+            &mut tx_state.account_margined_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID].balance,
         );
 
         // Update market details and order book

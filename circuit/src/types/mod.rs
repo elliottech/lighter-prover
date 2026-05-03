@@ -4,6 +4,7 @@
 pub mod account;
 pub mod account_asset;
 pub mod account_delta;
+pub mod account_margined_asset;
 pub mod account_order;
 pub mod account_order_type;
 pub mod account_position;
@@ -14,6 +15,7 @@ pub mod asset;
 pub mod change_pub_key;
 pub mod config;
 pub mod constants;
+pub mod margined_asset;
 pub mod market;
 pub mod market_details;
 pub mod order;

@@ -174,6 +174,11 @@ impl Verify for L2UpdatePublicPoolTxTarget {
             tx_state.accounts[SUB_ACCOUNT_ID].public_pool_info.status,
         );
 
+        let is_insurance_fund_and_enabled = builder.and(is_insurance_fund_pool, is_enabled);
+        builder.conditional_assert_zero(is_insurance_fund_and_enabled, self.operator_fee);
+        builder
+            .conditional_assert_zero(is_insurance_fund_and_enabled, self.min_operator_share_rate);
+
         let pool_is_healthy = tx_state.risk_infos[SUB_ACCOUNT_ID]
             .cross_risk_parameters
             .is_healthy(builder);

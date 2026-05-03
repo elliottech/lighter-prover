@@ -30,7 +30,7 @@ use plonky2::plonk::proof::CompressedProofWithPublicInputs;
 use plonky2::recursion::dummy_circuit::{self, dummy_circuit};
 use rayon::vec;
 
-const TX_PER_PROOF: usize = 5;
+const TX_PER_PROOF: usize = 4;
 const CHAIN_ID: u32 = 304;
 
 fn main() {
@@ -103,6 +103,7 @@ fn main() {
 
     let state_metadata = pre_exec_witness.new_state_metadata.clone();
     let mut all_assets = block.all_assets.clone();
+    let mut all_margined_assets = pre_exec_witness.new_margined_assets.clone();
     let mut all_market_details = pre_exec_witness.new_market_details.clone();
     let mut system_config = block.old_system_config;
     let mut register_stack = block.register_stack_before;
@@ -134,6 +135,7 @@ fn main() {
             old_system_config: system_config,
             register_stack_before: register_stack,
             all_assets_before: all_assets.clone(),
+            all_margined_assets_before: all_margined_assets.clone(),
             all_market_details_before: all_market_details.clone(),
             old_account_tree_root: account_tree_root,
             old_account_pub_data_tree_root: account_pub_data_tree_root,
@@ -159,6 +161,7 @@ fn main() {
 
         let tx_witness = BlockTxWitness::from_public_inputs(&tx_proof.public_inputs.clone());
         all_assets = tx_witness.all_assets_after.clone();
+        all_margined_assets = tx_witness.all_margined_assets_after.clone();
         all_market_details = tx_witness.all_market_details_after.clone();
         register_stack = tx_witness.register_stack_after;
         system_config = tx_witness.new_system_config;

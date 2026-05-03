@@ -8,13 +8,12 @@ use plonky2::iop::witness::Witness;
 use serde::Deserialize;
 
 use crate::bigint::bigint::CircuitBuilderBigInt;
-use crate::bigint::biguint::CircuitBuilderBiguint;
 use crate::bigint::comparison::CircuitBuilderBiguintSubtractiveComparison;
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::comparison::CircuitBuilderSubtractiveComparison;
 use crate::tx_interface::{Apply, Verify};
 use crate::types::account::AccountTarget;
-use crate::types::config::{BIG_U96_LIMBS, Builder};
+use crate::types::config::Builder;
 use crate::types::constants::*;
 use crate::types::tx_state::TxState;
 use crate::types::tx_type::TxTypeTargets;
@@ -87,13 +86,6 @@ impl Verify for InternalPendingUnlockTxTarget {
             tx_state.block_timestamp,
             TIMESTAMP_BITS,
         );
-
-        let new_extended_balance = builder.add_biguint(
-            &tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID].balance,
-            &next_pending_unlock.amount,
-        );
-        let (success, _) = builder.try_trim_biguint(&new_extended_balance, BIG_U96_LIMBS);
-        builder.conditional_assert_true(is_enabled, success);
     }
 }
 
@@ -103,15 +95,24 @@ impl Apply for InternalPendingUnlockTxTarget {
             tx_state.accounts[OWNER_ACCOUNT_ID].pop_pending_unlock(builder, self.success);
         let asset_amount = builder.biguint_to_bigint(&pending_unlock.amount);
 
-        AccountTarget::apply_asset_delta_const(
+        let _spot = builder.constant_u64(PRODUCT_TYPE_SPOT);
+
+        let is_account_unified = tx_state.accounts[OWNER_ACCOUNT_ID].is_unified_mode();
+        let _false = builder._false();
+        _ = AccountTarget::apply_asset_delta(
             builder,
             self.success,
-            PRODUCT_TYPE_SPOT,
-            &mut tx_state.accounts[OWNER_ACCOUNT_ID],
-            Some(&mut tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID]),
+            _spot,
+            tx_state.asset_indices[TX_ASSET_ID],
+            &mut tx_state.margined_asset[TX_ASSET_ID],
             tx_state.is_asset_used_as_margin[OWNER_ACCOUNT_ID][TX_ASSET_ID],
             &asset_amount,
+            is_account_unified,
+            _false,
+            &mut tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID].balance,
+            &mut tx_state.account_margined_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID].balance,
             &mut tx_state.strategies[OWNER_ACCOUNT_ID],
+            false,
         );
 
         self.success

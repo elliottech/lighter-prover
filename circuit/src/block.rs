@@ -15,10 +15,8 @@ use crate::deserializers;
 use crate::tx::Tx;
 use crate::types::asset::Asset;
 use crate::types::config::F;
-use crate::types::constants::{
-    ASSET_LIST_SIZE, KECCAK_HASH_OUT_BYTE_SIZE, ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE,
-    POSITION_LIST_SIZE,
-};
+use crate::types::constants::*;
+use crate::types::margined_asset::MarginedAsset;
 use crate::types::market_details::{MarketDetails, PublicMarketDetails};
 use crate::types::price_updates::PriceUpdates;
 use crate::types::register::RegisterStack;
@@ -52,6 +50,10 @@ where
     #[serde(rename = "aab")]
     #[serde_as(as = "[_; ASSET_LIST_SIZE]")]
     pub all_assets: [Asset; ASSET_LIST_SIZE],
+
+    #[serde(rename = "amab")]
+    #[serde_as(as = "[_; MARGINED_ASSET_LIST_SIZE]")]
+    pub all_margined_assets: [MarginedAsset; MARGINED_ASSET_LIST_SIZE],
 
     #[serde(rename = "pmda")]
     #[serde_as(as = "[_; POSITION_LIST_SIZE]")]

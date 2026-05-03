@@ -13,6 +13,7 @@ pub trait CircuitBuilderBoolUtils<F: RichField + Extendable<D>, const D: usize> 
     fn assert_false(&mut self, t: BoolTarget);
     fn conditional_assert_true(&mut self, is_enabled: BoolTarget, a: BoolTarget);
     fn conditional_assert_false(&mut self, is_enabled: BoolTarget, a: BoolTarget);
+    fn conditional_assert_bool(&mut self, is_enabled: BoolTarget, a: BoolTarget);
 
     fn select_bool(&mut self, flag: BoolTarget, a: BoolTarget, b: BoolTarget) -> BoolTarget;
 
@@ -64,5 +65,10 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilderBoolUtils<F, D>
     fn and_not(&mut self, a: BoolTarget, b: BoolTarget) -> BoolTarget {
         // a(1 - b) = a - ab
         BoolTarget::new_unsafe(self.arithmetic(F::NEG_ONE, F::ONE, a.target, b.target, a.target))
+    }
+
+    fn conditional_assert_bool(&mut self, is_enabled: BoolTarget, a: BoolTarget) {
+        let a_sq_minus_a = self.builder.mul_sub(a.target, a.target, a.target);
+        self.conditional_assert_zero(is_enabled, a_sq_minus_a);
     }
 }

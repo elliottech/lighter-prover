@@ -15,7 +15,7 @@ use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::eddsa::gadgets::base_field::QuinticExtensionTarget;
 use crate::eddsa::schnorr::hash_to_quintic_extension_circuit;
 use crate::liquidation::{
-    get_available_asset_balance_const, get_shares_asset_value_for_staking_pool,
+    get_available_asset_balance, get_shares_asset_value_for_staking_pool,
     get_shares_usdc_value_for_public_pool,
 };
 use crate::tx_interface::{Apply, TxHash, Verify};
@@ -127,7 +127,7 @@ impl Verify for L2MintSharesTxTarget {
         // First asset always has to be USDC for minting pool shares
         builder.conditional_assert_eq_constant(
             is_enabled,
-            tx_state.asset_indices[TX_ASSET_ID],
+            tx_state.asset_indices[USDC_BASE_ASSET_ID],
             USDC_ASSET_INDEX,
         );
 
@@ -181,13 +181,17 @@ impl Verify for L2MintSharesTxTarget {
         let big_new_total_shares = builder.target_to_biguint(self.new_total_shares);
         builder.range_check_biguint(&big_new_total_shares, MAX_POOL_SHARES_BITS);
 
-        let available_collateral_to_mint_shares = get_available_asset_balance_const(
+        let _perps = builder.constant_u64(PRODUCT_TYPE_PERPS);
+        let available_collateral_to_mint_shares = get_available_asset_balance(
             builder,
-            PRODUCT_TYPE_PERPS,
+            _perps,
+            tx_state.asset_indices[USDC_BASE_ASSET_ID],
             &tx_state.accounts[OWNER_ACCOUNT_ID],
-            &tx_state.account_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID], // usdc
-            tx_state.is_asset_used_as_margin[OWNER_ACCOUNT_ID][TX_ASSET_ID], // usdc
+            &tx_state.account_assets[OWNER_ACCOUNT_ID][USDC_BASE_ASSET_ID], // usdc
+            tx_state.is_asset_used_as_margin[OWNER_ACCOUNT_ID][USDC_BASE_ASSET_ID], // usdc
             &tx_state.risk_infos[OWNER_ACCOUNT_ID].cross_risk_parameters,
+            &tx_state.margined_asset[USDC_BASE_ASSET_ID],
+            &tx_state.account_margined_assets[OWNER_ACCOUNT_ID][USDC_BASE_ASSET_ID].balance,
         );
 
         self.principal_amount = get_shares_usdc_value_for_public_pool(
@@ -252,7 +256,7 @@ impl Verify for L2MintSharesTxTarget {
                 builder.select_or_zero(not_operator_and_enabled, new_principal_amount);
             builder.register_range_check(self.new_principal_amount, MAX_POOL_PRINCIPAL_AMOUNT_BITS);
 
-            // If staking pool exists, LIT asset registered, current pool is LLP and account is not staking
+            // If staking pool exists, LIT asset registered, and account is not staking
             // pool operator or LLP operator, verify that the mint amount is within staked LIT limits.
             // A third account must have been sent in this case.
             let is_not_staking_pool_operator = builder.is_not_equal(
@@ -321,6 +325,7 @@ impl Apply for L2MintSharesTxTarget {
             self.success,
             &self.collateral_to_mint_shares,
             &mut tx_state.strategies[SUB_ACCOUNT_ID],
+            &mut tx_state.account_margined_assets[SUB_ACCOUNT_ID][USDC_BASE_ASSET_ID].balance,
         );
 
         let neg_collateral_delta = builder.neg_bigint(&self.collateral_to_mint_shares);
@@ -329,6 +334,7 @@ impl Apply for L2MintSharesTxTarget {
             self.success,
             &neg_collateral_delta,
             &mut tx_state.strategies[OWNER_ACCOUNT_ID],
+            &mut tx_state.account_margined_assets[OWNER_ACCOUNT_ID][USDC_BASE_ASSET_ID].balance,
         );
 
         // Public pool total share

@@ -22,14 +22,16 @@ use crate::eddsa::curve::scalar_field::ECgFp5Scalar;
 use crate::eddsa::schnorr::SchnorrSig;
 use crate::keccak::helpers::u8_array_to_bits;
 use crate::tx_attributes::{NB_ATTRIBUTES_PER_TX, TxAttributes};
+use crate::types::account_asset::AccountAsset;
 use crate::types::account_delta::{PositionDelta, PublicPoolShareDelta};
+use crate::types::account_margined_asset::AccountMarginedAsset;
 use crate::types::account_position::AccountPosition;
 use crate::types::constants::{
     ACCOUNT_MERKLE_LEVELS, ACCOUNT_ORDERS_MERKLE_LEVELS, API_KEY_MERKLE_LEVELS, ASSET_LIST_SIZE,
-    ASSET_MERKLE_LEVELS, KECCAK_HASH_OUT_BIT_SIZE, KECCAK_HASH_OUT_BYTE_SIZE, MARKET_MERKLE_LEVELS,
-    NB_ACCOUNT_ORDERS_PATHS_PER_TX, NB_ACCOUNTS_PER_TX, NB_ASSETS_PER_TX,
-    ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE, POSITION_LIST_SIZE, POSITION_MERKLE_LEVELS,
-    REGISTER_STACK_SIZE, SHARES_DELTA_LIST_SIZE,
+    ASSET_MERKLE_LEVELS, KECCAK_HASH_OUT_BIT_SIZE, KECCAK_HASH_OUT_BYTE_SIZE,
+    MARGINED_ASSET_LIST_SIZE, MARKET_MERKLE_LEVELS, NB_ACCOUNT_ORDERS_PATHS_PER_TX,
+    NB_ACCOUNTS_PER_TX, NB_ASSETS_PER_TX, ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE,
+    POSITION_LIST_SIZE, POSITION_MERKLE_LEVELS, REGISTER_STACK_SIZE, SHARES_DELTA_LIST_SIZE,
 };
 use crate::types::register::{BaseRegisterInfo, RegisterStack};
 
@@ -106,25 +108,36 @@ where
     Ok(result)
 }
 
-pub fn int_to_bigint_list<'de, D, const SIZE: usize>(
+pub fn margined_account_assets<'de, D>(
     deserializer: D,
-) -> Result<[BigInt; SIZE], D::Error>
+) -> Result<[AccountMarginedAsset; MARGINED_ASSET_LIST_SIZE], D::Error>
 where
     D: Deserializer<'de>,
 {
-    let nums: Vec<i128> = Deserialize::deserialize(deserializer)?;
-    if nums.len() != SIZE {
+    let nums: Vec<AccountMarginedAsset> = Deserialize::deserialize(deserializer)?;
+    if nums.len() != MARGINED_ASSET_LIST_SIZE {
         return Err(serde::de::Error::custom(format!(
             "Expected {} elements, got {}",
-            SIZE,
+            MARGINED_ASSET_LIST_SIZE,
             nums.len()
         )));
     }
-    let mut result = [BigInt::ZERO; SIZE];
+    let mut result = core::array::from_fn(|_| AccountMarginedAsset::default());
     for (i, num) in nums.into_iter().enumerate() {
-        result[i] = BigInt::from(num);
+        result[i] = num;
     }
     Ok(result)
+}
+
+pub fn account_assets_before<'de, D>(
+    deserializer: D,
+) -> Result<[[AccountAsset; NB_ASSETS_PER_TX]; NB_ACCOUNTS_PER_TX], D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw: [[Option<AccountAsset>; NB_ASSETS_PER_TX]; NB_ACCOUNTS_PER_TX] =
+        Deserialize::deserialize(deserializer)?;
+    Ok(raw.map(|row| row.map(|cell| cell.unwrap_or_default())))
 }
 
 pub fn all_aggregated_asset_deltas<'de, D>(
@@ -133,7 +146,7 @@ pub fn all_aggregated_asset_deltas<'de, D>(
 where
     D: Deserializer<'de>,
 {
-    let elements: HashMap<String, i128> = Deserialize::deserialize(deserializer)?;
+    let elements: HashMap<String, Option<i128>> = Deserialize::deserialize(deserializer)?;
 
     let mut result = [BigInt::ZERO; ASSET_LIST_SIZE];
 
@@ -146,7 +159,7 @@ where
                         index
                     )));
                 }
-                result[index] = BigInt::from(value);
+                result[index] = BigInt::from(value.unwrap_or(0));
             }
             Err(err) => {
                 return Err(serde::de::Error::custom(format!(
@@ -167,6 +180,27 @@ where
     D: Deserializer<'de>,
 {
     int_to_bigint_list::<D, NB_ASSETS_PER_TX>(deserializer)
+}
+
+pub fn int_to_bigint_list<'de, D, const SIZE: usize>(
+    deserializer: D,
+) -> Result<[BigInt; SIZE], D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let nums: Vec<Option<i128>> = Deserialize::deserialize(deserializer)?;
+    if nums.len() != SIZE {
+        return Err(serde::de::Error::custom(format!(
+            "Expected {} elements, got {}",
+            SIZE,
+            nums.len()
+        )));
+    }
+    let mut result = [BigInt::ZERO; SIZE];
+    for (i, num) in nums.into_iter().enumerate() {
+        result[i] = BigInt::from(num.unwrap_or(0));
+    }
+    Ok(result)
 }
 
 pub fn l1_address_to_biguint<'de, D>(deserializer: D) -> Result<BigUint, D::Error>
@@ -357,6 +391,33 @@ where
     Ok(result)
 }
 
+pub fn asset_price_updates<'de, D>(
+    deserializer: D,
+) -> Result<[i64; MARGINED_ASSET_LIST_SIZE], D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let elements: HashMap<String, i64> = Deserialize::deserialize(deserializer)?;
+    let mut result = [0i64; MARGINED_ASSET_LIST_SIZE];
+    for (i, element) in elements.into_iter() {
+        if let Ok(index) = i.parse::<usize>() {
+            if index >= MARGINED_ASSET_LIST_SIZE {
+                return Err(serde::de::Error::custom(format!(
+                    "Price update index out of bounds: {}",
+                    index
+                )));
+            }
+            result[index] = element;
+        } else {
+            return Err(serde::de::Error::custom(format!(
+                "Failed to parse price update index: {}",
+                i
+            )));
+        }
+    }
+    Ok(result)
+}
+
 pub fn tx_attributes<'de, D>(deserializer: D) -> Result<TxAttributes, D::Error>
 where
     D: Deserializer<'de>,
@@ -418,6 +479,10 @@ where
 
 pub fn default_price_updates() -> [u32; POSITION_LIST_SIZE] {
     core::array::from_fn(|_| 0u32)
+}
+
+pub fn default_asset_price_updates() -> [i64; MARGINED_ASSET_LIST_SIZE] {
+    core::array::from_fn(|_| 0i64)
 }
 
 pub fn positions<'de, D>(deserializer: D) -> Result<[AccountPosition; POSITION_LIST_SIZE], D::Error>

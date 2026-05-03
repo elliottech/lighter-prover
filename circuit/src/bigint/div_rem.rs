@@ -24,6 +24,7 @@ use super::biguint::{
     BigUintTarget, CircuitBuilderBiguint, GeneratedValuesBigUint, WitnessBigUint,
 };
 use super::comparison::CircuitBuilderBiguintSubtractiveComparison;
+use crate::bigint::bigint::{BigIntTarget, CircuitBuilderBigInt, SignTarget};
 use crate::builder::Builder;
 use crate::uint::u32::gadgets::arithmetic_u32::U32Target;
 
@@ -40,6 +41,8 @@ pub trait CircuitBuilderBiguintDivRem<F: RichField + Extendable<D>, const D: usi
     fn rem_biguint(&mut self, a: &BigUintTarget, b: &BigUintTarget) -> BigUintTarget;
     /// Returns the ceiling of the quotient of a divided by b. If b is zero, returns a.
     fn ceil_div_biguint(&mut self, a: &BigUintTarget, b: &BigUintTarget) -> BigUintTarget;
+    /// Returns the quotient of a divided by b, where a is a signed integer. If b is zero, returns 0.
+    fn div_bigint_by_biguint(&mut self, a: &BigIntTarget, b: &BigUintTarget) -> BigIntTarget;
 }
 
 impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilderBiguintDivRem<F, D>
@@ -89,6 +92,15 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilderBiguintDivRem<F
     fn div_biguint(&mut self, a: &BigUintTarget, b: &BigUintTarget) -> BigUintTarget {
         let (div, _rem) = self.div_rem_biguint(a, b);
         div
+    }
+
+    fn div_bigint_by_biguint(&mut self, a: &BigIntTarget, b: &BigUintTarget) -> BigIntTarget {
+        let div_abs = self.div_biguint(&a.abs, b);
+        let div_bigint = self.biguint_to_bigint(&div_abs);
+        BigIntTarget {
+            abs: div_abs,
+            sign: SignTarget::new_unsafe(self.mul(div_bigint.sign.target, a.sign.target)),
+        }
     }
 
     fn ceil_div_biguint(&mut self, a: &BigUintTarget, b: &BigUintTarget) -> BigUintTarget {

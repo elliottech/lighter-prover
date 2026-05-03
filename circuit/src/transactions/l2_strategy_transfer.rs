@@ -16,7 +16,7 @@ use crate::comparison::CircuitBuilderSubtractiveComparison;
 use crate::deserializers;
 use crate::eddsa::gadgets::base_field::QuinticExtensionTarget;
 use crate::eddsa::schnorr::hash_to_quintic_extension_circuit;
-use crate::liquidation::get_available_collateral;
+use crate::liquidation::get_available_usdc_collateral;
 use crate::tx_interface::{Apply, TxHash, Verify};
 use crate::types::asset::ensure_valid_asset_index;
 use crate::types::config::{BIG_U64_LIMBS, BIG_U96_LIMBS, Builder, F};
@@ -194,7 +194,7 @@ impl Verify for L2StrategyTransferTxTarget {
             BIG_U96_LIMBS,
         );
 
-        let available_collateral_to_transfer = get_available_collateral(
+        let available_collateral_to_transfer = get_available_usdc_collateral(
             builder,
             &tx_state.risk_infos[OWNER_ACCOUNT_ID].cross_risk_parameters, // risk of the "from" strategy
         );

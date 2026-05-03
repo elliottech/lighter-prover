@@ -135,10 +135,10 @@ impl Verify for L2UpdateLeverageTxTarget {
         );
 
         // Check if original margin is healthy
-        let is_not_in_liquidation = tx_state.risk_infos[OWNER_ACCOUNT_ID]
+        let is_in_liquidation = tx_state.risk_infos[OWNER_ACCOUNT_ID]
             .current_risk_parameters
-            .is_not_in_liquidation(builder);
-        builder.conditional_assert_true(is_enabled, is_not_in_liquidation);
+            .is_in_liquidation(builder);
+        builder.conditional_assert_false(is_enabled, is_in_liquidation);
 
         // Check if the market is active
         let active_market_status = builder.constant_from_u8(MARKET_STATUS_ACTIVE);
