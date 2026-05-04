@@ -7,16 +7,13 @@ use plonky2::iop::target::{BoolTarget, Target};
 use plonky2::iop::witness::Witness;
 use serde::Deserialize;
 
-use crate::bigint::biguint::CircuitBuilderBiguint;
-use crate::bigint::comparison::CircuitBuilderBiguintSubtractiveComparison;
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::comparison::CircuitBuilderSubtractiveComparison;
 use crate::eddsa::gadgets::base_field::QuinticExtensionTarget;
 use crate::eddsa::schnorr::hash_to_quintic_extension_circuit;
-use crate::liquidation::get_available_asset_balance;
 use crate::matching_engine::{
-    decrement_locked_balance_for_order, decrement_order_count_in_place,
-    get_locked_amount_and_ask_asset_index, get_next_order_nonce, trigger_child_orders,
+    decrement_locked_balance_for_order, decrement_order_count_in_place, get_next_order_nonce,
+    trigger_child_orders,
 };
 use crate::tx_attributes::{
     ATTRIBUTE_TYPE_INTEGRATOR_FEE_COLLECTOR_INDEX, ATTRIBUTE_TYPE_INTEGRATOR_MAKER_FEE,
@@ -436,89 +433,6 @@ impl Verify for L2ModifyOrderTxTarget {
             TIMESTAMP_BITS,
         );
         self.success = builder.and(self.success, is_order_expiry_gt_block_created_at);
-
-        // Spot balance check
-        {
-            let spot_success_flag = builder.and_not(self.success, self.is_perps_market);
-
-            // Check if the new base amount will exceed the matched base amount (initial - remaining)
-            // If so, we calculate old and new locked balances and see if the available asset balance
-            // allows that to happen.
-            let matched_base_amount = builder.sub(
-                tx_state.account_order.initial_base_amount,
-                tx_state.account_order.remaining_base_amount,
-            );
-            let new_base_amount_gt_matched_amount = builder.is_gt(
-                self.base_amount,
-                matched_base_amount,
-                ORDER_BASE_AMOUNT_BITS,
-            );
-            let flag = builder.and(spot_success_flag, new_base_amount_gt_matched_amount);
-
-            let (old_locked_amount, ask_asset_index) = get_locked_amount_and_ask_asset_index(
-                builder,
-                flag,
-                &tx_state.market,
-                tx_state.account_order.remaining_base_amount,
-                tx_state.account_order.price,
-                tx_state.account_order.is_ask,
-            );
-
-            let new_remaining_base_amount = builder.sub(self.base_amount, matched_base_amount);
-            let (new_locked_amount, _) = get_locked_amount_and_ask_asset_index(
-                builder,
-                flag,
-                &tx_state.market,
-                new_remaining_base_amount,
-                self.price,
-                tx_state.account_order.is_ask,
-            );
-            let (locked_amount_delta, old_amount_was_greater) =
-                builder.try_sub_biguint(&new_locked_amount, &old_locked_amount);
-            let new_locked_gte_old = builder.not(BoolTarget::new_unsafe(old_amount_was_greater.0));
-
-            let is_base_asset = builder.is_equal(
-                tx_state.account_assets[OWNER_ACCOUNT_ID][BASE_ASSET_ID].index_0,
-                ask_asset_index,
-            );
-
-            let _spot = builder.constant_u64(PRODUCT_TYPE_SPOT);
-            let base_asset_available_balance = get_available_asset_balance(
-                builder,
-                _spot,
-                tx_state.asset_indices[BASE_ASSET_ID],
-                &tx_state.accounts[OWNER_ACCOUNT_ID],
-                &tx_state.account_assets[OWNER_ACCOUNT_ID][BASE_ASSET_ID],
-                tx_state.is_asset_used_as_margin[OWNER_ACCOUNT_ID][BASE_ASSET_ID],
-                &tx_state.risk_infos[OWNER_ACCOUNT_ID].cross_risk_parameters,
-                &tx_state.margined_asset[BASE_ASSET_ID],
-                &tx_state.account_margined_assets[OWNER_ACCOUNT_ID][BASE_ASSET_ID].balance,
-            );
-            let quote_asset_available_balance = get_available_asset_balance(
-                builder,
-                _spot,
-                tx_state.asset_indices[QUOTE_ASSET_ID],
-                &tx_state.accounts[OWNER_ACCOUNT_ID],
-                &tx_state.account_assets[OWNER_ACCOUNT_ID][QUOTE_ASSET_ID],
-                tx_state.is_asset_used_as_margin[OWNER_ACCOUNT_ID][QUOTE_ASSET_ID],
-                &tx_state.risk_infos[OWNER_ACCOUNT_ID].cross_risk_parameters,
-                &tx_state.margined_asset[QUOTE_ASSET_ID],
-                &tx_state.account_margined_assets[OWNER_ACCOUNT_ID][QUOTE_ASSET_ID].balance,
-            );
-
-            let available_balance = builder.select_biguint(
-                is_base_asset,
-                &base_asset_available_balance,
-                &quote_asset_available_balance,
-            );
-            let not_enough_available_balance =
-                builder.is_lt_biguint(&available_balance, &locked_amount_delta);
-
-            let should_be_false =
-                builder.multi_and(&[flag, new_locked_gte_old, not_enough_available_balance]);
-
-            builder.conditional_assert_false(self.success, should_be_false);
-        }
     }
 }
 

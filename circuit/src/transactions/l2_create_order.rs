@@ -7,16 +7,12 @@ use plonky2::iop::target::{BoolTarget, Target};
 use plonky2::iop::witness::Witness;
 use serde::Deserialize;
 
-use crate::bigint::biguint::CircuitBuilderBiguint;
-use crate::bigint::comparison::CircuitBuilderBiguintSubtractiveComparison;
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::comparison::CircuitBuilderSubtractiveComparison;
 use crate::eddsa::gadgets::base_field::QuinticExtensionTarget;
 use crate::eddsa::schnorr::hash_to_quintic_extension_circuit;
-use crate::liquidation::get_available_asset_balance;
 use crate::matching_engine::{
-    get_locked_amount_and_ask_asset_index, get_next_order_nonce, increment_order_count_in_place,
-    is_not_valid_reduce_only_direction,
+    get_next_order_nonce, increment_order_count_in_place, is_not_valid_reduce_only_direction,
 };
 use crate::tx_attributes::{
     ATTRIBUTE_TYPE_INTEGRATOR_FEE_COLLECTOR_INDEX, ATTRIBUTE_TYPE_INTEGRATOR_MAKER_FEE,
@@ -515,56 +511,6 @@ impl Verify for L2CreateOrderTxTarget {
             let is_insurance_or_public_pool = builder.or(is_insurance_fund, is_public_pool);
             builder.conditional_assert_false(flag, is_insurance_or_public_pool);
 
-            // Make sure user has enough available balance to lock for limit orders
-            let (amount_to_lock, ask_asset_index) = get_locked_amount_and_ask_asset_index(
-                builder,
-                flag,
-                &tx_state.market,
-                self.calculated_base_amount,
-                self.price,
-                self.is_ask,
-            );
-            let is_base_asset = builder.is_equal(
-                tx_state.account_assets[OWNER_ACCOUNT_ID][BASE_ASSET_ID].index_0,
-                ask_asset_index,
-            );
-
-            let _spot = builder.constant_u64(PRODUCT_TYPE_SPOT);
-            let base_asset_available_balance = get_available_asset_balance(
-                builder,
-                _spot,
-                tx_state.asset_indices[BASE_ASSET_ID],
-                &tx_state.accounts[OWNER_ACCOUNT_ID],
-                &tx_state.account_assets[OWNER_ACCOUNT_ID][BASE_ASSET_ID],
-                tx_state.is_asset_used_as_margin[OWNER_ACCOUNT_ID][BASE_ASSET_ID],
-                &tx_state.risk_infos[OWNER_ACCOUNT_ID].cross_risk_parameters,
-                &tx_state.margined_asset[BASE_ASSET_ID],
-                &tx_state.account_margined_assets[OWNER_ACCOUNT_ID][BASE_ASSET_ID].balance,
-            );
-            let quote_asset_available_balance = get_available_asset_balance(
-                builder,
-                _spot,
-                tx_state.asset_indices[QUOTE_ASSET_ID],
-                &tx_state.accounts[OWNER_ACCOUNT_ID],
-                &tx_state.account_assets[OWNER_ACCOUNT_ID][QUOTE_ASSET_ID],
-                tx_state.is_asset_used_as_margin[OWNER_ACCOUNT_ID][QUOTE_ASSET_ID],
-                &tx_state.risk_infos[OWNER_ACCOUNT_ID].cross_risk_parameters,
-                &tx_state.margined_asset[QUOTE_ASSET_ID],
-                &tx_state.account_margined_assets[OWNER_ACCOUNT_ID][QUOTE_ASSET_ID].balance,
-            );
-            let available_balance = builder.select_biguint(
-                is_base_asset,
-                &base_asset_available_balance,
-                &quote_asset_available_balance,
-            );
-            let spot_balance_check_inv =
-                builder.multi_or(&[is_ioc, order_type_target.is_twap_order]);
-            let spot_balance_check_flag = builder.and_not(flag, spot_balance_check_inv);
-            builder.conditional_assert_lte_biguint(
-                spot_balance_check_flag,
-                &amount_to_lock,
-                &available_balance,
-            );
         }
 
         // Perps validations

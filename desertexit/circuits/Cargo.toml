@@ -1,0 +1,27 @@
+[package]
+name = "desertexit"
+description = "Lighter Desert Exit Circuits"
+version = "0.0.1"
+authors = ["Lighter Team"]
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "build_p2_desert_circuit"
+path = "src/bin/build_p2_desert_circuit.rs"
+
+[dependencies]
+num = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+clap_derive = { workspace = true }
+plonky2 = { workspace = true, default-features = true }
+serde = { workspace = true }
+rayon = { workspace = true }
+serde_with = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+log = { workspace = true, default-features = false }
+env_logger = { workspace = true }
+circuit = { path = "../../circuit", default-features = true }
+rand = "0.8"
