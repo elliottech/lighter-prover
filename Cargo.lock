@@ -524,6 +524,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "desertexit"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "circuit",
+ "clap 4.5.51",
+ "clap_derive",
+ "env_logger",
+ "hex",
+ "log",
+ "num",
+ "plonky2",
+ "rand",
+ "rayon",
+ "serde",
+ "serde_json",
+ "serde_with",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

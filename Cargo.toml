@@ -1,5 +1,5 @@
 [workspace]
-members = ["circuit", "bench"]
+members = ["circuit", "bench", "desertexit/circuits"]
 resolver = "2"
 
 [workspace.package]
