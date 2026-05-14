@@ -16,11 +16,13 @@ use circuit::types::config::{
     BIG_U64_LIMBS, BIG_U96_LIMBS, BIG_U128_LIMBS, BIG_U160_LIMBS, Builder, C, D, F,
 };
 use circuit::types::constants::{
-    ACCOUNT_MERKLE_LEVELS, ASSET_LIST_SIZE_BITS, INSURANCE_FUND_ACCOUNT_TYPE, MAX_ASSET_INDEX,
-    MIN_ASSET_INDEX, NIL_ACCOUNT_INDEX, POSITION_LIST_SIZE, PUBLIC_POOL_ACCOUNT_TYPE,
-    SHARES_LIST_SIZE, USDC_ASSET_INDEX, USDC_TO_COLLATERAL_MULTIPLIER,
+    ACCOUNT_MERKLE_LEVELS, ASSET_LIST_SIZE_BITS, INSURANCE_FUND_ACCOUNT_TYPE,
+    LIGHTER_STAKING_POOL_ACCOUNT_TYPE, MAX_ASSET_INDEX, MIN_ASSET_INDEX, NIL_ACCOUNT_INDEX,
+    POSITION_LIST_SIZE, PUBLIC_POOL_ACCOUNT_TYPE, SHARES_LIST_SIZE, USDC_ASSET_INDEX,
+    USDC_TO_COLLATERAL_MULTIPLIER,
 };
 use circuit::uint::u32::gadgets::arithmetic_u32::CircuitBuilderU32;
+use circuit::utils::CircuitBuilderUtils;
 use log::Level;
 use num::BigUint;
 use plonky2::field::types::Field;
@@ -50,6 +52,8 @@ where
 {
     #[serde(rename = "ai", default)]
     pub asset_index: u16,
+    #[serde(rename = "mai", default)]
+    pub master_account_index: u64,
     #[serde(rename = "acc")]
     pub accounts: [PubdataAccount; DESERT_NUM_ACCOUNTS], // Main account and pools
     #[serde(rename = "tav")]
@@ -80,6 +84,7 @@ pub struct InnerDesertExitTarget {
     pub exit_commitment: KeccakOutputTarget, // Public input
 
     pub asset_index: Target,
+    pub master_account_index: Target,
     pub accounts: [PubdataAccountTarget; DESERT_NUM_ACCOUNTS], // Main account and pools
     pub balance: BigUintTarget, // Will be compared against calculated usdc
     pub account_pub_data_tree_root: HashOutTarget,
@@ -107,6 +112,7 @@ impl InnerDesertExitCircuit {
                 exit_commitment: builder.add_virtual_keccak_output_public_input_safe(),
 
                 asset_index: builder.add_virtual_target(),
+                master_account_index: builder.add_virtual_target(),
                 accounts: core::array::from_fn(|_| PubdataAccountTarget::new(&mut builder)),
                 balance: builder.add_virtual_biguint_target_safe(BIG_U96_LIMBS),
                 account_pub_data_tree_root: builder.add_virtual_hash(),
@@ -167,6 +173,39 @@ impl InnerDesertExitCircuit {
                 self.target.accounts[0].public_pool_shares[i - 1].public_pool_index,
             );
         }
+
+        // Validate account types for special accounts
+        // MAI = 0 <==> AI = 0 or account type is staking pool
+        let is_ai_zero = self.builder.is_zero(self.target.accounts[0].account_index);
+        let is_type_staking_pool = self.builder.is_equal_constant(
+            self.target.accounts[0].account_type,
+            LIGHTER_STAKING_POOL_ACCOUNT_TYPE as u64,
+        );
+        let mai_zero_condition = self.builder.or(is_ai_zero, is_type_staking_pool);
+        let is_mai_zero = self.builder.is_zero(self.target.master_account_index);
+        self.builder
+            .connect(is_mai_zero.target, mai_zero_condition.target);
+        // MAI = 1 <==> AI = 1 or account type is insurance fund
+        let is_ai_one = self
+            .builder
+            .is_equal_constant(self.target.accounts[0].account_index, 1);
+        let is_type_insurance_fund = self.builder.is_equal_constant(
+            self.target.accounts[0].account_type,
+            INSURANCE_FUND_ACCOUNT_TYPE as u64,
+        );
+        let mai_one_condition = self.builder.or(is_ai_one, is_type_insurance_fund);
+        let is_mai_one = self
+            .builder
+            .is_equal_constant(self.target.master_account_index, 1);
+        self.builder
+            .connect(is_mai_one.target, mai_one_condition.target);
+        // If MAI = 0 or 1 <==> l1 address = 0
+        let l1_address_zero = self
+            .builder
+            .is_zero_biguint(&self.target.accounts[0].l1_address);
+        let mai_zero_or_one = self.builder.or(is_mai_zero, is_mai_one);
+        self.builder
+            .connect(mai_zero_or_one.target, l1_address_zero.target);
     }
 
     fn verify_state_root(&mut self) {
@@ -403,12 +442,13 @@ impl InnerDesertExitCircuit {
         )
     }
 
-    /// keccak(abi.encodePacked(stateRoot, _accountIndex, _l1Address, _assetIndex, _totalAccountValue))
+    /// keccak(abi.encodePacked(stateRoot, _accountIndex, _masterAccountIndex, _l1Address, _assetIndex, _totalAccountValue))
     fn set_exit_commitment(&mut self) {
         let exit_commitment = calculate_exit_commitment(
             &mut self.builder,
             &self.target.state_root,
             self.target.accounts[0].account_index,
+            self.target.master_account_index,
             &self.target.accounts[0].l1_address,
             self.target.asset_index,
             &self.target.balance,
@@ -465,6 +505,11 @@ impl InnerDesertExitCircuit {
             F::from_canonical_u16(witness.asset_index),
         )?;
 
+        pw.set_target(
+            target.master_account_index,
+            F::from_canonical_u64(witness.master_account_index),
+        )?;
+
         for i in 0..witness.accounts.len() {
             pw.set_pubdata_account_target(&target.accounts[i], &witness.accounts[i])?;
         }
@@ -511,6 +556,7 @@ fn calculate_exit_commitment(
     builder: &mut Builder,
     state_root: &HashOutTarget,
     account_index: Target,
+    master_account_index: Target,
     l1_address: &BigUintTarget,
     asset_index: Target,
     balance: &BigUintTarget,
@@ -527,6 +573,10 @@ fn calculate_exit_commitment(
     let mut account_index_bytes = builder.split_bytes(account_index, 6);
     account_index_bytes.reverse();
     elems.extend_from_slice(&account_index_bytes);
+
+    let mut master_account_index_bytes = builder.split_bytes(master_account_index, 6);
+    master_account_index_bytes.reverse();
+    elems.extend_from_slice(&master_account_index_bytes);
 
     let mut l1_address_bytes = l1_address
         .limbs

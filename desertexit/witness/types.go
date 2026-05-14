@@ -13,6 +13,7 @@ import (
 type BlobDataInput struct {
 	AccountIndex       int64 `json:"ai"`
 	AssetIndex         int16 `json:"asi"`
+	MasterAccountIndex int64 `json:"mai"`
 
 	BlobBytes []string `json:"blobs"`
 
@@ -69,6 +70,7 @@ var (
 type DesertWitness struct {
 	Accounts           [DesertWitnessAccounts]*PubdataAccountWitness `json:"acc"`
 	AssetIndex         int16                                         `json:"ai"`
+	MasterAccountIndex int64                                         `json:"mai"`
 	TotalAccountValue  string                                        `json:"tav"`
 
 	AccountPubDataTreeRoot     p2.HashOut                                                    `json:"apdtr"`
