@@ -195,6 +195,7 @@ func main() {
 		Accounts:           accounts,
 		TotalAccountValue:  totalBalance.String(),
 		AssetIndex:         assetIndex,
+		MasterAccountIndex: input.MasterAccountIndex,
 
 		AccountPubDataTreeRoot:     accountPubDataTreeRoot,
 		AccountPubDataMerkleProofs: accountPubDataMerkleProofs,
