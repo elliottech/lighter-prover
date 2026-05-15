@@ -16,7 +16,7 @@ use serde::Deserialize;
 use crate::bigint::biguint::{BigUintTarget, CircuitBuilderBiguint, WitnessBigUint};
 use crate::bigint::comparison::CircuitBuilderBiguintSubtractiveComparison;
 use crate::bool_utils::CircuitBuilderBoolUtils;
-use crate::liquidation::get_available_asset_balance;
+use crate::liquidation::{BoolOrTarget, get_available_asset_balance};
 use crate::tx_interface::{Apply, OnChainPubData, PriorityOperationsPubData, Verify};
 use crate::types::account::AccountTarget;
 use crate::types::asset::ensure_valid_asset_index;
@@ -208,6 +208,7 @@ impl Verify for L1WithdrawTxTarget {
             &tx_state.risk_infos[OWNER_ACCOUNT_ID].cross_risk_parameters,
             &tx_state.margined_asset[TX_ASSET_ID],
             &tx_state.account_margined_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID].balance,
+            BoolOrTarget::False,
         );
         // === end of statement 1 ===
 

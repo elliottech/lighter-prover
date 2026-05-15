@@ -13,7 +13,9 @@ use crate::bigint::comparison::CircuitBuilderBiguintSubtractiveComparison;
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::eddsa::gadgets::base_field::QuinticExtensionTarget;
 use crate::eddsa::schnorr::hash_to_quintic_extension_circuit;
-use crate::liquidation::{get_available_asset_balance, get_shares_asset_value_for_staking_pool};
+use crate::liquidation::{
+    BoolOrTarget, get_available_asset_balance, get_shares_asset_value_for_staking_pool,
+};
 use crate::tx_interface::{Apply, TxHash, Verify};
 use crate::types::config::{BIG_U64_LIMBS, BIG_U96_LIMBS, Builder, F};
 use crate::types::constants::*;
@@ -196,6 +198,7 @@ impl Verify for L2StakeAssetsTxTarget {
             &tx_state.risk_infos[OWNER_ACCOUNT_ID].cross_risk_parameters,
             &tx_state.margined_asset[TX_ASSET_ID],
             &tx_state.account_margined_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID].balance,
+            BoolOrTarget::False,
         );
         builder.conditional_assert_lte_biguint(
             is_enabled,

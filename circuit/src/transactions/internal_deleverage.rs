@@ -15,7 +15,7 @@ use crate::bigint::biguint::CircuitBuilderBiguint;
 use crate::bigint::comparison::CircuitBuilderBiguintSubtractiveComparison;
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::comparison::CircuitBuilderSubtractiveComparison;
-use crate::liquidation::{get_available_asset_balance, get_position_zero_quote};
+use crate::liquidation::{BoolOrTarget, get_available_asset_balance, get_position_zero_quote};
 use crate::signed::signed_target::{CircuitBuilderSigned, SignedTarget};
 use crate::tx_interface::{Apply, Verify};
 use crate::types::account_position::AccountPositionTarget;
@@ -317,6 +317,7 @@ impl Apply for InternalDeleverageTxTarget {
             &tx_state.risk_infos[BANKRUPT_ACCOUNT_ID].cross_risk_parameters,
             &tx_state.margined_asset[TX_ASSET_ID],
             &tx_state.account_margined_assets[BANKRUPT_ACCOUNT_ID][TX_ASSET_ID].balance,
+            BoolOrTarget::True,
         );
         let is_bankrupt_has_enough_cross_collateral = {
             // new collateral = old collateral - margin_delta
@@ -340,6 +341,7 @@ impl Apply for InternalDeleverageTxTarget {
             &tx_state.risk_infos[DELEVERAGER_ACCOUNT_ID].cross_risk_parameters,
             &tx_state.margined_asset[TX_ASSET_ID],
             &tx_state.account_margined_assets[DELEVERAGER_ACCOUNT_ID][TX_ASSET_ID].balance,
+            BoolOrTarget::True,
         );
         let is_deleverager_has_enough_cross_collateral = {
             // new collateral = old collateral - margin_delta

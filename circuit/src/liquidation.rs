@@ -249,6 +249,13 @@ pub fn get_position_zero_quote(
     }
 }
 
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum BoolOrTarget {
+    False,
+    True,
+    Target(BoolTarget),
+}
+
 // Returns the available balance of the asset in context of product type
 pub fn get_available_asset_balance(
     builder: &mut Builder,
@@ -260,6 +267,7 @@ pub fn get_available_asset_balance(
     risk_info: &RiskParametersTarget,
     margin_asset: &MarginedAssetTarget,
     margin_balance: &BigIntTarget,
+    skip_order_margin: BoolOrTarget,
 ) -> BigUintTarget {
     let is_product_spot = BoolTarget::new_unsafe(product_type);
     let is_product_perps = builder.not(is_product_spot);
@@ -285,17 +293,27 @@ pub fn get_available_asset_balance(
     result_if_unified_margin =
         builder.add_biguint_non_carry(&result_if_unified_margin, &asset_balance, BIG_U96_LIMBS);
 
-    let locked_balance = account_asset.locked_balance.clone();
-    let balance = builder.mul_biguint_by_bool(&account_asset.balance, is_product_perps);
-    // For spot, we should subtract the locked balance
-    // For perps, we should subtract the locked balance from margin side.
-    let (excess_amount, borrow) = builder.try_sub_biguint(&locked_balance, &balance);
-    let success = builder.not(BoolTarget::new_unsafe(borrow.0));
-    let excess_amount = builder.mul_biguint_by_bool(&excess_amount, success);
-    // If borrow is zero, the subtract `excess_amount` from `result_if_unified_margin`
-    let (result, borrow) = builder.try_sub_biguint(&result_if_unified_margin, &excess_amount);
-    let success = builder.not(BoolTarget::new_unsafe(borrow.0));
-    result_if_unified_margin = builder.mul_biguint_by_bool(&result, success);
+    if skip_order_margin != BoolOrTarget::True {
+        let locked_balance = account_asset.locked_balance.clone();
+        let balance = builder.mul_biguint_by_bool(&account_asset.balance, is_product_perps);
+        // For spot, we should subtract the locked balance
+        // For perps, we should subtract the locked balance from margin side.
+        let (excess_amount, borrow) = builder.try_sub_biguint(&locked_balance, &balance);
+        let success = builder.not(BoolTarget::new_unsafe(borrow.0));
+        let excess_amount = builder.mul_biguint_by_bool(&excess_amount, success);
+        // If borrow is zero, the subtract `excess_amount` from `result_if_unified_margin`
+        let (mut result, borrow) =
+            builder.try_sub_biguint(&result_if_unified_margin, &excess_amount);
+        let success = builder.not(BoolTarget::new_unsafe(borrow.0));
+        result = builder.mul_biguint_by_bool(&result, success);
+
+        if let BoolOrTarget::Target(t) = skip_order_margin {
+            result_if_unified_margin =
+                builder.select_biguint(t, &result_if_unified_margin, &result);
+        } else {
+            result_if_unified_margin = result;
+        }
+    }
 
     let result_if_unified = builder.select_biguint(
         is_asset_used_as_margin,

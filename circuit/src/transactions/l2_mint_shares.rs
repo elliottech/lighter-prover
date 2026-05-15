@@ -15,7 +15,7 @@ use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::eddsa::gadgets::base_field::QuinticExtensionTarget;
 use crate::eddsa::schnorr::hash_to_quintic_extension_circuit;
 use crate::liquidation::{
-    get_available_asset_balance, get_shares_asset_value_for_staking_pool,
+    BoolOrTarget, get_available_asset_balance, get_shares_asset_value_for_staking_pool,
     get_shares_usdc_value_for_public_pool,
 };
 use crate::tx_interface::{Apply, TxHash, Verify};
@@ -192,6 +192,7 @@ impl Verify for L2MintSharesTxTarget {
             &tx_state.risk_infos[OWNER_ACCOUNT_ID].cross_risk_parameters,
             &tx_state.margined_asset[USDC_BASE_ASSET_ID],
             &tx_state.account_margined_assets[OWNER_ACCOUNT_ID][USDC_BASE_ASSET_ID].balance,
+            BoolOrTarget::False,
         );
 
         self.principal_amount = get_shares_usdc_value_for_public_pool(

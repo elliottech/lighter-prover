@@ -196,22 +196,21 @@ impl Verify for L1DepositTxTarget {
                 - Asset is empty
                 - Route type is PERPS but asset is not margin-enabled
             */
-            let is_asset_empty = tx_state.assets[TX_ASSET_ID].is_empty(builder);
-            let is_perps = builder.is_equal_constant(self.route_type, ROUTE_TYPE_PERPS);
-            let is_perps_but_not_margin_enabled = builder.and_not(
-                is_perps,
-                tx_state.is_asset_used_as_margin[OWNER_ACCOUNT_ID][TX_ASSET_ID],
-            );
-            let skip_account_creation =
-                builder.multi_or(&[is_asset_empty, is_perps_but_not_margin_enabled]);
             let is_accepted_amount_zero = builder.is_zero_biguint(&self.accepted_amount);
-            // a => b = !a || b
-            let not_flag = builder.not(skip_account_creation);
-            let should_be_true = builder.or(not_flag, is_accepted_amount_zero);
-            builder.conditional_assert_true(is_enabled, should_be_true);
+            let is_accepted_amount_non_zero = builder.not(is_accepted_amount_zero);
 
-            // Do not create a new account in this case
-            self.is_new_account = builder.and_not(self.is_new_account, skip_account_creation);
+            // If sequencer accepted non-zero amount, asset should be exist in the system
+            let is_asset_empty = tx_state.assets[TX_ASSET_ID].is_empty(builder);
+            let asset_existence_check =
+                builder.multi_and(&[is_accepted_amount_non_zero, self.is_enabled]);
+            builder.conditional_assert_false(asset_existence_check, is_asset_empty);
+
+            let is_perps = builder.is_equal_constant(self.route_type, ROUTE_TYPE_PERPS);
+            let margin_mode_check =
+                builder.multi_and(&[is_accepted_amount_non_zero, self.is_enabled, is_perps]);
+            let is_asset_margin_enabled =
+                tx_state.is_asset_used_as_margin[OWNER_ACCOUNT_ID][TX_ASSET_ID];
+            builder.conditional_assert_true(margin_mode_check, is_asset_margin_enabled);
         }
 
         // nil account index is reserved and always should be empty

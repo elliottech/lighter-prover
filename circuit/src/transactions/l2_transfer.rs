@@ -20,7 +20,7 @@ use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::deserializers;
 use crate::eddsa::gadgets::base_field::QuinticExtensionTarget;
 use crate::eddsa::schnorr::hash_to_quintic_extension_circuit;
-use crate::liquidation::get_available_asset_balance;
+use crate::liquidation::{BoolOrTarget, get_available_asset_balance};
 use crate::tx_interface::{Apply, TxHash, Verify};
 use crate::types::account::AccountTarget;
 use crate::types::asset::{ensure_valid_asset_index, is_universal_asset};
@@ -376,6 +376,7 @@ impl Verify for L2TransferTxTarget {
             &tx_state.risk_infos[SENDER_ACCOUNT_ID].cross_risk_parameters,
             &tx_state.margined_asset[TX_ASSET_ID],
             &tx_state.account_margined_assets[SENDER_ACCOUNT_ID][TX_ASSET_ID].balance,
+            BoolOrTarget::Target(is_same_account),
         );
         let is_self_transfer_and_spot = builder.and(is_same_account, is_from_spot);
         // Use whole spot balance(including locked balance) if users move assets from spot to perps in the same account
@@ -395,6 +396,7 @@ impl Verify for L2TransferTxTarget {
             &tx_state.risk_infos[SENDER_ACCOUNT_ID].cross_risk_parameters,
             &tx_state.margined_asset[FEE_ASSET_ID],
             &tx_state.account_margined_assets[SENDER_ACCOUNT_ID][FEE_ASSET_ID].balance,
+            BoolOrTarget::False,
         );
 
         // Sender balance checks

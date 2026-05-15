@@ -14,7 +14,7 @@ use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::comparison::CircuitBuilderSubtractiveComparison;
 use crate::eddsa::gadgets::base_field::QuinticExtensionTarget;
 use crate::eddsa::schnorr::hash_to_quintic_extension_circuit;
-use crate::liquidation::get_available_asset_balance;
+use crate::liquidation::{BoolOrTarget, get_available_asset_balance};
 use crate::tx_interface::{Apply, TxHash, Verify};
 use crate::types::config::{BIG_U96_LIMBS, Builder, F};
 use crate::types::constants::*;
@@ -223,6 +223,7 @@ impl Verify for L2CreatePublicPoolTxTarget {
             &tx_state.risk_infos[MASTER_ACCOUNT_ID].cross_risk_parameters,
             &tx_state.margined_asset[TX_ASSET_ID],
             &tx_state.account_margined_assets[MASTER_ACCOUNT_ID][TX_ASSET_ID].balance,
+            BoolOrTarget::False,
         );
         builder.conditional_assert_lte_biguint(
             is_enabled,
