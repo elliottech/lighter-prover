@@ -125,7 +125,7 @@ impl PriorityOperationsPubData for L1RegisterAssetTxTarget {
             add_target(builder, bytes, self.liquidation_threshold, 16),
             add_target(builder, bytes, self.liquidation_factor, 16),
             add_target(builder, bytes, self.liquidation_fee, 32),
-            add_target(builder, bytes, self.index_price_divider, 64),
+            add_target(builder, bytes, self.index_price_divider, 56),
         ]
         .iter()
         .sum();
