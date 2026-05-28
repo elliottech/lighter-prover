@@ -372,11 +372,6 @@ pub fn get_available_margin_balance(
 
     available_margin_in_usdc = builder.mul_biguint_by_bool(&available_margin_in_usdc, is_healthy);
 
-    let margin_balance_non_negative = builder.is_not_equal(margin_balance.sign.target, neg_one);
-
-    available_margin_in_usdc =
-        builder.mul_biguint_by_bool(&available_margin_in_usdc, margin_balance_non_negative);
-
     let asset_index_price = margin_asset.index_price;
     let is_asset_index_price_is_not_zero = builder.is_not_zero(asset_index_price);
 
@@ -396,6 +391,11 @@ pub fn get_available_margin_balance(
         builder.mul_biguint_non_carry(&available_margin_in_usdc, &multiplier, BIG_U128_LIMBS);
     available_margin_native = builder.div_biguint(&available_margin_native, &divider);
     available_margin_native = builder.trim_biguint(&available_margin_native, BIG_U96_LIMBS);
+
+    let margin_balance_non_negative = builder.is_not_equal(margin_balance.sign.target, neg_one);
+
+    available_margin_native =
+        builder.mul_biguint_by_bool(&available_margin_native, margin_balance_non_negative);
 
     let result_non_usdc = builder.min_biguint(&available_margin_native, &margin_balance.abs);
 
