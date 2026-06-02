@@ -15,57 +15,67 @@ use crate::comparison::CircuitBuilderSubtractiveComparison;
 use crate::eddsa::gadgets::base_field::{CircuitBuilderGFp5, QuinticExtensionTarget};
 use crate::eddsa::schnorr::hash_to_quintic_extension_circuit;
 use crate::types::account::AccountTarget;
+use crate::types::account_order::OrderFlags;
 use crate::types::config::{Builder, F};
-use crate::types::constants::{
-    ACCOUNT_INDEX_BITS, FEE_TICK, MARKET_TYPE_PERPS, MAX_APPROVED_INTEGRATORS, NIL_ACCOUNT_INDEX,
-    TIMESTAMP_BITS,
-};
+use crate::types::constants::*;
 use crate::types::market::MarketTarget;
 use crate::types::system_config::SystemConfigTarget;
 use crate::utils::CircuitBuilderUtils;
 
 pub const NB_ATTRIBUTES_PER_TX: usize = 4;
 
-pub const ATTRIBUTE_TYPE_NIL: usize = 0;
-pub const ATTRIBUTE_TYPE_INTEGRATOR_FEE_COLLECTOR_INDEX: usize = 1;
-pub const ATTRIBUTE_TYPE_INTEGRATOR_TAKER_FEE: usize = 2;
-pub const ATTRIBUTE_TYPE_INTEGRATOR_MAKER_FEE: usize = 3;
-pub const ATTRIBUTE_TYPE_SKIP_TX_NONCE: usize = 4;
-pub const TOTAL_ATTRIBUTE_COUNT: usize = ATTRIBUTE_TYPE_SKIP_TX_NONCE + 1;
+pub const ATTR_NIL: usize = 0;
+pub const ATTR_INTEGRATOR_FEE_COLLECTOR_INDEX: usize = 1;
+pub const ATTR_INTEGRATOR_TAKER_FEE: usize = 2;
+pub const ATTR_INTEGRATOR_MAKER_FEE: usize = 3;
+pub const ATTR_SKIP_TX_NONCE: usize = 4;
+pub const ATTR_CANCEL_ALL_MARKET_INDEX: usize = 5;
+pub const ATTR_SELF_TRADE_BEHAVIOR_MODE: usize = 6;
+pub const ATTR_SELF_TRADE_EQUALITY_MODE: usize = 7;
+pub const TOTAL_ATTRIBUTE_COUNT: usize = ATTR_SELF_TRADE_EQUALITY_MODE + 1;
 
 pub const ATTRIBUTE_TYPE_BITS: usize = 3;
 lazy_static! {
-    pub static ref ATTRIBUTE_BIT_SIZES: HashMap<usize, usize> = {
+    pub static ref ATTR_BIT_SIZES: HashMap<usize, usize> = {
         let mut m = HashMap::new();
-        m.insert(ATTRIBUTE_TYPE_NIL, 0);
+        m.insert(ATTR_NIL, 0);
         m.insert(
-            ATTRIBUTE_TYPE_INTEGRATOR_FEE_COLLECTOR_INDEX,
+            ATTR_INTEGRATOR_FEE_COLLECTOR_INDEX,
             ACCOUNT_INDEX_BITS,
         );
-        m.insert(ATTRIBUTE_TYPE_INTEGRATOR_TAKER_FEE, 24);
-        m.insert(ATTRIBUTE_TYPE_INTEGRATOR_MAKER_FEE, 24);
-        m.insert(ATTRIBUTE_TYPE_SKIP_TX_NONCE, 1);
+        m.insert(ATTR_INTEGRATOR_TAKER_FEE, 24);
+        m.insert(ATTR_INTEGRATOR_MAKER_FEE, 24);
+        m.insert(ATTR_SKIP_TX_NONCE, 1);
+        m.insert(ATTR_CANCEL_ALL_MARKET_INDEX, MARKET_INDEX_BITS);
+        m.insert(ATTR_SELF_TRADE_BEHAVIOR_MODE, 8);
+        m.insert(ATTR_SELF_TRADE_EQUALITY_MODE, 8);
         m
     };
-    pub static ref ATTRIBUTE_MAX_VALUES: HashMap<usize, usize> = {
+    pub static ref ATTR_MAX_VALUES: HashMap<usize, usize> = {
         let mut m = HashMap::new();
-        m.insert(ATTRIBUTE_TYPE_NIL, 0usize);
+        m.insert(ATTR_NIL, 0usize);
         m.insert(
-            ATTRIBUTE_TYPE_INTEGRATOR_FEE_COLLECTOR_INDEX,
+            ATTR_INTEGRATOR_FEE_COLLECTOR_INDEX,
             NIL_ACCOUNT_INDEX as usize,
         );
-        m.insert(ATTRIBUTE_TYPE_INTEGRATOR_TAKER_FEE, FEE_TICK as usize);
-        m.insert(ATTRIBUTE_TYPE_INTEGRATOR_MAKER_FEE, FEE_TICK as usize);
-        m.insert(ATTRIBUTE_TYPE_SKIP_TX_NONCE, 1usize);
+        m.insert(ATTR_INTEGRATOR_TAKER_FEE, FEE_TICK as usize);
+        m.insert(ATTR_INTEGRATOR_MAKER_FEE, FEE_TICK as usize);
+        m.insert(ATTR_SKIP_TX_NONCE, 1usize);
+        m.insert(ATTR_CANCEL_ALL_MARKET_INDEX, NIL_MARKET_INDEX as usize);
+        m.insert(ATTR_SELF_TRADE_BEHAVIOR_MODE, SELF_TRADE_BEHAVIOR_REDUCE as usize);
+        m.insert(ATTR_SELF_TRADE_EQUALITY_MODE, SELF_TRADE_EQUALITY_MASTER_ACCOUNT_INDEX as usize);
         m
     };
-    pub static ref ATTRIBUTE_NIL_VALUES: [F; TOTAL_ATTRIBUTE_COUNT] = {
+    pub static ref ATTR_NIL_VALUES: [F; TOTAL_ATTRIBUTE_COUNT] = {
         [
             F::ZERO, // Nil
             F::ZERO, // Integrator Fee Collector Index
             F::ZERO, // Integrator Taker Fee
             F::ZERO, // Integrator Maker Fee
             F::ZERO, // Skip Tx Nonce
+            F::from_canonical_u8(NIL_MARKET_INDEX), // Cancel All Market Index
+            F::ZERO, // Self-trade behavior mode
+            F::ZERO, // Self-trade equality mode
         ]
     };
 }
@@ -124,7 +134,7 @@ impl TxAttributesTarget {
         let mut attributes = Self {
             inner_types: core::array::from_fn(|_| builder.add_virtual_target()),
             inner_values: core::array::from_fn(|_| builder.add_virtual_target()),
-            values: ATTRIBUTE_NIL_VALUES.map(|v| builder.constant(v)),
+            values: ATTR_NIL_VALUES.map(|v| builder.constant(v)),
         };
         attributes.prepare(builder);
         attributes
@@ -180,7 +190,16 @@ impl TxAttributesTarget {
 
     /// Check sanity of sent attributes and set the inner attributes array
     fn prepare(&mut self, builder: &mut Builder) {
-        // Verify attribute types
+        self.verify_attribute_types(builder);
+
+        self.set_attributes_array(builder);
+
+        self.range_check_attribute_values(builder);
+
+        self.validate_attribute_types(builder);
+    }
+
+    fn verify_attribute_types(&self, builder: &mut Builder) {
         let max_attribute_type = builder.constant_usize(TOTAL_ATTRIBUTE_COUNT - 1);
         let mut last_type = self.inner_types[0];
         for i in 0..NB_ATTRIBUTES_PER_TX {
@@ -202,25 +221,74 @@ impl TxAttributesTarget {
 
             last_type = t;
         }
+    }
 
-        // Set attributes array
+    fn set_attributes_array(&mut self, builder: &mut Builder) {
         for (t, v) in self.inner_types.iter().zip(self.inner_values.iter()) {
             for i in 1..TOTAL_ATTRIBUTE_COUNT {
                 let is_type = builder.is_equal_constant(*t, i as u64);
                 self.values[i] = builder.select(is_type, *v, self.values[i]);
             }
         }
+    }
 
-        // Range check attribute values
+    fn range_check_attribute_values(&self, builder: &mut Builder) {
         for i in 1..TOTAL_ATTRIBUTE_COUNT {
-            builder.register_range_check(self.values[i], *ATTRIBUTE_BIT_SIZES.get(&i).unwrap());
-            let max_val = builder.constant_usize(*ATTRIBUTE_MAX_VALUES.get(&i).unwrap());
-            builder.assert_lte(
-                self.values[i],
-                max_val,
-                *ATTRIBUTE_BIT_SIZES.get(&i).unwrap(),
-            );
+            builder.register_range_check(self.values[i], *ATTR_BIT_SIZES.get(&i).unwrap());
+            let max_val = builder.constant_usize(*ATTR_MAX_VALUES.get(&i).unwrap());
+            builder.assert_lte(self.values[i], max_val, *ATTR_BIT_SIZES.get(&i).unwrap());
         }
+    }
+
+    fn validate_attribute_types(&self, builder: &mut Builder) {
+        let is_taker_fee_nil = builder.is_equal_f(
+            self.get(ATTR_INTEGRATOR_TAKER_FEE),
+            ATTR_NIL_VALUES[ATTR_INTEGRATOR_TAKER_FEE],
+        );
+        let is_maker_fee_nil = builder.is_equal_f(
+            self.get(ATTR_INTEGRATOR_MAKER_FEE),
+            ATTR_NIL_VALUES[ATTR_INTEGRATOR_MAKER_FEE],
+        );
+        let is_integrator_index_nil = builder.is_equal_f(
+            self.get(ATTR_INTEGRATOR_FEE_COLLECTOR_INDEX),
+            ATTR_NIL_VALUES[ATTR_INTEGRATOR_FEE_COLLECTOR_INDEX],
+        );
+        let is_self_trade_behavior_mode_nil = builder.is_equal_f(
+            self.get(ATTR_SELF_TRADE_BEHAVIOR_MODE),
+            ATTR_NIL_VALUES[ATTR_SELF_TRADE_BEHAVIOR_MODE],
+        );
+        let is_self_trade_equality_mode_nil = builder.is_equal_f(
+            self.get(ATTR_SELF_TRADE_EQUALITY_MODE),
+            ATTR_NIL_VALUES[ATTR_SELF_TRADE_EQUALITY_MODE],
+        );
+
+        // Disallow integrator fees if integrator index is not set
+        let is_both_fees_nil = builder.and(is_taker_fee_nil, is_maker_fee_nil);
+        let should_be_false = builder.and_not(is_integrator_index_nil, is_both_fees_nil);
+        builder.assert_false(should_be_false);
+
+        // Disallow self-trade specifications if integrator index is set
+        let is_self_trade_modes_nil = builder.and(
+            is_self_trade_behavior_mode_nil,
+            is_self_trade_equality_mode_nil,
+        );
+        let should_be_true = builder.or(is_integrator_index_nil, is_self_trade_modes_nil);
+        builder.assert_true(should_be_true);
+
+        // Disallow Reduce mode with master account index equality mode
+        let is_master_account_index_equality_mode = builder.is_equal_constant(
+            self.get(ATTR_SELF_TRADE_EQUALITY_MODE),
+            SELF_TRADE_EQUALITY_MASTER_ACCOUNT_INDEX,
+        );
+        let is_reduce_behavior_mode = builder.is_equal_constant(
+            self.get(ATTR_SELF_TRADE_BEHAVIOR_MODE),
+            SELF_TRADE_BEHAVIOR_REDUCE,
+        );
+        let should_be_false = builder.and(
+            is_master_account_index_equality_mode,
+            is_reduce_behavior_mode,
+        );
+        builder.assert_false(should_be_false);
     }
 
     pub fn sanitize_and_normalize(
@@ -233,8 +301,8 @@ impl TxAttributesTarget {
     ) {
         let is_enabled = {
             let is_nil_integrator_index = builder.is_equal_f(
-                self.get(ATTRIBUTE_TYPE_INTEGRATOR_FEE_COLLECTOR_INDEX),
-                ATTRIBUTE_NIL_VALUES[ATTRIBUTE_TYPE_INTEGRATOR_FEE_COLLECTOR_INDEX],
+                self.get(ATTR_INTEGRATOR_FEE_COLLECTOR_INDEX),
+                ATTR_NIL_VALUES[ATTR_INTEGRATOR_FEE_COLLECTOR_INDEX],
             );
             let is_not_nil_integrator_index = builder.not(is_nil_integrator_index);
 
@@ -262,7 +330,7 @@ impl TxAttributesTarget {
         for i in 0..MAX_APPROVED_INTEGRATORS {
             let is_integrator = builder.is_equal(
                 account.approved_integrators[i].integrator_account_index,
-                self.get(ATTRIBUTE_TYPE_INTEGRATOR_FEE_COLLECTOR_INDEX),
+                self.get(ATTR_INTEGRATOR_FEE_COLLECTOR_INDEX),
             );
             let flag = builder.and_not(is_integrator, sanitized);
             sanitized = builder.or(sanitized, flag);
@@ -287,11 +355,11 @@ impl TxAttributesTarget {
                 account.approved_integrators[i].max_spot_maker_fee,
             );
             for (attr_type, target, cap) in [
-                (ATTRIBUTE_TYPE_INTEGRATOR_TAKER_FEE, taker_fee, taker_cap),
-                (ATTRIBUTE_TYPE_INTEGRATOR_MAKER_FEE, maker_fee, maker_cap),
+                (ATTR_INTEGRATOR_TAKER_FEE, taker_fee, taker_cap),
+                (ATTR_INTEGRATOR_MAKER_FEE, maker_fee, maker_cap),
             ] {
                 // First assert over given value, then cap
-                let fee_bit_size = *ATTRIBUTE_BIT_SIZES.get(&attr_type).unwrap();
+                let fee_bit_size = *ATTR_BIT_SIZES.get(&attr_type).unwrap();
                 let fee_value = self.get(attr_type);
                 builder.conditional_assert_lte(flag, fee_value, target, fee_bit_size);
 
@@ -300,6 +368,33 @@ impl TxAttributesTarget {
             }
         }
         builder.conditional_assert_true(is_enabled, sanitized);
+    }
+
+    pub fn get_register_generic_fields(
+        &self,
+        builder: &mut Builder,
+    ) -> (
+        Target, // generic_field_1
+        Target, // generic_field_2
+        Target, // generic_field_3
+    ) {
+        let is_integrator_fee_disabled =
+            is_integrator_fee_disabled(builder, self.get(ATTR_INTEGRATOR_FEE_COLLECTOR_INDEX));
+        let order_flags = OrderFlags {
+            self_trade_behavior_mode: self.get(ATTR_SELF_TRADE_BEHAVIOR_MODE),
+            self_trade_equality_mode: self.get(ATTR_SELF_TRADE_EQUALITY_MODE),
+        }
+        .to_target(builder);
+
+        (
+            self.get(ATTR_INTEGRATOR_FEE_COLLECTOR_INDEX),
+            builder.select(
+                is_integrator_fee_disabled,
+                order_flags,
+                self.get(ATTR_INTEGRATOR_TAKER_FEE),
+            ),
+            self.get(ATTR_INTEGRATOR_MAKER_FEE),
+        )
     }
 }
 
@@ -319,4 +414,14 @@ impl<T: Witness<F>, F: PrimeField64> TxAttributesTargetWitness<F> for T {
 
         Ok(())
     }
+}
+
+pub fn is_integrator_fee_disabled(
+    builder: &mut Builder,
+    integrator_fee_collector_index: Target,
+) -> BoolTarget {
+    builder.is_equal_f(
+        integrator_fee_collector_index,
+        ATTR_NIL_VALUES[ATTR_INTEGRATOR_FEE_COLLECTOR_INDEX],
+    )
 }

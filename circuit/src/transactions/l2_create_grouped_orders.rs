@@ -16,10 +16,6 @@ use crate::eddsa::schnorr::hash_to_quintic_extension_circuit;
 use crate::hash_utils::CircuitBuilderHashUtils;
 use crate::matching_engine::{get_next_order_nonce, is_not_valid_reduce_only_direction};
 use crate::poseidon2::Poseidon2Hash;
-use crate::tx_attributes::{
-    ATTRIBUTE_TYPE_INTEGRATOR_FEE_COLLECTOR_INDEX, ATTRIBUTE_TYPE_INTEGRATOR_MAKER_FEE,
-    ATTRIBUTE_TYPE_INTEGRATOR_TAKER_FEE,
-};
 use crate::tx_interface::{Apply, TxHash, Verify};
 use crate::types::account_order_type::AccountOrderTypes;
 use crate::types::config::{Builder, F};
@@ -679,6 +675,9 @@ impl Apply for L2CreateGroupedOrdersTxTarget {
         let trigger_status_mark_price = builder.constant_from_u8(TRIGGER_STATUS_MARK_PRICE);
         let trigger_status_parent_order = builder.constant_from_u8(TRIGGER_STATUS_PARENT_ORDER);
 
+        let (generic_field_1, generic_field_2, generic_field_3) =
+            tx_state.attributes.get_register_generic_fields(builder);
+
         let execute_transaction = builder.constant_from_u8(EXECUTE_TRANSACTION);
         let insert_order = builder.constant_from_u8(INSERT_ORDER);
         let mut instruction_flag = self.success;
@@ -738,10 +737,9 @@ impl Apply for L2CreateGroupedOrdersTxTarget {
                 pending_to_trigger_order_index1: builder.zero(),
                 pending_to_cancel_order_index0: builder.zero(),
 
-                generic_field_1: tx_state
-                    .get_attribute(ATTRIBUTE_TYPE_INTEGRATOR_FEE_COLLECTOR_INDEX),
-                u32_generic_field_0: tx_state.get_attribute(ATTRIBUTE_TYPE_INTEGRATOR_TAKER_FEE),
-                u32_generic_field_1: tx_state.get_attribute(ATTRIBUTE_TYPE_INTEGRATOR_MAKER_FEE),
+                generic_field_1,
+                generic_field_2,
+                generic_field_3,
             };
         }
 

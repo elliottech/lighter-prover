@@ -154,9 +154,7 @@ use crate::transactions::l2_update_public_pool::{
 };
 use crate::transactions::l2_withdraw::{L2WithdrawTxTarget, L2WithdrawTxTargetWitness};
 use crate::tx::Tx;
-use crate::tx_attributes::{
-    ATTRIBUTE_TYPE_SKIP_TX_NONCE, TxAttributesTarget, TxAttributesTargetWitness,
-};
+use crate::tx_attributes::{ATTR_SKIP_TX_NONCE, TxAttributesTarget, TxAttributesTargetWitness};
 use crate::tx_interface::TransactionTarget;
 use crate::types::account::{AccountTarget, AccountTargetWitness};
 use crate::types::account_asset::{AccountAssetTarget, AccountAssetTargetWitness};
@@ -574,7 +572,7 @@ impl TxTarget {
                 instruction_type: register_stack_before[0].instruction_type,
                 tx_sender_account_partial: partial_main_account,
                 sub_account_index: self.accounts_before[SUB_ACCOUNT_ID].account_index,
-                skip_tx_nonce: self.attributes.get(ATTRIBUTE_TYPE_SKIP_TX_NONCE),
+                skip_tx_nonce: self.attributes.get(ATTR_SKIP_TX_NONCE),
             },
         );
 
@@ -2080,6 +2078,10 @@ impl TxTarget {
         );
         let order_belongs_to_maker_account =
             builder.and_not(maker_index_eq_owner_index, is_account_order_index_nil);
+        let use_maker_account = builder.and(
+            order_belongs_to_maker_account,
+            tx_state.is_sender_receiver_different,
+        );
 
         // Verify that index_0 is either 0 or a valid order index
         let is_index_0_is_zero = builder.is_zero(self.account_order_before.index_0);
@@ -2097,7 +2099,7 @@ impl TxTarget {
 
         // Set oid leaf and recalculate root
         let old_account_orders_root = builder.select_hash(
-            order_belongs_to_maker_account,
+            use_maker_account,
             &self.accounts_before[MAKER_ACCOUNT_ID].account_orders_root,
             &self.accounts_before[TAKER_ACCOUNT_ID].account_orders_root,
         );
@@ -2157,12 +2159,12 @@ impl TxTarget {
         // Set the new account orders root in the account metadata
 
         tx_state.accounts[TAKER_ACCOUNT_ID].account_orders_root = builder.select_hash(
-            order_belongs_to_maker_account,
+            use_maker_account,
             &self.accounts_before[TAKER_ACCOUNT_ID].account_orders_root,
             &new_account_orders_root,
         );
         tx_state.accounts[MAKER_ACCOUNT_ID].account_orders_root = builder.select_hash(
-            order_belongs_to_maker_account,
+            use_maker_account,
             &new_account_orders_root,
             &self.accounts_before[MAKER_ACCOUNT_ID].account_orders_root,
         );

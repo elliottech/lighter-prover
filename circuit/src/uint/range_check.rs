@@ -23,13 +23,14 @@ use plonky2::plonk::vars::{EvaluationTargets, EvaluationVars, EvaluationVarsBase
 use plonky2::util::serialization::{Buffer, IoResult, Read, Write};
 
 use crate::builder::Builder;
+use crate::byte::split::CircuitBuilderByteSplit;
 use crate::utils::ceil_div_usize;
 
-const CACHED_RANGE_CHECK_SIZES: &[usize] = &[8, 16, 24, 32, 48];
+const CUSTOM_GATE_SIZES: &[usize] = &[16, 32, 48];
 lazy_static! {
-    static ref CACHED_RANGE_CHECK_SIZES_SET: HashSet<usize> = {
+    pub static ref CUSTOM_GATE_SIZES_SET: HashSet<usize> = {
         let mut set = HashSet::new();
-        for val in CACHED_RANGE_CHECK_SIZES.iter() {
+        for val in CUSTOM_GATE_SIZES.iter() {
             set.insert(*val);
         }
         set
@@ -41,46 +42,7 @@ where
     F: RichField + Extendable<D>,
 {
     #[track_caller]
-    fn split_le_2bit_exact_reuse_rows(&mut self, val: Target, bit_size: usize) -> Vec<Target> {
-        assert!(
-            bit_size <= 64,
-            "Bit size for split_le_2bit_exact_reuse_rows must be <= 64, got {}",
-            bit_size
-        );
-        if bit_size == 0 {
-            return Vec::new();
-        }
-
-        let gate = RangeCheck2BitGate::new_from_config(self.config(), bit_size);
-        let (row, copy) = self.find_slot(gate, &[F::from_canonical_usize(bit_size)], &[]);
-        self.connect(val, Target::wire(row, gate.wire_ith_input(copy)));
-        (0..ceil_div_usize(bit_size, RangeCheck2BitGate::<F, D>::AUX_LIMB_BITS))
-            .map(|j| Target::wire(row, gate.wire_ith_input_jth_aux_limb(copy, j)))
-            .collect()
-    }
-
-    #[track_caller]
-    fn split_le_2bit_exact_reuse_rows_cached(
-        &mut self,
-        val: Target,
-        bit_size: usize,
-    ) -> Vec<Target> {
-        if CACHED_RANGE_CHECK_SIZES_SET.contains(&bit_size)
-            && let Some(result) = self.split_le_2bit_reuse_cache.get(&(bit_size, val))
-        {
-            return result.clone();
-        }
-
-        let result = self.split_le_2bit_exact_reuse_rows(val, bit_size);
-        if CACHED_RANGE_CHECK_SIZES_SET.contains(&bit_size) {
-            self.split_le_2bit_reuse_cache
-                .insert((bit_size, val), result.clone());
-        }
-        result
-    }
-
-    #[track_caller]
-    pub(crate) fn register_range_check_2_bit(&mut self, val: Target, bit_size: usize) {
+    pub fn register_range_check(&mut self, val: Target, bit_size: usize) {
         assert!(
             bit_size <= 64,
             "Bit size for range check must be <= 64, got {}",
@@ -130,18 +92,17 @@ where
         self.range_check_targets_to_bit_sizes.insert(val, bit_size);
     }
 
-    pub(crate) fn perform_registered_range_checks_2_bit(&mut self) {
+    pub fn perform_registered_range_checks(&mut self) {
         self.range_check_targets_to_bit_sizes.clear();
 
-        let mut entries: Vec<_> = self
+        let entries: Vec<_> = self
             .range_checks
             .iter()
             .map(|(k, v)| (*k, v.clone()))
             .collect();
-        entries.sort_by_key(|(bit_size, _)| *bit_size);
         self.range_checks.clear();
         for (bit_size, targets) in entries {
-            let mut filtered_targets = targets
+            let filtered_targets = targets
                 .iter()
                 .filter(|x| {
                     if let Some(bits) = self.split_le_cache.get(x) {
@@ -165,9 +126,73 @@ where
                 })
                 .cloned()
                 .collect::<Vec<_>>();
-            filtered_targets.sort_unstable();
             for target in filtered_targets {
-                self.split_le_2bit_exact_reuse_rows_cached(target, bit_size);
+                if !CUSTOM_GATE_SIZES_SET.contains(&bit_size) {
+                    if bit_size % 8 == 0 {
+                        self.split_bytes(target, bit_size / 8);
+                    } else {
+                        self.split_le(target, bit_size);
+                    }
+                } else {
+                    let gate = RangeCheckGate::new_from_config(self.config(), bit_size);
+                    let (row, copy) =
+                        self.find_slot(gate, &[F::from_canonical_usize(bit_size)], &[]);
+                    self.connect(target, Target::wire(row, gate.wire_ith_input(copy)));
+                }
+            }
+        }
+    }
+
+    pub fn perform_registered_range_checks_with_custom_range_check_sizes(
+        &mut self,
+        custom_gate_sizes_set: &HashSet<usize>,
+    ) {
+        self.range_check_targets_to_bit_sizes.clear();
+
+        let entries: Vec<_> = self
+            .range_checks
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
+        self.range_checks.clear();
+        for (bit_size, targets) in entries {
+            let filtered_targets = targets
+                .iter()
+                .filter(|x| {
+                    if let Some(bits) = self.split_le_cache.get(x) {
+                        if bits.len() != bit_size {
+                            warn!("Target: {:?} passed to split_le with bit size {}, but registered to range check with bit size {}", x, bits.len(), bit_size);
+                        }
+                        if bits.len() <= bit_size {
+                            return false; // Already split to lower number of bits, no need to range check
+                        }
+                    }
+
+                    if let Some(bytes) = self.split_bytes_cache.get(x) {
+                        if bytes.len() * 8 != bit_size {
+                            warn!("Target: {:?} passed to split_bytes with byte size {}, but registered to range check with bit size {}", x, bytes.len(), bit_size);
+                        }
+                        if bytes.len() * 8 <= bit_size {
+                            return false; // Already split to lower number of bits, no need to range check
+                        }
+                    }
+                    true
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            for target in filtered_targets {
+                if !custom_gate_sizes_set.contains(&bit_size) {
+                    if bit_size % 8 == 0 {
+                        self.split_bytes(target, bit_size / 8);
+                    } else {
+                        self.split_le(target, bit_size);
+                    }
+                } else {
+                    let gate = RangeCheckGate::new_from_config(self.config(), bit_size);
+                    let (row, copy) =
+                        self.find_slot(gate, &[F::from_canonical_usize(bit_size)], &[]);
+                    self.connect(target, Target::wire(row, gate.wire_ith_input(copy)));
+                }
             }
         }
     }
@@ -176,14 +201,14 @@ where
 //A custom gate to add range check constraints
 //It ensures that a certain number fits within a certain number of limbs in a base 2
 #[derive(Clone, Debug, Default, Copy)]
-pub struct RangeCheck2BitGate<F: RichField + Extendable<D>, const D: usize> {
-    num_ops: usize,
-    bit_size: usize,
+pub struct RangeCheckGate<F: RichField + Extendable<D>, const D: usize> {
+    pub num_ops: usize,
+    pub bit_size: usize,
     _phantom: PhantomData<F>,
 }
 
-impl<F: RichField + Extendable<D>, const D: usize> RangeCheck2BitGate<F, D> {
-    fn new_from_config(config: &CircuitConfig, bit_size: usize) -> Self {
+impl<F: RichField + Extendable<D>, const D: usize> RangeCheckGate<F, D> {
+    pub fn new_from_config(config: &CircuitConfig, bit_size: usize) -> Self {
         Self {
             num_ops: Self::num_ops(config, bit_size),
             bit_size,
@@ -191,10 +216,10 @@ impl<F: RichField + Extendable<D>, const D: usize> RangeCheck2BitGate<F, D> {
         }
     }
 
-    const AUX_LIMB_BITS: usize = 2;
-    const BASE: usize = 1 << Self::AUX_LIMB_BITS;
+    pub const AUX_LIMB_BITS: usize = 2;
+    pub const BASE: usize = 1 << Self::AUX_LIMB_BITS;
 
-    fn num_ops(config: &CircuitConfig, bit_size: usize) -> usize {
+    pub(crate) fn num_ops(config: &CircuitConfig, bit_size: usize) -> usize {
         let routed_wires_per_op = 1;
         let unrouted_wires_per_op = ceil_div_usize(bit_size, Self::AUX_LIMB_BITS);
         let wires_per_op = routed_wires_per_op + unrouted_wires_per_op;
@@ -205,19 +230,19 @@ impl<F: RichField + Extendable<D>, const D: usize> RangeCheck2BitGate<F, D> {
         ceil_div_usize(self.bit_size, Self::AUX_LIMB_BITS)
     }
 
-    fn wire_ith_input(&self, i: usize) -> usize {
+    pub fn wire_ith_input(&self, i: usize) -> usize {
         debug_assert!(i < self.num_ops);
         i
     }
 
-    fn wire_ith_input_jth_aux_limb(&self, i: usize, j: usize) -> usize {
+    pub fn wire_ith_input_jth_aux_limb(&self, i: usize, j: usize) -> usize {
         debug_assert!(i < self.num_ops);
         debug_assert!(j < self.aux_limbs_per_input());
         self.num_ops + self.aux_limbs_per_input() * i + j
     }
 }
 
-impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for RangeCheck2BitGate<F, D> {
+impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for RangeCheckGate<F, D> {
     fn id(&self) -> String {
         format!("{self:?}")
     }
@@ -358,7 +383,7 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for RangeCheck2Bit
         let result: Vec<WitnessGeneratorRef<F, D>> = (0..self.num_ops)
             .map(|i| {
                 WitnessGeneratorRef::new(
-                    RangeCheck2BitGenerator {
+                    RangeCheckGenerator {
                         gate: *self,
                         row,
                         i,
@@ -390,17 +415,17 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for RangeCheck2Bit
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct RangeCheck2BitGenerator<F: RichField + Extendable<D>, const D: usize> {
-    gate: RangeCheck2BitGate<F, D>,
-    row: usize,
-    i: usize,
+pub struct RangeCheckGenerator<F: RichField + Extendable<D>, const D: usize> {
+    pub gate: RangeCheckGate<F, D>,
+    pub row: usize,
+    pub i: usize,
 }
 
 impl<F: RichField + Extendable<D>, const D: usize> SimpleGenerator<F, D>
-    for RangeCheck2BitGenerator<F, D>
+    for RangeCheckGenerator<F, D>
 {
     fn id(&self) -> String {
-        "RangeCheck2BitGenerator".to_string()
+        "RangeCheckGenerator".to_string()
     }
 
     fn dependencies(&self) -> Vec<Target> {
@@ -416,7 +441,7 @@ impl<F: RichField + Extendable<D>, const D: usize> SimpleGenerator<F, D>
             .get_target(Target::wire(self.row, self.gate.wire_ith_input(self.i)))
             .to_canonical_u64();
 
-        let base = RangeCheck2BitGate::<F, D>::BASE as u64;
+        let base = RangeCheckGate::<F, D>::BASE as u64;
         let limbs = (0..self.gate.aux_limbs_per_input())
             .map(|j| Target::wire(self.row, self.gate.wire_ith_input_jth_aux_limb(self.i, j)));
         let limbs_value = (0..self.gate.aux_limbs_per_input())
@@ -440,7 +465,7 @@ impl<F: RichField + Extendable<D>, const D: usize> SimpleGenerator<F, D>
     }
 
     fn deserialize(src: &mut Buffer, common_data: &CommonCircuitData<F, D>) -> IoResult<Self> {
-        let gate = RangeCheck2BitGate::deserialize(src, common_data)?;
+        let gate = RangeCheckGate::deserialize(src, common_data)?;
         let row = src.read_usize()?;
         let i = src.read_usize()?;
         Ok(Self { row, gate, i })
@@ -463,17 +488,14 @@ mod tests {
     use rand::Rng;
 
     use super::*;
-    use crate::byte::split::CircuitBuilderByteSplit;
 
     macro_rules! generate_low_degree_tests {
         ($bit_size:expr) => {
             paste! {
                 #[test]
                 fn [<low_degree_bits_ $bit_size>]() {
-                    let gate = RangeCheck2BitGate::new_from_config(
-                        &CircuitConfig::standard_recursion_config(),
-                        $bit_size,
-                    );
+
+                    let gate = RangeCheckGate::new_from_config(&CircuitConfig::standard_recursion_config(), $bit_size);
                     test_low_degree::<GoldilocksField, _, 4>(gate);
                 }
             }
@@ -484,15 +506,13 @@ mod tests {
         ($bit_size:expr) => {
             paste! {
                 #[test]
-                fn [<eval_fns_bits_ $bit_size>]() -> Result<()> {
+                fn [<eval_fns_bits_ $bit_size>]() {
                     const D: usize = 2;
                     type C = PoseidonGoldilocksConfig;
                     type F = <C as GenericConfig<D>>::F;
-
                     let config = CircuitConfig::standard_recursion_config();
-                    let gate = RangeCheck2BitGate::new_from_config(&config, $bit_size);
-                    test_eval_fns::<F, C, _, D>(gate)?;
-                    Ok(())
+                    let gate = RangeCheckGate::new_from_config(&config, $bit_size);
+                    test_eval_fns::<F, C, _, D>(gate).unwrap();
                 }
             }
         };
@@ -511,21 +531,26 @@ mod tests {
                     let mut builder = CircuitBuilder::<F, D>::new(config.clone());
 
                     let input = builder.add_virtual_target();
-                    let gate_ref = RangeCheck2BitGate::new_from_config(&config, $bit_size);
-                    let (row, _op_index) = builder.find_slot(gate_ref, &[], &[]);
+                    let gate = RangeCheckGate::new_from_config(&config, $bit_size);
+                    let gate_ref = gate.clone();
+                    let constants = vec![];
+                    let (row, _op_index) = builder.find_slot(gate, &constants, &constants);
                     builder.connect(input, Target::wire(row, gate_ref.wire_ith_input(0)));
+
                     let circuit_data = builder.build::<C>();
 
                     let mut pw = PartialWitness::new();
-                    let value = F::from_canonical_u64(rand::thread_rng().gen_range(0..(1u64 << $bit_size)));
+                    let value = F::from_canonical_u64(rand::thread_rng().gen_range(0..(1 << $bit_size)));
                     pw.set_target(input, value)?;
+
                     let proof = circuit_data.prove(pw)?;
                     circuit_data.verify(proof)?;
                     Ok(())
                 }
 
                 #[test]
-                fn [<test_rangecheck_failure_ $bit_size>]() -> Result<()> {
+                #[should_panic(expected = "Condition failed")]
+                fn [<test_rangecheck_failure_ $bit_size>]() {
                     const D: usize = 2;
                     type C = PoseidonGoldilocksConfig;
                     type F = <C as GenericConfig<D>>::F;
@@ -534,22 +559,20 @@ mod tests {
                     let mut builder = CircuitBuilder::<F, D>::new(config.clone());
 
                     let input = builder.add_virtual_target();
-                    let gate_ref = RangeCheck2BitGate::new_from_config(&config, $bit_size);
-                    let (row, _op_index) = builder.find_slot(gate_ref, &[], &[]);
+                    let gate = RangeCheckGate::new_from_config(&config, $bit_size);
+                    let gate_ref = gate.clone();
+                    let constants = vec![];
+                    let (row, _op_index) = builder.find_slot(gate, &constants, &constants);
                     builder.connect(input, Target::wire(row, gate_ref.wire_ith_input(0)));
+
                     let circuit_data = builder.build::<C>();
 
                     let mut pw = PartialWitness::new();
-                    let bad_value = F::from_canonical_u64(1u64 << $bit_size);
-                    pw.set_target(input, bad_value)?;
+                    let value = F::from_canonical_u64(rand::thread_rng().gen_range((1 << $bit_size)..F::ORDER));
+                    pw.set_target(input, value).unwrap();
 
-                    let prove_result = circuit_data.prove(pw);
-                    let is_invalid = match prove_result {
-                        Err(_) => true,
-                        Ok(proof) => circuit_data.verify(proof).is_err(),
-                    };
-                    assert!(is_invalid, "expected out-of-range witness to fail for bit_size={}", $bit_size);
-                    Ok(())
+                    let proof = circuit_data.prove(pw).unwrap();
+                    circuit_data.verify(proof).unwrap();
                 }
             }
         };
@@ -569,76 +592,4 @@ mod tests {
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
         26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48
     );
-
-    #[derive(Clone, Copy, Debug)]
-    struct Cost {
-        max_gate_constraints: usize,
-        num_gates: usize,
-        degree: usize,
-    }
-
-    #[test]
-    fn range_check_cost_benchmark() {
-        const D: usize = 2;
-        type C = PoseidonGoldilocksConfig;
-        type F = <C as GenericConfig<D>>::F;
-
-        fn build_old_byte_based_constraints(bit_size: usize, repeats: usize) -> Cost {
-            let config = CircuitConfig::standard_recursion_config();
-            let mut builder = Builder::<F, D>::new(config);
-            assert_eq!(bit_size % 8, 0);
-            for _ in 0..repeats {
-                let input = builder.add_virtual_target();
-                // Old path equivalent for byte-aligned checks: split into bytes.
-                builder.split_bytes(input, bit_size / 8);
-            }
-            let num_gates = builder.num_gates();
-            let data = builder.build::<C>();
-            Cost {
-                max_gate_constraints: data.common.num_gate_constraints,
-                num_gates,
-                degree: data.common.degree(),
-            }
-        }
-
-        fn build_new_exact_2bit_reuse_constraints(bit_size: usize, repeats: usize) -> Cost {
-            let config = CircuitConfig::standard_recursion_config();
-            let mut builder = Builder::<F, D>::new(config);
-            for _ in 0..repeats {
-                let input = builder.add_virtual_target();
-                builder.split_le_2bit_exact_reuse_rows(input, bit_size);
-            }
-            let num_gates = builder.num_gates();
-            let data = builder.build::<C>();
-            Cost {
-                max_gate_constraints: data.common.num_gate_constraints,
-                num_gates,
-                degree: data.common.degree(),
-            }
-        }
-
-        // Common byte-aligned bit sizes used in the codebase that don't use a custom range-check gate.
-        for bit_size in [8usize, 24, 40, 56] {
-            for repeats in [1usize, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024] {
-                let old_cost = build_old_byte_based_constraints(bit_size, repeats);
-                let exact_reuse_cost = build_new_exact_2bit_reuse_constraints(bit_size, repeats);
-
-                println!(
-                    "{bit_size}-bit x{repeats} => old(byte): gates={}, degree={}, max_gate_constraints={}; exact_reuse(2bit): gates={}, degree={}, max_gate_constraints={}",
-                    old_cost.num_gates,
-                    old_cost.degree,
-                    old_cost.max_gate_constraints,
-                    exact_reuse_cost.num_gates,
-                    exact_reuse_cost.degree,
-                    exact_reuse_cost.max_gate_constraints,
-                );
-
-                assert!(
-                    exact_reuse_cost.num_gates <= repeats,
-                    "expected reusable exact 2-bit decomposition to use no more than one row per registration for {bit_size}-bit x{repeats}, got {} rows",
-                    exact_reuse_cost.num_gates
-                );
-            }
-        }
-    }
 }

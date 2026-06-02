@@ -16,11 +16,11 @@ use crate::matching_engine::{
     trigger_child_orders,
 };
 use crate::tx_attributes::{
-    ATTRIBUTE_TYPE_INTEGRATOR_FEE_COLLECTOR_INDEX, ATTRIBUTE_TYPE_INTEGRATOR_MAKER_FEE,
-    ATTRIBUTE_TYPE_INTEGRATOR_TAKER_FEE,
+    ATTR_INTEGRATOR_FEE_COLLECTOR_INDEX, ATTR_INTEGRATOR_MAKER_FEE, ATTR_INTEGRATOR_TAKER_FEE,
+    ATTR_SELF_TRADE_BEHAVIOR_MODE, ATTR_SELF_TRADE_EQUALITY_MODE,
 };
 use crate::tx_interface::{Apply, TxHash, Verify};
-use crate::types::account_order::{AccountOrderTarget, select_account_order_target};
+use crate::types::account_order::{AccountOrderTarget, OrderFlags, select_account_order_target};
 use crate::types::account_order_type::AccountOrderTypes;
 use crate::types::config::{Builder, F};
 use crate::types::constants::*;
@@ -94,6 +94,9 @@ impl L2ModifyOrderTxTarget {
         builder: &mut Builder,
         account_order: &AccountOrderTarget,
     ) -> BaseRegisterInfoTarget {
+        let (generic_field_1, generic_field_2, generic_field_3) =
+            account_order.get_register_generic_fields_from_order(builder);
+
         BaseRegisterInfoTarget {
             instruction_type: builder.constant(F::from_canonical_u8(INSERT_ORDER)),
 
@@ -121,9 +124,9 @@ impl L2ModifyOrderTxTarget {
             pending_to_trigger_order_index1: account_order.to_trigger_order_index1,
             pending_to_cancel_order_index0: account_order.to_cancel_order_index0,
 
-            generic_field_1: account_order.integrator_fee_collector_index,
-            u32_generic_field_0: account_order.integrator_taker_fee,
-            u32_generic_field_1: account_order.integrator_maker_fee,
+            generic_field_1,
+            generic_field_2,
+            generic_field_3,
         }
     }
 
@@ -160,19 +163,24 @@ impl L2ModifyOrderTxTarget {
         {
             account_order.integrator_fee_collector_index = builder.select(
                 flag,
-                tx_state.get_attribute(ATTRIBUTE_TYPE_INTEGRATOR_FEE_COLLECTOR_INDEX),
+                tx_state.get_attribute(ATTR_INTEGRATOR_FEE_COLLECTOR_INDEX),
                 account_order.integrator_fee_collector_index,
             );
             account_order.integrator_taker_fee = builder.select(
                 flag,
-                tx_state.get_attribute(ATTRIBUTE_TYPE_INTEGRATOR_TAKER_FEE),
+                tx_state.get_attribute(ATTR_INTEGRATOR_TAKER_FEE),
                 account_order.integrator_taker_fee,
             );
             account_order.integrator_maker_fee = builder.select(
                 flag,
-                tx_state.get_attribute(ATTRIBUTE_TYPE_INTEGRATOR_MAKER_FEE),
+                tx_state.get_attribute(ATTR_INTEGRATOR_MAKER_FEE),
                 account_order.integrator_maker_fee,
             );
+            account_order.order_flags = OrderFlags {
+                self_trade_behavior_mode: tx_state.get_attribute(ATTR_SELF_TRADE_BEHAVIOR_MODE),
+                self_trade_equality_mode: tx_state.get_attribute(ATTR_SELF_TRADE_EQUALITY_MODE),
+            }
+            .to_target(builder);
         }
 
         // Base amount is zero

@@ -23,9 +23,10 @@ use crate::hints::CircuitBuilderHints;
 use crate::liquidation::get_available_usdc_collateral;
 use crate::order_book_tree_helpers::order_indexes_to_merkle_path;
 use crate::signed::signed_target::{CircuitBuilderSigned, SignedTarget};
+use crate::tx_attributes::is_integrator_fee_disabled;
 use crate::types::account::AccountTarget;
 use crate::types::account_asset::AccountAssetTarget;
-use crate::types::account_order::{AccountOrderTarget, select_account_order_target};
+use crate::types::account_order::{AccountOrderTarget, OrderFlags, select_account_order_target};
 use crate::types::account_position::AccountPositionTarget;
 use crate::types::asset::is_universal_asset;
 use crate::types::config::{BIG_U96_LIMBS, Builder, F};
@@ -202,6 +203,7 @@ pub fn get_next_order_nonce(
 }
 
 pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp: Target) {
+    let zero = builder.zero();
     let one = builder.one();
     let neg_one = builder.neg_one();
     let _false = builder._false();
@@ -436,106 +438,236 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
         ORDER_SIZE_BITS,
     );
 
-    let is_self_trade = builder.is_equal(
-        tx_state.account_order.owner_account_index,
-        tx_state.register_stack[0].account_index,
+    // Make a copy of attribute related variables
+    let integrator_taker_fee_collector_index = tx_state.register_stack[0].generic_field_1;
+    let is_integrator_taker_fee_disabled =
+        is_integrator_fee_disabled(builder, integrator_taker_fee_collector_index);
+    let taker_order_flags_value = builder.select(
+        is_integrator_taker_fee_disabled,
+        tx_state.register_stack[0].generic_field_2,
+        zero,
+    );
+    let taker_order_flags = OrderFlags::from_target(builder, taker_order_flags_value);
+    let integrator_taker_fee = builder.select(
+        is_integrator_taker_fee_disabled,
+        zero,
+        tx_state.register_stack[0].generic_field_2,
+    );
+    let integrator_maker_fee_collector_index =
+        tx_state.account_order.integrator_fee_collector_index;
+    let is_integrator_maker_fee_disabled =
+        is_integrator_fee_disabled(builder, integrator_maker_fee_collector_index);
+    let integrator_maker_fee = builder.select(
+        is_integrator_maker_fee_disabled,
+        zero,
+        tx_state.account_order.integrator_maker_fee,
+    );
+
+    let is_expire_maker_mode = builder.is_equal_constant(
+        taker_order_flags.self_trade_behavior_mode,
+        SELF_TRADE_BEHAVIOR_EXPIRE_MAKER,
+    );
+    let is_expire_taker_mode = builder.is_equal_constant(
+        taker_order_flags.self_trade_behavior_mode,
+        SELF_TRADE_BEHAVIOR_EXPIRE_TAKER,
+    );
+    let is_expire_both_mode = builder.is_equal_constant(
+        taker_order_flags.self_trade_behavior_mode,
+        SELF_TRADE_BEHAVIOR_EXPIRE_BOTH,
+    );
+    let is_reduce_mode = builder.is_equal_constant(
+        taker_order_flags.self_trade_behavior_mode,
+        SELF_TRADE_BEHAVIOR_REDUCE,
     );
     let is_maker_order_expired =
         builder.is_lte(tx_state.account_order.expiry, timestamp, TIMESTAMP_BITS);
 
-    // Handle self trade case
-    {
-        // If it is a self trade;
-        // - dead man's switch can not be triggered, since create order would have failed before setting the register.
-        // - maker order can not be canceled due to health checks, since post self-trade account health or margin requirements do not change
-        // Thus only case for maker to be canceled before executing the self trade is, order expiry
+    let is_account_index_equal = builder.is_equal(
+        tx_state.account_order.owner_account_index,
+        tx_state.register_stack[0].account_index,
+    );
 
-        // Handle expired order case
+    // Handle self trade case where account indices match but there's integrator fee specified (reduce both sides)
+    {
+        let flag = builder.and_not(is_account_index_equal, is_integrator_taker_fee_disabled);
+
+        // Order expiry first
         {
             let order_expiry_flag =
-                builder.multi_and(&[update_status_flags, is_self_trade, is_maker_order_expired]);
+                builder.multi_and(&[update_status_flags, flag, is_maker_order_expired]);
             cancel_maker_order =
                 builder.select_bool(order_expiry_flag, update_status_flags, cancel_maker_order);
-
             update_status_flags =
                 builder.select_bool(order_expiry_flag, _false, update_status_flags);
         }
 
-        // Handle post-only taker case
+        apply_self_trade_reduce(
+            builder,
+            flag,
+            is_post_only,
+            is_spot,
+            is_maker_limit_order,
+            optimistic_trade_amount,
+            &mut update_status_flags,
+            &mut cancel_taker_order,
+            &mut cancel_maker_order,
+            tx_state,
+        );
+    }
+
+    let is_self_trade_same_account_index = {
+        let is_account_index_equality_mode =
+            taker_order_flags.is_account_index_equality_mode(builder);
+        builder.multi_and(&[is_account_index_equality_mode, is_account_index_equal])
+    };
+    // Handle self trade case for account index match
+    {
+        // Order expiry first
         {
-            let post_only_flag =
-                builder.multi_and(&[update_status_flags, is_self_trade, is_post_only]);
+            let order_expiry_flag = builder.multi_and(&[
+                update_status_flags,
+                is_self_trade_same_account_index,
+                is_maker_order_expired,
+            ]);
+            cancel_maker_order =
+                builder.select_bool(order_expiry_flag, update_status_flags, cancel_maker_order);
+            update_status_flags =
+                builder.select_bool(order_expiry_flag, _false, update_status_flags);
+        }
+
+        // Expire maker mode
+        {
+            let expire_maker_flag = builder.multi_and(&[
+                update_status_flags,
+                is_self_trade_same_account_index,
+                is_expire_maker_mode,
+            ]);
+            cancel_maker_order =
+                builder.select_bool(expire_maker_flag, update_status_flags, cancel_maker_order);
+            update_status_flags =
+                builder.select_bool(expire_maker_flag, _false, update_status_flags);
+        }
+
+        // Expire taker mode
+        {
+            let expire_taker_flag = builder.multi_and(&[
+                update_status_flags,
+                is_self_trade_same_account_index,
+                is_expire_taker_mode,
+            ]);
             cancel_taker_order =
-                builder.select_bool(post_only_flag, update_status_flags, cancel_taker_order);
-            update_status_flags = builder.select_bool(post_only_flag, _false, update_status_flags);
+                builder.select_bool(expire_taker_flag, update_status_flags, cancel_taker_order);
+            update_status_flags =
+                builder.select_bool(expire_taker_flag, _false, update_status_flags);
         }
 
-        let self_trade_flag = builder.and(update_status_flags, is_self_trade);
-
-        let new_register_pending_size = builder.sub(
-            tx_state.register_stack[0].pending_size,
-            optimistic_trade_amount,
-        );
-        let new_order_remaining_size = builder.sub(
-            tx_state.account_order.remaining_base_amount,
-            optimistic_trade_amount,
-        );
-        tx_state.register_stack[0].pending_size = builder.select(
-            self_trade_flag,
-            new_register_pending_size,
-            tx_state.register_stack[0].pending_size,
-        );
-        tx_state.account_order.remaining_base_amount = builder.select(
-            self_trade_flag,
-            new_order_remaining_size,
-            tx_state.account_order.remaining_base_amount,
-        );
-
-        let decrement_locked_balance_flag =
-            builder.multi_and(&[self_trade_flag, is_spot, is_maker_limit_order]);
-        decrement_locked_balance_for_partial_order(
-            builder,
-            decrement_locked_balance_flag,
-            &tx_state.market,
-            tx_state.account_order.is_ask,
-            optimistic_trade_amount,
-            tx_state.account_order.price,
-            &mut tx_state.account_assets[TAKER_ACCOUNT_ID],
-        );
-        tx_state.order.set_remaining_amount_conditional(
-            builder,
-            self_trade_flag,
-            tx_state.account_order.is_ask,
-            new_order_remaining_size,
-        );
-
-        // Taker filled
+        // Expire both mode
         {
-            let is_register_pending_size_empty =
-                builder.is_zero(tx_state.register_stack[0].pending_size);
-            let self_trade_and_register_pending_size_empty =
-                builder.and(self_trade_flag, is_register_pending_size_empty);
-            cancel_taker_order = builder.select_bool(
-                self_trade_and_register_pending_size_empty,
+            let expire_both_flag = builder.multi_and(&[
                 update_status_flags,
-                cancel_taker_order,
+                is_self_trade_same_account_index,
+                is_expire_both_mode,
+            ]);
+            cancel_taker_order =
+                builder.select_bool(expire_both_flag, update_status_flags, cancel_taker_order);
+            cancel_maker_order =
+                builder.select_bool(expire_both_flag, update_status_flags, cancel_maker_order);
+            update_status_flags =
+                builder.select_bool(expire_both_flag, _false, update_status_flags);
+        }
+
+        // Reduce mode - Reduce from both if taker is not post only
+        {
+            let reduce_flag = builder.multi_and(&[
+                update_status_flags,
+                is_self_trade_same_account_index,
+                is_reduce_mode,
+            ]);
+            apply_self_trade_reduce(
+                builder,
+                reduce_flag,
+                is_post_only,
+                is_spot,
+                is_maker_limit_order,
+                optimistic_trade_amount,
+                &mut update_status_flags,
+                &mut cancel_taker_order,
+                &mut cancel_maker_order,
+                tx_state,
             );
         }
+    }
 
-        // Maker filled
+    // Handle maker order being expired or dead mans switch time being passed case
+    {
+        let should_dms_be_triggered =
+            tx_state.accounts[MAKER_ACCOUNT_ID].should_dms_be_triggered(builder, timestamp);
+
+        let cancel_order = builder.or(should_dms_be_triggered, is_maker_order_expired);
+        let flag = builder.and(update_status_flags, cancel_order);
+
+        cancel_maker_order = builder.select_bool(flag, update_status_flags, cancel_maker_order);
+
+        update_status_flags = builder.select_bool(flag, _false, update_status_flags);
+    }
+
+    let is_self_trade_same_master_account_index = {
+        let is_master_account_index_equality_mode =
+            taker_order_flags.is_master_account_index_equality_mode();
+        let is_master_account_index_equal = builder.is_equal(
+            tx_state.accounts[MAKER_ACCOUNT_ID].master_account_index,
+            tx_state.accounts[TAKER_ACCOUNT_ID].master_account_index,
+        );
+        builder.multi_and(&[
+            is_master_account_index_equality_mode,
+            is_master_account_index_equal,
+            is_integrator_taker_fee_disabled,
+        ])
+    };
+    // Handle self trade case for master account index match
+    {
+        // Expire maker mode
         {
-            let is_order_remaining_size_empty =
-                builder.is_zero(tx_state.account_order.remaining_base_amount);
-            let self_trade_and_order_remaining_size_empty =
-                builder.and(self_trade_flag, is_order_remaining_size_empty);
-            cancel_maker_order = builder.select_bool(
-                self_trade_and_order_remaining_size_empty,
+            let expire_maker_flag = builder.multi_and(&[
                 update_status_flags,
-                cancel_maker_order,
-            );
+                is_self_trade_same_master_account_index,
+                is_expire_maker_mode,
+            ]);
+            cancel_maker_order =
+                builder.select_bool(expire_maker_flag, update_status_flags, cancel_maker_order);
+            update_status_flags =
+                builder.select_bool(expire_maker_flag, _false, update_status_flags);
         }
 
-        update_status_flags = builder.select_bool(self_trade_flag, _false, update_status_flags);
+        // Expire taker mode
+        {
+            let expire_taker_flag = builder.multi_and(&[
+                update_status_flags,
+                is_self_trade_same_master_account_index,
+                is_expire_taker_mode,
+            ]);
+            cancel_taker_order =
+                builder.select_bool(expire_taker_flag, update_status_flags, cancel_taker_order);
+            update_status_flags =
+                builder.select_bool(expire_taker_flag, _false, update_status_flags);
+        }
+
+        // Expire both mode
+        {
+            let expire_both_flag = builder.multi_and(&[
+                update_status_flags,
+                is_self_trade_same_master_account_index,
+                is_expire_both_mode,
+            ]);
+            cancel_taker_order =
+                builder.select_bool(expire_both_flag, update_status_flags, cancel_taker_order);
+            cancel_maker_order =
+                builder.select_bool(expire_both_flag, update_status_flags, cancel_maker_order);
+            update_status_flags =
+                builder.select_bool(expire_both_flag, _false, update_status_flags);
+        }
+
+        // Expire maker and Reduce shouldn't happen at the same time, continue
     }
 
     // Taker and maker are different accounts, verify if maker account in witness is consistent
@@ -550,19 +682,6 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
             tx_state.accounts[TAKER_ACCOUNT_ID].account_index,
             tx_state.accounts[MAKER_ACCOUNT_ID].account_index,
         );
-    }
-
-    // Handle maker order being expired or dead mans switch time being passed case
-    {
-        let should_dms_be_triggered =
-            tx_state.accounts[MAKER_ACCOUNT_ID].should_dms_be_triggered(builder, timestamp);
-
-        let cancel_order = builder.or(should_dms_be_triggered, is_maker_order_expired);
-        let flag = builder.and(update_status_flags, cancel_order);
-
-        cancel_maker_order = builder.select_bool(flag, update_status_flags, cancel_maker_order);
-
-        update_status_flags = builder.select_bool(flag, _false, update_status_flags);
     }
 
     // Cancel the taker order if it is a post only order
@@ -702,13 +821,6 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
         quote_multiplier,
     ])); // Already verified that multiplication can fit NORMALIZED_QUOTE_BITS bits and can't be negative
 
-    // Make a copy of integrator related variables
-    let integrator_taker_fee = tx_state.register_stack[0].u32_generic_field_0;
-    let integrator_taker_fee_collector_index = tx_state.register_stack[0].generic_field_1;
-    let integrator_maker_fee = tx_state.account_order.integrator_maker_fee;
-    let integrator_maker_fee_collector_index =
-        tx_state.account_order.integrator_fee_collector_index;
-
     let apply_trade_params = ApplyTradeParams {
         market: &tx_state.market,
         market_details: &tx_state.market_details,
@@ -719,14 +831,12 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
         maker_position: &tx_state.positions[MAKER_ACCOUNT_ID],
         taker_risk_info: &tx_state.risk_infos[TAKER_ACCOUNT_ID],
         maker_risk_info: &tx_state.risk_infos[MAKER_ACCOUNT_ID],
-        taker_fee: SignedTarget::new_unsafe(builder.add(
-            tx_state.taker_fee.target,
-            tx_state.register_stack[0].u32_generic_field_0,
-        )),
-        maker_fee: SignedTarget::new_unsafe(builder.add(
-            tx_state.maker_fee.target,
-            tx_state.account_order.integrator_maker_fee,
-        )),
+        taker_fee: SignedTarget::new_unsafe(
+            builder.add(tx_state.taker_fee.target, integrator_taker_fee),
+        ),
+        maker_fee: SignedTarget::new_unsafe(
+            builder.add(tx_state.maker_fee.target, integrator_maker_fee),
+        ),
     };
 
     let (
@@ -1273,15 +1383,18 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
 
     let pop_register = builder.or(cancel_taker_order, insert_taker_order);
     let register_order = get_order_from_register(builder, &tx_state.register_stack[0]);
-    let register_account_order = get_account_order_from_register(&tx_state.register_stack[0]);
+    let register_account_order =
+        get_account_order_from_register(builder, &tx_state.register_stack[0]);
     tx_state.register_stack.pop_front(builder, pop_register);
 
     // Cancel maker order if needed
-    let cancel_self_trade_maker_order = builder.and(is_self_trade, cancel_maker_order);
-    let cancel_non_self_trade_maker_order = builder.and_not(cancel_maker_order, is_self_trade);
+    let cancel_maker_order_from_first_account =
+        builder.and(cancel_maker_order, is_account_index_equal);
+    let cancel_maker_order_from_second_account =
+        builder.and_not(cancel_maker_order, is_account_index_equal);
     [
-        (cancel_self_trade_maker_order, TAKER_ACCOUNT_ID),
-        (cancel_non_self_trade_maker_order, MAKER_ACCOUNT_ID),
+        (cancel_maker_order_from_first_account, TAKER_ACCOUNT_ID),
+        (cancel_maker_order_from_second_account, MAKER_ACCOUNT_ID),
     ]
     .iter()
     .for_each(|(flag, account_id)| {
@@ -1631,8 +1744,8 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
                 instruction_type: builder.constant_u64(TRANSFER_ASSET as u64),
                 account_index: tx_state.accounts[FEE_ACCOUNT_ID].account_index,
                 generic_field_0: integrator_taker_fee_collector_index,
-                u32_generic_field_0: taker_asset_index,
-                u32_generic_field_1: strategy_index,
+                generic_field_2: taker_asset_index,
+                generic_field_3: strategy_index,
                 pending_type: route_type,
                 pending_size: taker_fee,
 
@@ -1658,8 +1771,8 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
                 instruction_type: builder.constant_u64(TRANSFER_ASSET as u64),
                 account_index: tx_state.accounts[FEE_ACCOUNT_ID].account_index,
                 generic_field_0: integrator_maker_fee_collector_index,
-                u32_generic_field_0: maker_asset_index,
-                u32_generic_field_1: strategy_index,
+                generic_field_2: maker_asset_index,
+                generic_field_3: strategy_index,
                 pending_type: route_type,
                 pending_size: maker_fee,
 
@@ -2436,6 +2549,96 @@ fn is_valid_spot_trade(
     )
 }
 
+fn apply_self_trade_reduce(
+    builder: &mut Builder,
+    flag: BoolTarget,
+    is_post_only: BoolTarget,
+    is_spot: BoolTarget,
+    is_maker_limit_order: BoolTarget,
+    optimistic_trade_amount: Target,
+    update_status_flags: &mut BoolTarget,
+    cancel_taker_order: &mut BoolTarget,
+    cancel_maker_order: &mut BoolTarget,
+    tx_state: &mut TxState,
+) {
+    let _false = builder._false();
+
+    // Handle post-only taker case
+    {
+        let post_only_flag = builder.multi_and(&[*update_status_flags, flag, is_post_only]);
+        *cancel_taker_order =
+            builder.select_bool(post_only_flag, *update_status_flags, *cancel_taker_order);
+        *update_status_flags = builder.select_bool(post_only_flag, _false, *update_status_flags);
+    }
+
+    let not_post_only_flag = builder.and(*update_status_flags, flag);
+
+    let new_register_pending_size = builder.sub(
+        tx_state.register_stack[0].pending_size,
+        optimistic_trade_amount,
+    );
+    let new_order_remaining_size = builder.sub(
+        tx_state.account_order.remaining_base_amount,
+        optimistic_trade_amount,
+    );
+    tx_state.register_stack[0].pending_size = builder.select(
+        not_post_only_flag,
+        new_register_pending_size,
+        tx_state.register_stack[0].pending_size,
+    );
+    tx_state.account_order.remaining_base_amount = builder.select(
+        not_post_only_flag,
+        new_order_remaining_size,
+        tx_state.account_order.remaining_base_amount,
+    );
+
+    let decrement_locked_balance_flag =
+        builder.multi_and(&[not_post_only_flag, is_spot, is_maker_limit_order]);
+    decrement_locked_balance_for_partial_order(
+        builder,
+        decrement_locked_balance_flag,
+        &tx_state.market,
+        tx_state.account_order.is_ask,
+        optimistic_trade_amount,
+        tx_state.account_order.price,
+        &mut tx_state.account_assets[TAKER_ACCOUNT_ID],
+    );
+    tx_state.order.set_remaining_amount_conditional(
+        builder,
+        not_post_only_flag,
+        tx_state.account_order.is_ask,
+        new_order_remaining_size,
+    );
+
+    // Taker filled
+    {
+        let is_register_pending_size_empty =
+            builder.is_zero(tx_state.register_stack[0].pending_size);
+        let self_trade_and_register_pending_size_empty =
+            builder.and(not_post_only_flag, is_register_pending_size_empty);
+        *cancel_taker_order = builder.select_bool(
+            self_trade_and_register_pending_size_empty,
+            *update_status_flags,
+            *cancel_taker_order,
+        );
+    }
+
+    // Maker filled
+    {
+        let is_order_remaining_size_empty =
+            builder.is_zero(tx_state.account_order.remaining_base_amount);
+        let self_trade_and_order_remaining_size_empty =
+            builder.and(not_post_only_flag, is_order_remaining_size_empty);
+        *cancel_maker_order = builder.select_bool(
+            self_trade_and_order_remaining_size_empty,
+            *update_status_flags,
+            *cancel_maker_order,
+        );
+    }
+
+    *update_status_flags = builder.select_bool(not_post_only_flag, _false, *update_status_flags);
+}
+
 fn get_order_from_register(
     builder: &mut Builder,
     register: &BaseRegisterInfoTarget,
@@ -2453,7 +2656,13 @@ fn get_order_from_register(
     }
 }
 
-fn get_account_order_from_register(register: &BaseRegisterInfoTarget) -> AccountOrderTarget {
+fn get_account_order_from_register(
+    builder: &mut Builder,
+    register: &BaseRegisterInfoTarget,
+) -> AccountOrderTarget {
+    let (integrator_fee_collector_index, integrator_taker_fee, integrator_maker_fee, order_flags) =
+        register.to_order_fields_from_generic_fields(builder);
+
     AccountOrderTarget {
         index_0: register.pending_order_index,
         index_1: register.pending_client_order_index,
@@ -2479,9 +2688,10 @@ fn get_account_order_from_register(register: &BaseRegisterInfoTarget) -> Account
         to_trigger_order_index1: register.pending_to_trigger_order_index1,
         to_cancel_order_index0: register.pending_to_cancel_order_index0,
 
-        integrator_fee_collector_index: register.generic_field_1,
-        integrator_taker_fee: register.u32_generic_field_0,
-        integrator_maker_fee: register.u32_generic_field_1,
+        integrator_fee_collector_index,
+        integrator_taker_fee,
+        integrator_maker_fee,
+        order_flags,
     }
 }
 

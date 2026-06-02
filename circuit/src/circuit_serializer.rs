@@ -65,9 +65,7 @@ use crate::nonnative::{
 };
 use crate::poseidon2::{Poseidon2, Poseidon2Gate, Poseidon2Generator};
 use crate::types::config::F;
-use crate::uint::range_check::{
-    RangeCheck2BitGate, RangeCheck2BitGenerator, RangeCheckGate, RangeCheckGenerator,
-};
+use crate::uint::range_check::{RangeCheckGate, RangeCheckGenerator};
 use crate::uint::u4::split::SplitToU4Generator;
 use crate::uint::u16::gates::add_many_u16::{U16AddManyGate, U16AddManyGenerator};
 use crate::uint::u16::gates::arithmetic_u16::{U16ArithmeticGate, U16ArithmeticGenerator};
@@ -179,7 +177,6 @@ impl<F: RichField + Extendable<D> + Poseidon2, const D: usize> GateSerializer<F,
         ComparisonGate<F, D>,
         U32AddManyGate<F, D>,
         U32ArithmeticGate<F, D>,
-        RangeCheck2BitGate<F, D>,
         RangeCheckGate<F, D>,
         U32SubtractionGate<F, D>,
         U16AddManyGate<F, D>,
@@ -266,7 +263,6 @@ where
         U16ArithmeticGenerator<F, D>,
         SplitToU16Generator<F, D>,
         U48SubtractionGenerator<F, D>,
-        RangeCheck2BitGenerator<F, D>,
         RangeCheckGenerator<F, D>,
         LoggingGenerator<F, D>,
         SelectionBaseGenerator<F, D>,

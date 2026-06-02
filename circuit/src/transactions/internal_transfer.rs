@@ -114,7 +114,7 @@ impl Verify for InternalTransferTxTarget {
         builder.conditional_assert_eq(
             self.success,
             self.asset_index,
-            tx_state.register_stack[0].u32_generic_field_0,
+            tx_state.register_stack[0].generic_field_2,
         );
         builder.conditional_assert_eq(
             self.success,

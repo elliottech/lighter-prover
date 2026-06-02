@@ -15,11 +15,11 @@ use crate::matching_engine::{
     get_next_order_nonce, increment_order_count_in_place, is_not_valid_reduce_only_direction,
 };
 use crate::tx_attributes::{
-    ATTRIBUTE_TYPE_INTEGRATOR_FEE_COLLECTOR_INDEX, ATTRIBUTE_TYPE_INTEGRATOR_MAKER_FEE,
-    ATTRIBUTE_TYPE_INTEGRATOR_TAKER_FEE,
+    ATTR_INTEGRATOR_FEE_COLLECTOR_INDEX, ATTR_INTEGRATOR_MAKER_FEE, ATTR_INTEGRATOR_TAKER_FEE,
+    ATTR_SELF_TRADE_BEHAVIOR_MODE, ATTR_SELF_TRADE_EQUALITY_MODE, TxAttributesTarget,
 };
 use crate::tx_interface::{Apply, TxHash, Verify};
-use crate::types::account_order::{AccountOrderTarget, select_account_order_target};
+use crate::types::account_order::{AccountOrderTarget, OrderFlags, select_account_order_target};
 use crate::types::account_order_type::AccountOrderTypes;
 use crate::types::config::{Builder, F};
 use crate::types::constants::*;
@@ -132,10 +132,11 @@ impl L2CreateOrderTxTarget {
     fn get_in_progress_order_register(
         &self,
         builder: &mut Builder,
-        integrator_fee_collector_index: Target,
-        integrator_taker_fee: Target,
-        integrator_maker_fee: Target,
+        tx_attributes: &TxAttributesTarget,
     ) -> BaseRegisterInfoTarget {
+        let (generic_field_1, generic_field_2, generic_field_3) =
+            tx_attributes.get_register_generic_fields(builder);
+
         BaseRegisterInfoTarget {
             instruction_type: builder.constant(F::from_canonical_u8(INSERT_ORDER)),
 
@@ -163,18 +164,16 @@ impl L2CreateOrderTxTarget {
             pending_to_trigger_order_index1: builder.zero(),
             pending_to_cancel_order_index0: builder.zero(),
 
-            generic_field_1: integrator_fee_collector_index,
-            u32_generic_field_0: integrator_taker_fee,
-            u32_generic_field_1: integrator_maker_fee,
+            generic_field_1,
+            generic_field_2,
+            generic_field_3,
         }
     }
 
     fn get_pending_account_order(
         &self,
         builder: &mut Builder,
-        integrator_fee_collector_index: Target,
-        integrator_taker_fee: Target,
-        integrator_maker_fee: Target,
+        tx_attributes: &TxAttributesTarget,
     ) -> AccountOrderTarget {
         AccountOrderTarget {
             index_0: self.next_order_index,
@@ -196,9 +195,14 @@ impl L2CreateOrderTxTarget {
             trigger_price: self.trigger_price,
             expiry: self.order_expiry,
 
-            integrator_fee_collector_index,
-            integrator_taker_fee,
-            integrator_maker_fee,
+            integrator_fee_collector_index: tx_attributes.get(ATTR_INTEGRATOR_FEE_COLLECTOR_INDEX),
+            integrator_taker_fee: tx_attributes.get(ATTR_INTEGRATOR_TAKER_FEE),
+            integrator_maker_fee: tx_attributes.get(ATTR_INTEGRATOR_MAKER_FEE),
+            order_flags: OrderFlags {
+                self_trade_behavior_mode: tx_attributes.get(ATTR_SELF_TRADE_BEHAVIOR_MODE),
+                self_trade_equality_mode: tx_attributes.get(ATTR_SELF_TRADE_EQUALITY_MODE),
+            }
+            .to_target(builder),
 
             trigger_status: self.trigger_status,
             to_trigger_order_index0: builder.zero(),
@@ -510,7 +514,6 @@ impl Verify for L2CreateOrderTxTarget {
             );
             let is_insurance_or_public_pool = builder.or(is_insurance_fund, is_public_pool);
             builder.conditional_assert_false(flag, is_insurance_or_public_pool);
-
         }
 
         // Perps validations
@@ -579,22 +582,11 @@ impl Apply for L2CreateOrderTxTarget {
         tx_state.market.bid_nonce =
             builder.select(self.success, new_bid_nonce, tx_state.market.bid_nonce);
 
-        let (integrator_fee_collector_index, integrator_taker_fee, integrator_maker_fee) = (
-            tx_state.get_attribute(ATTRIBUTE_TYPE_INTEGRATOR_FEE_COLLECTOR_INDEX),
-            tx_state.get_attribute(ATTRIBUTE_TYPE_INTEGRATOR_TAKER_FEE),
-            tx_state.get_attribute(ATTRIBUTE_TYPE_INTEGRATOR_MAKER_FEE),
-        );
-
         // Pending order - put order to account order tree
         {
             let should_update_for_pending_order = builder.and(self.success, self.is_pending_order);
             // Set new account order info
-            let new_account_order = self.get_pending_account_order(
-                builder,
-                integrator_fee_collector_index,
-                integrator_taker_fee,
-                integrator_maker_fee,
-            );
+            let new_account_order = self.get_pending_account_order(builder, &tx_state.attributes);
             tx_state.account_order = select_account_order_target(
                 builder,
                 should_update_for_pending_order,
@@ -613,12 +605,7 @@ impl Apply for L2CreateOrderTxTarget {
         // In progress order - call matching engine
         {
             // Set new register
-            let new_register = self.get_in_progress_order_register(
-                builder,
-                integrator_fee_collector_index,
-                integrator_taker_fee,
-                integrator_maker_fee,
-            );
+            let new_register = self.get_in_progress_order_register(builder, &tx_state.attributes);
             let in_progress_flag = builder.and_not(self.success, self.is_pending_order);
             tx_state.put_to_instruction_stack_unsafe(builder, in_progress_flag, &new_register, 0);
 

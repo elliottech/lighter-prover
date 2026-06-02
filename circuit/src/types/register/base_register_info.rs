@@ -10,6 +10,7 @@ use serde::Deserialize;
 
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::circuit_logger::CircuitBuilderLogging;
+use crate::tx_attributes::is_integrator_fee_disabled;
 use crate::types::config::Builder;
 use crate::utils::CircuitBuilderUtils;
 
@@ -63,9 +64,6 @@ pub struct BaseRegisterInfo {
     #[serde(rename = "ptp")]
     pub pending_trigger_price: u32,
 
-    #[serde(rename = "gf0")]
-    pub generic_field_0: i64,
-
     #[serde(rename = "pts")]
     pub pending_trigger_status: u8,
 
@@ -78,12 +76,14 @@ pub struct BaseRegisterInfo {
     #[serde(rename = "ptcoi0")]
     pub pending_to_cancel_order_index0: i64,
 
-    #[serde(rename = "ifci")]
+    #[serde(rename = "gf0")]
+    pub generic_field_0: i64,
+    #[serde(rename = "gf1")]
     pub generic_field_1: i64,
-    #[serde(rename = "itf")]
-    pub u32_generic_field_0: i64,
-    #[serde(rename = "imf")]
-    pub u32_generic_field_1: i64,
+    #[serde(rename = "gf2")]
+    pub generic_field_2: i64,
+    #[serde(rename = "gf3")]
+    pub generic_field_3: i64,
 }
 
 impl Default for BaseRegisterInfo {
@@ -116,8 +116,8 @@ impl BaseRegisterInfo {
             pending_to_trigger_order_index1: 0,
             pending_to_cancel_order_index0: 0,
             generic_field_1: 0,
-            u32_generic_field_0: 0,
-            u32_generic_field_1: 0,
+            generic_field_2: 0,
+            generic_field_3: 0,
         }
     }
 
@@ -143,8 +143,8 @@ impl BaseRegisterInfo {
             && self.pending_to_trigger_order_index1 == 0
             && self.pending_to_cancel_order_index0 == 0
             && self.generic_field_1 == 0
-            && self.u32_generic_field_0 == 0
-            && self.u32_generic_field_1 == 0
+            && self.generic_field_2 == 0
+            && self.generic_field_3 == 0
     }
 
     pub fn from_vec<F>(pis: &[F]) -> Self
@@ -174,8 +174,8 @@ impl BaseRegisterInfo {
             pending_to_trigger_order_index1: i64::try_from(pis[18].to_canonical_u64()).unwrap(),
             pending_to_cancel_order_index0: i64::try_from(pis[19].to_canonical_u64()).unwrap(),
             generic_field_1: i64::try_from(pis[20].to_canonical_u64()).unwrap(),
-            u32_generic_field_0: i64::try_from(pis[21].to_canonical_u64()).unwrap(),
-            u32_generic_field_1: i64::try_from(pis[22].to_canonical_u64()).unwrap(),
+            generic_field_2: i64::try_from(pis[21].to_canonical_u64()).unwrap(),
+            generic_field_3: i64::try_from(pis[22].to_canonical_u64()).unwrap(),
         }
     }
 }
@@ -209,8 +209,8 @@ pub struct BaseRegisterInfoTarget {
     pub pending_to_cancel_order_index0: Target,
 
     pub generic_field_1: Target,
-    pub u32_generic_field_0: Target,
-    pub u32_generic_field_1: Target,
+    pub generic_field_2: Target,
+    pub generic_field_3: Target,
 }
 
 impl BaseRegisterInfoTarget {
@@ -243,8 +243,8 @@ impl BaseRegisterInfoTarget {
             pending_to_cancel_order_index0: builder.add_virtual_target(),
 
             generic_field_1: builder.add_virtual_target(),
-            u32_generic_field_0: builder.add_virtual_target(),
-            u32_generic_field_1: builder.add_virtual_target(),
+            generic_field_2: builder.add_virtual_target(),
+            generic_field_3: builder.add_virtual_target(),
         }
     }
 
@@ -282,8 +282,8 @@ impl BaseRegisterInfoTarget {
             other.pending_to_cancel_order_index0,
         );
         builder.connect(self.generic_field_1, other.generic_field_1);
-        builder.connect(self.u32_generic_field_0, other.u32_generic_field_0);
-        builder.connect(self.u32_generic_field_1, other.u32_generic_field_1);
+        builder.connect(self.generic_field_2, other.generic_field_2);
+        builder.connect(self.generic_field_3, other.generic_field_3);
     }
 
     pub fn is_equal(builder: &mut Builder, a: &Self, b: &Self) -> BoolTarget {
@@ -318,8 +318,8 @@ impl BaseRegisterInfoTarget {
                 b.pending_to_cancel_order_index0,
             ),
             builder.is_equal(a.generic_field_1, b.generic_field_1),
-            builder.is_equal(a.u32_generic_field_0, b.u32_generic_field_0),
-            builder.is_equal(a.u32_generic_field_1, b.u32_generic_field_1),
+            builder.is_equal(a.generic_field_2, b.generic_field_2),
+            builder.is_equal(a.generic_field_3, b.generic_field_3),
         ];
         builder.multi_and(&assertions)
     }
@@ -343,8 +343,8 @@ impl BaseRegisterInfoTarget {
             self.pending_expiry,             // 48 bits
             self.pending_trigger_price,      // 32 bits
             self.pending_trigger_status,     // 2 bits
-            self.u32_generic_field_0,        // generic but 32 bits
-            self.u32_generic_field_1,        // generic but 32 bits
+            self.generic_field_2,            // generic but 32 bits
+            self.generic_field_3,            // generic but 32 bits
         ]);
         let assertions = [
             builder.is_zero(added),
@@ -387,8 +387,8 @@ impl BaseRegisterInfoTarget {
             pending_to_cancel_order_index0: builder.zero(),
 
             generic_field_1: builder.zero(),
-            u32_generic_field_0: builder.zero(),
-            u32_generic_field_1: builder.zero(),
+            generic_field_2: builder.zero(),
+            generic_field_3: builder.zero(),
         }
     }
 
@@ -450,14 +450,8 @@ impl BaseRegisterInfoTarget {
             self.generic_field_1,
             &format!("{} pending_integrator_fee_collector_index", tag),
         );
-        builder.println(
-            self.u32_generic_field_0,
-            &format!("{} u32_generic_field_0", tag),
-        );
-        builder.println(
-            self.u32_generic_field_1,
-            &format!("{} u32_generic_field_1", tag),
-        );
+        builder.println(self.generic_field_2, &format!("{} generic_field_2", tag));
+        builder.println(self.generic_field_3, &format!("{} generic_field_3", tag));
     }
 
     pub fn get_hash_parameters(&self) -> Vec<Target> {
@@ -483,8 +477,8 @@ impl BaseRegisterInfoTarget {
             self.pending_to_trigger_order_index1,
             self.pending_to_cancel_order_index0,
             self.generic_field_1,
-            self.u32_generic_field_0,
-            self.u32_generic_field_1,
+            self.generic_field_2,
+            self.generic_field_3,
         ]
     }
 
@@ -510,8 +504,8 @@ impl BaseRegisterInfoTarget {
         builder.register_public_input(self.pending_to_trigger_order_index1);
         builder.register_public_input(self.pending_to_cancel_order_index0);
         builder.register_public_input(self.generic_field_1);
-        builder.register_public_input(self.u32_generic_field_0);
-        builder.register_public_input(self.u32_generic_field_1);
+        builder.register_public_input(self.generic_field_2);
+        builder.register_public_input(self.generic_field_3);
     }
 
     /// Converts a slice of `Target` into a `BaseRegisterInfoTarget`. Follow same order as [`Self::register_public_input`].
@@ -539,9 +533,28 @@ impl BaseRegisterInfoTarget {
             pending_to_trigger_order_index1: pis[18],
             pending_to_cancel_order_index0: pis[19],
             generic_field_1: pis[20],
-            u32_generic_field_0: pis[21],
-            u32_generic_field_1: pis[22],
+            generic_field_2: pis[21],
+            generic_field_3: pis[22],
         }
+    }
+
+    pub fn to_order_fields_from_generic_fields(
+        &self,
+        builder: &mut Builder,
+    ) -> (
+        Target, // integrator_fee_collector_index
+        Target, // integrator_taker_fee
+        Target, // integrator_maker_fee
+        Target, // order_flags
+    ) {
+        let zero = builder.zero();
+        let is_integrator_fee_disabled = is_integrator_fee_disabled(builder, self.generic_field_1);
+        (
+            self.generic_field_1,
+            builder.select(is_integrator_fee_disabled, zero, self.generic_field_2),
+            builder.select(is_integrator_fee_disabled, zero, self.generic_field_3),
+            builder.select(is_integrator_fee_disabled, self.generic_field_2, zero),
+        )
     }
 }
 
@@ -641,12 +654,12 @@ impl<T: Witness<F>, F: PrimeField64> BaseRegisterInfoTargetWitness<F> for T {
             F::from_canonical_i64(register.generic_field_1),
         )?;
         self.set_target(
-            register_target.u32_generic_field_0,
-            F::from_canonical_i64(register.u32_generic_field_0),
+            register_target.generic_field_2,
+            F::from_canonical_i64(register.generic_field_2),
         )?;
         self.set_target(
-            register_target.u32_generic_field_1,
-            F::from_canonical_i64(register.u32_generic_field_1),
+            register_target.generic_field_3,
+            F::from_canonical_i64(register.generic_field_3),
         )?;
 
         Ok(())
@@ -721,16 +734,8 @@ pub fn select_register_target(
             b.pending_to_cancel_order_index0,
         ),
         generic_field_1: builder.select(is_enabled, a.generic_field_1, b.generic_field_1),
-        u32_generic_field_0: builder.select(
-            is_enabled,
-            a.u32_generic_field_0,
-            b.u32_generic_field_0,
-        ),
-        u32_generic_field_1: builder.select(
-            is_enabled,
-            a.u32_generic_field_1,
-            b.u32_generic_field_1,
-        ),
+        generic_field_2: builder.select(is_enabled, a.generic_field_2, b.generic_field_2),
+        generic_field_3: builder.select(is_enabled, a.generic_field_3, b.generic_field_3),
     }
 }
 
@@ -780,9 +785,9 @@ impl BaseRegisterInfoTarget {
                 .constant_i64(rand::thread_rng().gen_range(0..=(1usize << 48) - 1) as i64),
             generic_field_1: builder
                 .constant_i64(rand::thread_rng().gen_range(0..=(1usize << 48) - 1) as i64),
-            u32_generic_field_0: builder
+            generic_field_2: builder
                 .constant_i64(rand::thread_rng().gen_range(0..=(1usize << 32) - 1) as i64),
-            u32_generic_field_1: builder
+            generic_field_3: builder
                 .constant_i64(rand::thread_rng().gen_range(0..=(1usize << 32) - 1) as i64),
         }
     }

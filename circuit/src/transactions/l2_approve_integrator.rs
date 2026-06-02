@@ -158,7 +158,8 @@ impl Verify for L2ApproveIntegratorTxTarget {
             tx_state.api_key.api_key_index,
         );
 
-        // Approval expiry must be zero if revoking approval, and non-zero if granting approval
+        // Revoking approval requires all fees to be zero AND expiry to be zero.
+        // 0-fee integrators (fees=0, expiry>0) are allowed and skip L1 signature.
         // Fees are range checked to be <= FEE_TICK so this addition won't overflow.
         let fees_added = builder.add_many([
             self.max_perps_taker_fee,
@@ -166,14 +167,15 @@ impl Verify for L2ApproveIntegratorTxTarget {
             self.max_spot_taker_fee,
             self.max_spot_maker_fee,
         ]);
-        self.is_revoking_approval = builder.is_zero(fees_added);
+        let no_fees = builder.is_zero(fees_added);
         let is_approval_expiry_zero = builder.is_zero(self.approval_expiry);
-        builder.conditional_assert_eq(
-            is_enabled,
-            self.is_revoking_approval.target,
-            is_approval_expiry_zero.target,
-        );
-        self.is_revoking_approval = builder.and(is_enabled, self.is_revoking_approval);
+
+        // If expiry is zero, all fees must be zero
+        let check_expiry_zero = builder.and(is_enabled, is_approval_expiry_zero);
+        builder.conditional_assert_zero(check_expiry_zero, fees_added);
+
+        self.is_revoking_approval =
+            builder.multi_and(&[is_enabled, no_fees, is_approval_expiry_zero]);
         self.is_granting_approval = builder.and_not(is_enabled, self.is_revoking_approval);
 
         // Fees can't exceed the maximums set in the system config
@@ -212,8 +214,8 @@ impl Verify for L2ApproveIntegratorTxTarget {
         let should_be_false = builder.and_not(is_owner_treasury, is_same_master_account);
         builder.conditional_assert_false(is_enabled, should_be_false);
 
-        // Approval expiry must be > block timestamp unless it's zero
-        let check_approval_expiry_flag = builder.and_not(is_enabled, is_approval_expiry_zero);
+        // Approval expiry must be > block timestamp when granting approval
+        let check_approval_expiry_flag = self.is_granting_approval;
         builder.conditional_assert_lt(
             check_approval_expiry_flag,
             tx_state.block_timestamp,

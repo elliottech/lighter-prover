@@ -34,6 +34,7 @@ use crate::types::register::{RegisterInfoTargetWitness, RegisterStackTarget};
 use crate::types::system_config::{SystemConfigTarget, SystemConfigTargetWitness};
 use crate::types::transfer::TransferMessageTarget;
 use crate::uint::u8::{CircuitBuilderU8, U8Target};
+use crate::utils::CircuitBuilderUtils;
 
 pub trait Circuit<
     C: GenericConfig<D, F = F>,
@@ -288,10 +289,8 @@ impl Circuit<C, F, D> for BlockTxCircuit {
 
 impl BlockTxCircuit {
     /// Initializes a new block virtual targets for the given number of transactions.
-    fn new(config: CircuitConfig, tx_limit: usize) -> Self {
+    pub fn new(config: CircuitConfig, tx_limit: usize) -> Self {
         let mut builder = Builder::new(config);
-
-        builder.use_2bit_range_check = true;
 
         Self {
             target: BlockTxTarget {
@@ -775,17 +774,24 @@ impl BlockTxCircuit {
                 tx.accounts_before[0].master_account_index,
                 tx.accounts_before[1].master_account_index,
             );
-            let is_approve_integrator_different_master_account = self
+            // 0-fee integrators skip L1 signature check (like same master account)
+            let fees_added = self.builder.add_many([
+                tx.l2_approve_integrator_tx_target.inner.max_perps_taker_fee,
+                tx.l2_approve_integrator_tx_target.inner.max_perps_maker_fee,
+                tx.l2_approve_integrator_tx_target.inner.max_spot_taker_fee,
+                tx.l2_approve_integrator_tx_target.inner.max_spot_maker_fee,
+            ]);
+            let no_fees = self.builder.is_zero(fees_added);
+            let skip_l1_signature = self.builder.or(is_same_master_account, no_fees);
+            let needs_l1_signature = self
                 .builder
-                .and_not(is_approve_integrator, is_same_master_account);
+                .and_not(is_approve_integrator, skip_l1_signature);
 
-            count = self
-                .builder
-                .add(is_approve_integrator_different_master_account.target, count);
+            count = self.builder.add(needs_l1_signature.target, count);
 
             approve_integrator_message = ApproveIntegratorMessageTarget::select(
                 &mut self.builder,
-                is_approve_integrator_different_master_account,
+                needs_l1_signature,
                 &ApproveIntegratorMessageTarget {
                     account_index: tx.l2_approve_integrator_tx_target.inner.account_index,
                     api_key_index: tx.l2_approve_integrator_tx_target.inner.api_key_index,

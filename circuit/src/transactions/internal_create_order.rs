@@ -97,6 +97,9 @@ impl InternalCreateOrderTxTarget {
         tx_state: &TxState,
         next_order_nonce: Target,
     ) -> BaseRegisterInfoTarget {
+        let (generic_field_1, generic_field_2, generic_field_3) = tx_state
+            .account_order
+            .get_register_generic_fields_from_order(builder);
         BaseRegisterInfoTarget {
             instruction_type: builder.constant_from_u8(INSERT_ORDER),
             market_index: tx_state.market.market_index,
@@ -122,9 +125,9 @@ impl InternalCreateOrderTxTarget {
             pending_to_trigger_order_index0: builder.zero(),
             pending_to_trigger_order_index1: builder.zero(),
             pending_to_cancel_order_index0: builder.zero(),
-            generic_field_1: tx_state.account_order.integrator_fee_collector_index,
-            u32_generic_field_0: tx_state.account_order.integrator_taker_fee,
-            u32_generic_field_1: tx_state.account_order.integrator_maker_fee,
+            generic_field_1,
+            generic_field_2,
+            generic_field_3,
         }
     }
 
@@ -150,6 +153,10 @@ impl InternalCreateOrderTxTarget {
 
         let trigger_status_na = builder.constant_from_u8(TRIGGER_STATUS_NA);
 
+        let (generic_field_1, generic_field_2, generic_field_3) = tx_state
+            .account_order
+            .get_register_generic_fields_from_order(builder);
+
         BaseRegisterInfoTarget {
             instruction_type: builder.constant_from_u8(INSERT_ORDER),
             market_index: tx_state.market.market_index,
@@ -171,9 +178,9 @@ impl InternalCreateOrderTxTarget {
             pending_to_trigger_order_index0: tx_state.account_order.to_trigger_order_index0,
             pending_to_trigger_order_index1: tx_state.account_order.to_trigger_order_index1,
             pending_to_cancel_order_index0: tx_state.account_order.to_cancel_order_index0,
-            generic_field_1: tx_state.account_order.integrator_fee_collector_index,
-            u32_generic_field_0: tx_state.account_order.integrator_taker_fee,
-            u32_generic_field_1: tx_state.account_order.integrator_maker_fee,
+            generic_field_1,
+            generic_field_2,
+            generic_field_3,
         }
     }
 

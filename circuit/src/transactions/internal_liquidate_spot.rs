@@ -101,8 +101,8 @@ impl InternalLiquidateSpotTxTarget {
             pending_to_trigger_order_index1: builder.zero(),
             pending_to_cancel_order_index0: builder.zero(),
             generic_field_1: builder.zero(),
-            u32_generic_field_0: builder.zero(),
-            u32_generic_field_1: builder.zero(),
+            generic_field_2: builder.zero(),
+            generic_field_3: builder.zero(),
         }
     }
 }

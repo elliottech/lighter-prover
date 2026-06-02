@@ -14,6 +14,7 @@ use crate::circuit_logger::CircuitBuilderLogging;
 use crate::eddsa::gadgets::curve::PartialWitnessCurve;
 use crate::hash_utils::CircuitBuilderHashUtils;
 use crate::poseidon2::Poseidon2Hash;
+use crate::tx_attributes::is_integrator_fee_disabled;
 use crate::types::config::Builder;
 use crate::types::constants::{NIL_ACCOUNT_INDEX, NIL_CLIENT_ORDER_INDEX, NIL_ORDER_INDEX};
 use crate::utils::CircuitBuilderUtils;
@@ -83,6 +84,8 @@ pub struct AccountOrder {
     pub integrator_taker_fee: i64,
     #[serde(rename = "imf", default)]
     pub integrator_maker_fee: i64,
+    #[serde(rename = "of", default)]
+    pub order_flags: u64,
 }
 
 impl AccountOrder {
@@ -114,6 +117,7 @@ impl AccountOrder {
             integrator_fee_collector_index: NIL_ACCOUNT_INDEX,
             integrator_taker_fee: 0,
             integrator_maker_fee: 0,
+            order_flags: 0,
         }
     }
 }
@@ -143,6 +147,7 @@ pub struct AccountOrderTarget {
     pub integrator_fee_collector_index: Target,
     pub integrator_taker_fee: Target,
     pub integrator_maker_fee: Target,
+    pub order_flags: Target,
 }
 
 impl AccountOrderTarget {
@@ -173,6 +178,7 @@ impl AccountOrderTarget {
             integrator_fee_collector_index: builder.add_virtual_target(),
             integrator_taker_fee: builder.add_virtual_target(),
             integrator_maker_fee: builder.add_virtual_target(),
+            order_flags: builder.add_virtual_target(),
         }
     }
 
@@ -229,6 +235,7 @@ impl AccountOrderTarget {
             self.integrator_maker_fee,
             &format!("{} integrator_maker_fee", tag),
         );
+        builder.println(self.order_flags, &format!("{} order_flags", tag));
     }
 
     pub fn empty(
@@ -263,6 +270,7 @@ impl AccountOrderTarget {
             integrator_fee_collector_index: builder.zero(),
             integrator_taker_fee: builder.zero(),
             integrator_maker_fee: builder.zero(),
+            order_flags: builder.zero(),
         }
     }
 
@@ -293,6 +301,7 @@ impl AccountOrderTarget {
             builder.is_zero(self.to_trigger_order_index0),
             builder.is_zero(self.to_trigger_order_index1),
             builder.is_zero(self.to_cancel_order_index0),
+            builder.is_zero(self.order_flags),
         ];
         builder.multi_and(&assertions)
     }
@@ -318,6 +327,7 @@ impl AccountOrderTarget {
             self.integrator_fee_collector_index,
             self.integrator_taker_fee,
             self.integrator_maker_fee,
+            self.order_flags,
         ];
         let non_empty_hash = builder.hash_n_to_hash_no_pad::<Poseidon2Hash>(elements);
 
@@ -325,6 +335,27 @@ impl AccountOrderTarget {
 
         let is_empty = self.is_empty(builder);
         builder.select_hash(is_empty, &empty_hash, &non_empty_hash)
+    }
+
+    pub fn get_register_generic_fields_from_order(
+        &self,
+        builder: &mut Builder,
+    ) -> (
+        Target, // generic_field_1
+        Target, // generic_field_2
+        Target, // generic_field_3
+    ) {
+        let is_integrator_fee_disabled =
+            is_integrator_fee_disabled(builder, self.integrator_fee_collector_index);
+        (
+            self.integrator_fee_collector_index,
+            builder.select(
+                is_integrator_fee_disabled,
+                self.order_flags,
+                self.integrator_taker_fee,
+            ),
+            self.integrator_maker_fee,
+        )
     }
 }
 
@@ -389,6 +420,7 @@ impl<T: Witness<F> + PartialWitnessCurve<F>, F: PrimeField64 + Extendable<5> + R
             a.integrator_maker_fee,
             F::from_canonical_i64(b.integrator_maker_fee),
         )?;
+        self.set_target(a.order_flags, F::from_canonical_u64(b.order_flags))?;
 
         Ok(())
     }
@@ -446,5 +478,34 @@ pub fn select_account_order_target(
         ),
         integrator_taker_fee: builder.select(flag, a.integrator_taker_fee, b.integrator_taker_fee),
         integrator_maker_fee: builder.select(flag, a.integrator_maker_fee, b.integrator_maker_fee),
+        order_flags: builder.select(flag, a.order_flags, b.order_flags),
+    }
+}
+
+pub struct OrderFlags {
+    pub self_trade_behavior_mode: Target,
+    pub self_trade_equality_mode: Target,
+}
+impl OrderFlags {
+    pub fn from_target(builder: &mut Builder, order_flags: Target) -> Self {
+        let le_bits = builder.split_le(order_flags, 3);
+        Self {
+            self_trade_behavior_mode: builder.le_sum(le_bits[0..2].iter()),
+            self_trade_equality_mode: le_bits[2].target,
+        }
+    }
+    pub fn to_target(&self, builder: &mut Builder) -> Target {
+        let four = builder.constant_u64(4);
+        builder.mul_add(
+            four,
+            self.self_trade_equality_mode,
+            self.self_trade_behavior_mode,
+        )
+    }
+    pub fn is_master_account_index_equality_mode(&self) -> BoolTarget {
+        BoolTarget::new_unsafe(self.self_trade_equality_mode)
+    }
+    pub fn is_account_index_equality_mode(&self, builder: &mut Builder) -> BoolTarget {
+        builder.not(self.is_master_account_index_equality_mode())
     }
 }

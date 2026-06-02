@@ -36,7 +36,6 @@ pub struct Builder<F: RichField + Extendable<D>, const D: usize> {
 
     pub(crate) split_le_cache: HashMap<Target, Vec<BoolTarget>>,
     pub(crate) split_le_base_cache: HashMap<(usize, Target), Vec<Target>>,
-    pub(crate) split_le_2bit_reuse_cache: HashMap<(usize, Target), Vec<Target>>,
     pub(crate) split_bytes_cache: HashMap<Target, Vec<U8Target>>,
     pub(crate) is_equal_cache: HashMap<(Target, Target), BoolTarget>,
     pub(crate) is_lte_cache: HashMap<(Target, Target), (BoolTarget, usize)>,
@@ -52,8 +51,6 @@ pub struct Builder<F: RichField + Extendable<D>, const D: usize> {
 
     pub(crate) sequence_state: HashMap<usize, SequenceStateTarget>,
     pub(crate) bitstream_state: HashMap<usize, BitstreamStateTarget>,
-
-    pub(crate) use_2bit_range_check: bool,
 }
 
 impl<F, const D: usize> Builder<F, D>
@@ -77,7 +74,6 @@ where
 
             split_le_cache: HashMap::new(),
             split_le_base_cache: HashMap::new(),
-            split_le_2bit_reuse_cache: HashMap::new(),
             split_bytes_cache: HashMap::new(),
             is_equal_cache: HashMap::new(),
             is_lte_cache: HashMap::new(),
@@ -92,8 +88,6 @@ where
 
             sequence_state: HashMap::new(),
             bitstream_state: HashMap::new(),
-
-            use_2bit_range_check: false,
         }
     }
 
