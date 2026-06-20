@@ -6,6 +6,7 @@ use circuit::bigint::big_u16::WitnessBigInt16;
 use circuit::bigint::bigint::{BigIntTarget, CircuitBuilderBigInt};
 use circuit::bigint::biguint::{BigUintTarget, CircuitBuilderBiguint, WitnessBigUint};
 use circuit::bigint::div_rem::CircuitBuilderBiguintDivRem;
+use circuit::bool_utils::CircuitBuilderBoolUtils;
 use circuit::byte::split::CircuitBuilderByteSplit;
 use circuit::circuit_logger::CircuitBuilderLogging;
 use circuit::hash_utils::CircuitBuilderHashUtils;
@@ -137,6 +138,9 @@ impl InnerDesertExitCircuit {
     }
 
     fn verify_accounts(&mut self) {
+        let is_account_empty = self.target.accounts[0].is_empty(&mut self.builder);
+        self.builder.assert_false(is_account_empty);
+
         for i in 0..DESERT_NUM_ACCOUNTS {
             let account = &self.target.accounts[i];
             let merkle_proof = self.target.account_pub_data_tree_merkle_proofs[i];
@@ -326,10 +330,10 @@ impl InnerDesertExitCircuit {
             );
         }
 
-        let is_negative = self.builder.is_sign_negative(balance.sign);
+        let is_positive = self.builder.is_sign_positive(balance.sign);
         balance = self
             .builder
-            .select_bigint(is_negative, &zero_bigint, &balance);
+            .select_bigint(is_positive, &balance, &zero_bigint);
 
         self.builder
             .connect_biguint(&balance.abs, &self.target.balance);

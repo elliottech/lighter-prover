@@ -231,7 +231,7 @@ impl PubdataAccountTarget {
         level_hashes[0]
     }
 
-    fn is_empty(&self, builder: &mut Builder) -> BoolTarget {
+    pub fn is_empty(&self, builder: &mut Builder) -> BoolTarget {
         builder.is_equal_constant(self.account_index, NIL_ACCOUNT_INDEX as u64)
     }
 

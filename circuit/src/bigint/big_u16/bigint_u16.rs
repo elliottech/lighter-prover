@@ -131,10 +131,12 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilderBigIntU16<F, D>
     }
 
     fn add_virtual_bigint_u16_target_safe(&mut self, num_limbs: usize) -> BigIntU16Target {
-        BigIntU16Target {
-            abs: self.add_virtual_biguint_u16_target_safe(num_limbs),
-            sign: self.add_virtual_sign_target_safe(),
-        }
+        let abs = self.add_virtual_biguint_u16_target_safe(num_limbs);
+        let sign = self.add_virtual_sign_target_safe();
+        let abs_is_zero = self.is_zero_biguint_u16(&abs);
+        let sign_is_zero = self.is_zero(sign.target);
+        self.connect(abs_is_zero.target, sign_is_zero.target);
+        BigIntU16Target { abs, sign }
     }
 
     fn add_virtual_bigint_u16_target_unsafe(&mut self, num_limbs: usize) -> BigIntU16Target {
@@ -273,7 +275,9 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilderBigIntU16<F, D>
     }
 
     fn is_zero_bigint_u16(&mut self, a: &BigIntU16Target) -> BoolTarget {
-        self.is_zero(a.sign.target)
+        let is_sign_zero = self.is_zero(a.sign.target);
+        let is_abs_zero = self.is_zero_biguint_u16(&a.abs);
+        self.and(is_sign_zero, is_abs_zero)
     }
 
     fn signed_target_to_bigint_u16(
