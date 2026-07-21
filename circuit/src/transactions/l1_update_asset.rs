@@ -41,11 +41,11 @@ pub struct L1UpdateAssetTx {
     pub liquidation_factor: u16,
     #[serde(rename = "lf", default)]
     pub liquidation_fee: u32,
+    #[serde(rename = "ipd", default)]
+    pub index_price_divider: i64,
 
     #[serde(rename = "ip", default)]
     pub index_price: i64, // Given by sequencer
-    #[serde(rename = "ipd", default)]
-    pub index_price_divider: i64,
 }
 
 #[derive(Debug)]
@@ -113,6 +113,7 @@ impl PriorityOperationsPubData for L1UpdateAssetTxTarget {
             add_target(builder, bytes, self.liquidation_threshold, 16),
             add_target(builder, bytes, self.liquidation_factor, 16),
             add_target(builder, bytes, self.liquidation_fee, 32),
+            add_target(builder, bytes, self.index_price_divider, 56),
         ]
         .iter()
         .sum();
@@ -236,19 +237,16 @@ impl Verify for L1UpdateAssetTxTarget {
         let is_asset_empty = tx_state.assets[TX_ASSET_ID].is_empty(builder);
         self.success = builder.and_not(self.success, is_asset_empty);
 
+        let is_nil_margin_index =
+            builder.is_equal_constant(tx_state.next_margin_asset_index, NIL_MARGIN_ASSET_INDEX);
+        let nil_margin_index_and_enabling_margin =
+            builder.and(is_nil_margin_index, self.enabling_margin);
+        self.success = builder.and_not(self.success, nil_margin_index_and_enabling_margin);
+
         // Enabling margin requires margin index to be empty
         let success_and_enabling_margin = builder.and(self.success, self.enabling_margin);
         let is_margin_index_empty = builder.is_zero(tx_state.assets[TX_ASSET_ID].margin_index);
         builder.conditional_assert_true(success_and_enabling_margin, is_margin_index_empty);
-
-        let is_nil_margin_index =
-            builder.is_equal_constant(tx_state.next_margin_asset_index, NIL_MARGIN_ASSET_INDEX);
-        builder.conditional_assert_false(success_and_enabling_margin, is_nil_margin_index);
-
-        // It can only be ETH if we're enabling margin
-        let is_eth_asset = builder.is_equal_constant(self.asset_index, NATIVE_ASSET_INDEX);
-        let is_enabling_margin_and_not_eth = builder.and_not(self.enabling_margin, is_eth_asset);
-        self.success = builder.and_not(self.success, is_enabling_margin_and_not_eth);
     }
 }
 

@@ -38,6 +38,7 @@ pub struct RiskParametersTarget {
     pub usdc_collateral: BigIntTarget,                     // 96 bits
     pub usdc_collateral_with_funding: BigIntTarget,        // 96 bits
     pub usdc_portfolio_value: BigIntTarget,                // 96 bits
+    pub total_portfolio_value: BigIntTarget,               // 96 bits
     pub total_account_value: BigIntTarget,                 // 96 bits
     pub total_account_liquidation_threshold: BigIntTarget, // 96 bits
     pub initial_margin_requirement: BigUintTarget,
@@ -129,8 +130,15 @@ impl RiskParametersTarget {
             BIG_U96_LIMBS,
         );
 
-        let (total_asset_value, total_asset_liquidation_threshold) =
-            get_base_total_asset_values(builder, &account.margined_assets, all_margined_assets);
+        let is_insurance_fund =
+            builder.is_equal_constant(account.account_type, INSURANCE_FUND_ACCOUNT_TYPE as u64);
+        let (total_portfolio_asset_value, total_asset_value, total_asset_liquidation_threshold) =
+            get_base_total_asset_values(
+                builder,
+                &account.margined_assets,
+                all_margined_assets,
+                is_insurance_fund,
+            );
 
         Self {
             usdc_collateral_with_funding: builder.add_bigint_non_carry(
@@ -139,6 +147,11 @@ impl RiskParametersTarget {
                 BIG_U96_LIMBS,
             ),
             usdc_collateral: cross_usdc_collateral,
+            total_portfolio_value: builder.add_bigint_non_carry(
+                &total_portfolio_asset_value,
+                &usdc_portfolio_value,
+                BIG_U96_LIMBS,
+            ),
             total_account_value: builder.add_bigint_non_carry(
                 &total_asset_value,
                 &usdc_portfolio_value,
@@ -242,6 +255,7 @@ impl RiskParametersTarget {
             total_account_value: isolated_total_account_value.clone(),
 
             usdc_portfolio_value: isolated_total_account_value.clone(),
+            total_portfolio_value: isolated_total_account_value.clone(),
             total_account_liquidation_threshold: isolated_total_account_value.clone(),
 
             initial_margin_requirement,
@@ -262,6 +276,10 @@ impl RiskParametersTarget {
         );
         builder.println_bigint(
             &self.usdc_portfolio_value,
+            &format!("{} usdc portfolio value", tag),
+        );
+        builder.println_bigint(
+            &self.total_portfolio_value,
             &format!("{} total portfolio value", tag),
         );
         builder.println_bigint(
@@ -402,6 +420,8 @@ impl RiskParametersTarget {
             );
             self.usdc_portfolio_value =
                 builder.add_bigint_non_carry(&self.usdc_portfolio_value, &delta, BIG_U96_LIMBS);
+            self.total_portfolio_value =
+                builder.add_bigint_non_carry(&self.total_portfolio_value, &delta, BIG_U96_LIMBS);
             self.total_account_value =
                 builder.add_bigint_non_carry(&self.total_account_value, &delta, BIG_U96_LIMBS);
             self.total_account_liquidation_threshold = builder.add_bigint_non_carry(
@@ -467,29 +487,35 @@ impl RiskParametersTarget {
                     BIG_U96_LIMBS,
                 )
             };
-            let mut old_asset_ltv = builder.div_bigint_by_biguint(&old_multiplier_ltv, &divider);
-            let mut old_asset_lt = builder.div_bigint_by_biguint(&old_multiplier_lt, &divider);
-            let mut new_asset_ltv = builder.div_bigint_by_biguint(&new_multiplier_ltv, &divider);
-            let mut new_asset_lt = builder.div_bigint_by_biguint(&new_multiplier_lt, &divider);
+            // Quotients are constrained to BIG_U96_LIMBS directly; dividends are zero unless
+            // the non-USDC flag is set, in which case the executor guarantees the bound.
+            let old_asset_ltv =
+                builder.div_bigint_by_biguint_trimmed(&old_multiplier_ltv, &divider, BIG_U96_LIMBS);
+            let old_asset_lt =
+                builder.div_bigint_by_biguint_trimmed(&old_multiplier_lt, &divider, BIG_U96_LIMBS);
+            let new_asset_ltv =
+                builder.div_bigint_by_biguint_trimmed(&new_multiplier_ltv, &divider, BIG_U96_LIMBS);
+            let new_asset_lt =
+                builder.div_bigint_by_biguint_trimmed(&new_multiplier_lt, &divider, BIG_U96_LIMBS);
 
-            {
-                let mut success: BoolTarget;
-                let mut success_assertions = vec![];
-                (success, old_asset_ltv.abs) =
-                    builder.try_trim_biguint(&old_asset_ltv.abs, BIG_U96_LIMBS);
-                success_assertions.push(success);
-                (success, old_asset_lt.abs) =
-                    builder.try_trim_biguint(&old_asset_lt.abs, BIG_U96_LIMBS);
-                success_assertions.push(success);
-                (success, new_asset_ltv.abs) =
-                    builder.try_trim_biguint(&new_asset_ltv.abs, BIG_U96_LIMBS);
-                success_assertions.push(success);
-                (success, new_asset_lt.abs) =
-                    builder.try_trim_biguint(&new_asset_lt.abs, BIG_U96_LIMBS);
-                success_assertions.push(success);
-                let all_success = builder.multi_and(&success_assertions);
-                builder.conditional_assert_true(is_enabled, all_success);
-            }
+            // Raw portfolio value delta (balance * price / divider, no LTV discount)
+            let index_price_divider = builder.target_to_biguint(margined_asset.index_price_divider);
+            let old_tpv_raw = builder.div_bigint_by_biguint_trimmed(
+                &old_multiplier,
+                &index_price_divider,
+                BIG_U96_LIMBS,
+            );
+            let new_tpv_raw = builder.div_bigint_by_biguint_trimmed(
+                &new_multiplier,
+                &index_price_divider,
+                BIG_U96_LIMBS,
+            );
+            let tpv_delta = builder.sub_bigint_non_carry(&new_tpv_raw, &old_tpv_raw, BIG_U96_LIMBS);
+            self.total_portfolio_value = builder.add_bigint_non_carry(
+                &self.total_portfolio_value,
+                &tpv_delta,
+                BIG_U96_LIMBS,
+            );
 
             let tav_delta =
                 builder.sub_bigint_non_carry(&new_asset_ltv, &old_asset_ltv, BIG_U96_LIMBS);
@@ -551,6 +577,13 @@ impl RiskParametersTarget {
             &collateral_delta,
             BIG_U96_LIMBS,
         );
+        // The non-USDC asset portion of portfolio value is unchanged by a perps trade,
+        // so total_portfolio_value tracks usdc_portfolio_value here.
+        let mut total_portfolio_value = builder.add_bigint_non_carry(
+            &self.total_portfolio_value,
+            &collateral_delta,
+            BIG_U96_LIMBS,
+        );
         let mut total_account_value = builder.add_bigint_non_carry(
             &self.total_account_value,
             &collateral_delta,
@@ -593,6 +626,11 @@ impl RiskParametersTarget {
 
         usdc_portfolio_value = builder.add_bigint_non_carry(
             &usdc_portfolio_value,
+            &total_account_value_delta,
+            BIG_U96_LIMBS,
+        );
+        total_portfolio_value = builder.add_bigint_non_carry(
+            &total_portfolio_value,
             &total_account_value_delta,
             BIG_U96_LIMBS,
         );
@@ -715,6 +753,7 @@ impl RiskParametersTarget {
             usdc_collateral: collateral,
             usdc_collateral_with_funding: collateral_with_funding,
             usdc_portfolio_value,
+            total_portfolio_value,
             total_account_value,
             total_account_liquidation_threshold,
             initial_margin_requirement,
@@ -754,11 +793,14 @@ impl RiskParametersTarget {
         );
         let usdc_portfolio_value =
             builder.select_bigint(flag, &a.usdc_portfolio_value, &b.usdc_portfolio_value);
+        let total_portfolio_value =
+            builder.select_bigint(flag, &a.total_portfolio_value, &b.total_portfolio_value);
 
         Self {
             usdc_collateral,
             usdc_collateral_with_funding,
             usdc_portfolio_value,
+            total_portfolio_value,
             total_account_value,
             total_account_liquidation_threshold,
             initial_margin_requirement,
@@ -1086,9 +1128,18 @@ fn get_base_total_asset_values(
     builder: &mut Builder,
     account_margined_assets: &[AccountMarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
     margined_assets: &[MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
-) -> (BigIntTarget, BigIntTarget) {
+    is_insurance_fund: BoolTarget,
+) -> (BigIntTarget, BigIntTarget, BigIntTarget) {
     let asset_margin_tick = builder.constant_biguint(&BigUint::from(ASSET_MARGIN_TICK));
+    // Insurance funds hold non-USDC margined assets as spot, not as perps margin.
+    // Their holdings contribute to the raw total portfolio value (share valuation)
+    // but are excluded from the LTV-discounted account value and the liquidation
+    // threshold, matching the backend's getBaseSuppliedTotalAssetValues.
+    let not_insurance_fund = builder.not(is_insurance_fund);
 
+    let mut total_portfolio_asset_value = UnsafeBigTarget {
+        limbs: vec![builder.zero(); BIG_U96_LIMBS],
+    };
     let mut total_account_asset_value = UnsafeBigTarget {
         limbs: vec![builder.zero(); BIG_U96_LIMBS],
     };
@@ -1106,25 +1157,37 @@ fn get_base_total_asset_values(
             let is_not_universal_asset = builder.not(is_universal_asset);
             let index_price = builder.mul_bool(is_not_universal_asset, margined_asset.index_price);
             let index_price = builder.target_to_biguint(index_price);
-            let mut index_price_divider =
+            let index_price_divider_raw =
                 builder.target_to_biguint(margined_asset.index_price_divider);
-            index_price_divider = builder.mul_biguint_non_carry(
-                &index_price_divider,
+            let index_price_divider = builder.mul_biguint_non_carry(
+                &index_price_divider_raw,
                 &asset_margin_tick,
                 BIG_U96_LIMBS,
             );
 
-            let loan_to_value =
-                builder.target_to_biguint_single_limb_unsafe(margined_asset.loan_to_value);
+            let loan_to_value = builder.mul_bool(not_insurance_fund, margined_asset.loan_to_value);
+            let loan_to_value = builder.target_to_biguint_single_limb_unsafe(loan_to_value);
             let liquidation_threshold =
-                builder.target_to_biguint_single_limb_unsafe(margined_asset.liquidation_threshold);
+                builder.mul_bool(not_insurance_fund, margined_asset.liquidation_threshold);
+            let liquidation_threshold =
+                builder.target_to_biguint_single_limb_unsafe(liquidation_threshold);
 
-            // Asset balance can be negative only for USDC and we this branch is not active for USDC, so using absolute value here is ok.
+            // Asset balance can be negative only for USDC and this branch is not active for USDC, so using absolute value here is ok.
             let balance_to_usdc = builder.mul_biguint_non_carry(
                 &index_price,
                 &account_asset_balance.balance.abs,
                 BIG_U96_LIMBS,
             );
+
+            // Raw portfolio contribution (balance * price / divider, no LTV discount)
+            let normalized_balance_portfolio = {
+                let big = builder.div_biguint_trimmed(
+                    &balance_to_usdc,
+                    &index_price_divider_raw,
+                    BIG_U96_LIMBS,
+                );
+                builder.unsafe_big_from_biguint(&big)
+            };
 
             let balance_loan_to_value =
                 builder.mul_biguint_non_carry(&balance_to_usdc, &loan_to_value, BIG_U128_LIMBS);
@@ -1135,21 +1198,24 @@ fn get_base_total_asset_values(
             );
 
             let normalized_balance_loan_to_value = {
-                let mut result = builder.div_biguint(&balance_loan_to_value, &index_price_divider);
-                let success: BoolTarget;
-                (success, result) = builder.try_trim_biguint(&result, BIG_U96_LIMBS);
-                builder.assert_true(success);
+                let result = builder.div_biguint_trimmed(
+                    &balance_loan_to_value,
+                    &index_price_divider,
+                    BIG_U96_LIMBS,
+                );
                 builder.unsafe_big_from_biguint(&result)
             };
             let normalized_balance_liquidation_threshold = {
-                let mut result =
-                    builder.div_biguint(&balance_liquidation_threshold, &index_price_divider);
-                let success: BoolTarget;
-                (success, result) = builder.try_trim_biguint(&result, BIG_U96_LIMBS);
-                builder.assert_true(success);
+                let result = builder.div_biguint_trimmed(
+                    &balance_liquidation_threshold,
+                    &index_price_divider,
+                    BIG_U96_LIMBS,
+                );
                 builder.unsafe_big_from_biguint(&result)
             };
 
+            total_portfolio_asset_value =
+                builder.add_unsafe_big(&total_portfolio_asset_value, &normalized_balance_portfolio);
             total_account_asset_value = builder.add_unsafe_big(
                 &total_account_asset_value,
                 &normalized_balance_loan_to_value,
@@ -1160,12 +1226,15 @@ fn get_base_total_asset_values(
             );
         });
 
+    let total_portfolio_asset_value =
+        builder.unsafe_big32_to_biguint(&total_portfolio_asset_value, BIG_U96_LIMBS);
     let total_account_asset_value =
         builder.unsafe_big32_to_biguint(&total_account_asset_value, BIG_U96_LIMBS);
     let total_account_liquidation_threshold =
         builder.unsafe_big32_to_biguint(&total_account_liquidation_threshold, BIG_U96_LIMBS);
 
     (
+        builder.biguint_to_bigint(&total_portfolio_asset_value),
         builder.biguint_to_bigint(&total_account_asset_value),
         builder.biguint_to_bigint(&total_account_liquidation_threshold),
     )

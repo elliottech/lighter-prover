@@ -11,7 +11,7 @@ use plonky2::iop::witness::Witness;
 use serde::{Deserialize, Serialize};
 
 use super::config::{BIG_U64_LIMBS, BIGU16_U64_LIMBS, Builder};
-use super::constants::POSITION_LIST_SIZE;
+use super::constants::{MARKET_FLAGS_BITS, POSITION_LIST_SIZE};
 use crate::bigint::big_u16::bigint_u16::{
     BigIntU16Target, CircuitBuilderBigIntU16, WitnessBigInt16,
 };
@@ -24,7 +24,7 @@ use crate::signed::signed_target::{
 };
 use crate::uint::u16::gadgets::arithmetic_u16::CircuitBuilderU16;
 
-pub const MARKET_DETAIL_SIZE: usize = 23;
+pub const MARKET_DETAIL_SIZE: usize = 25;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Default)]
 pub struct MarketDetails {
@@ -88,6 +88,12 @@ pub struct MarketDetails {
 
     #[serde(rename = "sid", default)]
     pub strategy_index: u8,
+
+    #[serde(rename = "mf", default)]
+    pub market_flags: i64,
+
+    #[serde(rename = "fpm", default)]
+    pub funding_premium_multiplier: u16, // (0, 100] where 100 = 1x
 }
 
 impl MarketDetails {
@@ -151,6 +157,8 @@ impl MarketDetails {
             funding_clamp_big: u32::try_from(pis[20].to_canonical_u64()).unwrap(),
             open_interest_limit: pis[21].to_canonical_u64(),
             strategy_index: u8::try_from(pis[22].to_canonical_u64()).unwrap(),
+            market_flags: i64::try_from(pis[23].to_canonical_u64()).unwrap(),
+            funding_premium_multiplier: u16::try_from(pis[24].to_canonical_u64()).unwrap(),
         }
     }
 }
@@ -177,6 +185,8 @@ pub struct MarketDetailsTarget {
     pub open_interest_limit: Target,              // 56 bits
 
     pub strategy_index: Target, // 3 bits, which collateral strategy to use
+    pub market_flags: Target,
+    pub funding_premium_multiplier: Target, // 8 bits, (0, 100] where 100 = 1x
 }
 
 impl MarketDetailsTarget {
@@ -237,6 +247,11 @@ impl MarketDetailsTarget {
             &format!("{} -- open_interest_limit", tag),
         );
         builder.println(self.strategy_index, &format!("{} -- strategy_index", tag));
+        builder.println(self.market_flags, &format!("{} -- market_flags", tag));
+        builder.println(
+            self.funding_premium_multiplier,
+            &format!("{} -- funding_premium_multiplier", tag),
+        );
     }
 
     pub fn new(builder: &mut Builder) -> Self {
@@ -268,6 +283,8 @@ impl MarketDetailsTarget {
             funding_clamp_big: builder.add_virtual_target(),
             open_interest_limit: builder.add_virtual_target(),
             strategy_index: builder.add_virtual_target(),
+            market_flags: builder.add_virtual_target(),
+            funding_premium_multiplier: builder.add_virtual_target(),
         }
     }
 
@@ -289,6 +306,8 @@ impl MarketDetailsTarget {
             self.funding_clamp_big,
             self.open_interest_limit,
             self.strategy_index,
+            self.market_flags,
+            self.funding_premium_multiplier,
         ]
     }
 
@@ -321,6 +340,8 @@ impl MarketDetailsTarget {
             funding_clamp_big: builder.zero(),
             open_interest_limit: builder.zero(),
             strategy_index: builder.zero(),
+            market_flags: builder.zero(),
+            funding_premium_multiplier: builder.zero(),
         }
     }
 
@@ -353,6 +374,8 @@ impl MarketDetailsTarget {
         builder.register_public_input(self.funding_clamp_big);
         builder.register_public_input(self.open_interest_limit);
         builder.register_public_input(self.strategy_index);
+        builder.register_public_input(self.market_flags);
+        builder.register_public_input(self.funding_premium_multiplier);
 
         let public_inputs_after = builder.num_public_inputs();
         assert_eq!(
@@ -391,7 +414,31 @@ impl MarketDetailsTarget {
             funding_clamp_big: pis[20],
             open_interest_limit: pis[21],
             strategy_index: pis[22],
+            market_flags: pis[23],
+            funding_premium_multiplier: pis[24],
         }
+    }
+}
+
+pub struct MarketFlags {
+    pub margin_mode: Target,
+    pub default_margin_mode: Target,
+}
+
+impl MarketFlags {
+    pub fn from_target(builder: &mut Builder, market_flags: Target) -> Self {
+        let le_bits = builder.split_le(market_flags, MARKET_FLAGS_BITS);
+        Self {
+            margin_mode: le_bits[0].target,
+            default_margin_mode: le_bits[1].target,
+        }
+    }
+    pub fn to_target(&self, builder: &mut Builder) -> Target {
+        let two = builder.constant_u64(2);
+        builder.mul_add(two, self.default_margin_mode, self.margin_mode)
+    }
+    pub fn is_isolated_only(&self) -> BoolTarget {
+        BoolTarget::new_unsafe(self.margin_mode)
     }
 }
 
@@ -460,6 +507,12 @@ pub fn random_access_market_details(
         ),
         strategy_index: builder
             .random_access(access_index, v.iter().map(|x| x.strategy_index).collect()),
+        market_flags: builder
+            .random_access(access_index, v.iter().map(|x| x.market_flags).collect()),
+        funding_premium_multiplier: builder.random_access(
+            access_index,
+            v.iter().map(|x| x.funding_premium_multiplier).collect(),
+        ),
     }
 }
 
@@ -533,6 +586,11 @@ impl<T: Witness<F>, F: PrimeField64> MarketDetailsWitness<F> for T {
             F::from_canonical_u64(mi.open_interest_limit),
         )?;
         self.set_target(t.strategy_index, F::from_canonical_u8(mi.strategy_index))?;
+        self.set_target(t.market_flags, F::from_canonical_i64(mi.market_flags))?;
+        self.set_target(
+            t.funding_premium_multiplier,
+            F::from_canonical_u16(mi.funding_premium_multiplier),
+        )?;
 
         Ok(())
     }
@@ -595,6 +653,12 @@ pub fn select_market_details(
         funding_clamp_big: builder.select(flag, a.funding_clamp_big, b.funding_clamp_big),
         open_interest_limit: builder.select(flag, a.open_interest_limit, b.open_interest_limit),
         strategy_index: builder.select(flag, a.strategy_index, b.strategy_index),
+        market_flags: builder.select(flag, a.market_flags, b.market_flags),
+        funding_premium_multiplier: builder.select(
+            flag,
+            a.funding_premium_multiplier,
+            b.funding_premium_multiplier,
+        ),
     }
 }
 
@@ -645,6 +709,11 @@ pub fn diff_market_details(
         funding_clamp_big: builder.sub(new.funding_clamp_big, old.funding_clamp_big),
         open_interest_limit: builder.sub(new.open_interest_limit, old.open_interest_limit),
         strategy_index: builder.sub(new.strategy_index, old.strategy_index),
+        market_flags: builder.sub(new.market_flags, old.market_flags),
+        funding_premium_multiplier: builder.sub(
+            new.funding_premium_multiplier,
+            old.funding_premium_multiplier,
+        ),
     }
 }
 
@@ -720,6 +789,12 @@ pub fn apply_diff_market_details(
             old.open_interest_limit,
         ),
         strategy_index: builder.mul_add(flag.target, diff.strategy_index, old.strategy_index),
+        market_flags: builder.mul_add(flag.target, diff.market_flags, old.market_flags),
+        funding_premium_multiplier: builder.mul_add(
+            flag.target,
+            diff.funding_premium_multiplier,
+            old.funding_premium_multiplier,
+        ),
     }
 }
 
@@ -763,6 +838,11 @@ pub fn connect_market_details(
     builder.connect(lhs.funding_clamp_big, rhs.funding_clamp_big);
     builder.connect(lhs.open_interest_limit, rhs.open_interest_limit);
     builder.connect(lhs.strategy_index, rhs.strategy_index);
+    builder.connect(lhs.market_flags, rhs.market_flags);
+    builder.connect(
+        lhs.funding_premium_multiplier,
+        rhs.funding_premium_multiplier,
+    );
 }
 
 pub fn all_market_details_hash(

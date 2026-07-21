@@ -203,17 +203,19 @@ impl Verify for L2BurnSharesTxTarget {
         let available_shares_to_burn = get_available_shares_to_burn_for_public_pool(
             builder,
             &tx_state.risk_infos[POOL_STRATEGY_RISK_ID].cross_risk_parameters,
+            &tx_state.risk_infos[POOL_CROSS_RISK_ID].cross_risk_parameters,
             &tx_state.accounts[SUB_ACCOUNT_ID],
         );
 
         builder.conditional_assert_lte(is_enabled, self.share_amount, available_shares_to_burn, 64);
 
-        self.shares_to_burn_usdc_value = get_shares_usdc_value_for_public_pool(
+        let shares_to_burn_usdc_value = get_shares_usdc_value_for_public_pool(
             builder,
             &tx_state.risk_infos[POOL_CROSS_RISK_ID].cross_risk_parameters,
             &tx_state.accounts[SUB_ACCOUNT_ID],
             self.share_amount,
         );
+        self.shares_to_burn_usdc_value = builder.biguint_to_target_safe(&shares_to_burn_usdc_value);
         builder.register_range_check(
             self.shares_to_burn_usdc_value,
             MAX_POOL_SHARES_TO_MINT_OR_BURN_USDC_BITS,
@@ -308,12 +310,13 @@ impl Verify for L2BurnSharesTxTarget {
         }
 
         self.shares_to_burn = builder.sub(self.share_amount, self.operator_fee_share);
-        self.shares_to_burn_usdc_value = get_shares_usdc_value_for_public_pool(
+        let shares_to_burn_usdc_value = get_shares_usdc_value_for_public_pool(
             builder,
             &tx_state.risk_infos[POOL_CROSS_RISK_ID].cross_risk_parameters,
             &tx_state.accounts[SUB_ACCOUNT_ID],
             self.shares_to_burn,
         );
+        self.shares_to_burn_usdc_value = builder.biguint_to_target_safe(&shares_to_burn_usdc_value);
     }
 }
 

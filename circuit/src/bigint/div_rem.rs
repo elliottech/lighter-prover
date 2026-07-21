@@ -35,14 +35,39 @@ pub trait CircuitBuilderBiguintDivRem<F: RichField + Extendable<D>, const D: usi
         a: &BigUintTarget,
         b: &BigUintTarget,
     ) -> (BigUintTarget, BigUintTarget);
+    /// Like [`Self::div_rem_biguint`], but allocates the quotient with `quotient_num_limbs` limbs.
+    /// The constraints are unsatisfiable if the quotient does not fit in that many limbs,
+    /// so callers must guarantee the bound for all satisfiable witnesses.
+    fn div_rem_biguint_trimmed(
+        &mut self,
+        a: &BigUintTarget,
+        b: &BigUintTarget,
+        quotient_num_limbs: usize,
+    ) -> (BigUintTarget, BigUintTarget);
     /// Returns the quotient of a divided by b. If b is zero, returns 0.
     fn div_biguint(&mut self, a: &BigUintTarget, b: &BigUintTarget) -> BigUintTarget;
+    /// Returns the quotient of a divided by b with a quotient of `quotient_num_limbs` limbs.
+    /// See [`Self::div_rem_biguint_trimmed`].
+    fn div_biguint_trimmed(
+        &mut self,
+        a: &BigUintTarget,
+        b: &BigUintTarget,
+        quotient_num_limbs: usize,
+    ) -> BigUintTarget;
     /// Returns the remainder of a divided by b. If b is zero, returns 0.
     fn rem_biguint(&mut self, a: &BigUintTarget, b: &BigUintTarget) -> BigUintTarget;
     /// Returns the ceiling of the quotient of a divided by b. If b is zero, returns a.
     fn ceil_div_biguint(&mut self, a: &BigUintTarget, b: &BigUintTarget) -> BigUintTarget;
     /// Returns the quotient of a divided by b, where a is a signed integer. If b is zero, returns 0.
     fn div_bigint_by_biguint(&mut self, a: &BigIntTarget, b: &BigUintTarget) -> BigIntTarget;
+    /// Returns the quotient of a divided by b with a quotient of `quotient_num_limbs` limbs,
+    /// where a is a signed integer. See [`Self::div_rem_biguint_trimmed`].
+    fn div_bigint_by_biguint_trimmed(
+        &mut self,
+        a: &BigIntTarget,
+        b: &BigUintTarget,
+        quotient_num_limbs: usize,
+    ) -> BigIntTarget;
 }
 
 impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilderBiguintDivRem<F, D>
@@ -53,15 +78,22 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilderBiguintDivRem<F
         a: &BigUintTarget,
         b: &BigUintTarget,
     ) -> (BigUintTarget, BigUintTarget) {
-        let key = (a.clone(), b.clone());
+        self.div_rem_biguint_trimmed(a, b, a.num_limbs())
+    }
+
+    fn div_rem_biguint_trimmed(
+        &mut self,
+        a: &BigUintTarget,
+        b: &BigUintTarget,
+        quotient_num_limbs: usize,
+    ) -> (BigUintTarget, BigUintTarget) {
+        assert!(quotient_num_limbs <= a.num_limbs());
+        let key = (a.clone(), b.clone(), quotient_num_limbs);
         if let Some(result) = self.div_rem_biguint_cache.get(&key) {
             return result.clone();
         }
 
-        // let a_len = a.limbs.len();
-        // let b_len = b.limbs.len();
-        // let div_num_limbs = a_len.max(b_len);
-        let div = self.add_virtual_biguint_target_safe(a.num_limbs());
+        let div = self.add_virtual_biguint_target_safe(quotient_num_limbs);
         let rem = self.add_virtual_biguint_target_safe(b.num_limbs());
 
         self.add_simple_generator(BigUintDivRemGenerator::<F, D> {
@@ -94,8 +126,27 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilderBiguintDivRem<F
         div
     }
 
+    fn div_biguint_trimmed(
+        &mut self,
+        a: &BigUintTarget,
+        b: &BigUintTarget,
+        quotient_num_limbs: usize,
+    ) -> BigUintTarget {
+        let (div, _rem) = self.div_rem_biguint_trimmed(a, b, quotient_num_limbs);
+        div
+    }
+
     fn div_bigint_by_biguint(&mut self, a: &BigIntTarget, b: &BigUintTarget) -> BigIntTarget {
-        let div_abs = self.div_biguint(&a.abs, b);
+        self.div_bigint_by_biguint_trimmed(a, b, a.abs.num_limbs())
+    }
+
+    fn div_bigint_by_biguint_trimmed(
+        &mut self,
+        a: &BigIntTarget,
+        b: &BigUintTarget,
+        quotient_num_limbs: usize,
+    ) -> BigIntTarget {
+        let div_abs = self.div_biguint_trimmed(&a.abs, b, quotient_num_limbs);
         let div_bigint = self.biguint_to_bigint(&div_abs);
         BigIntTarget {
             abs: div_abs,

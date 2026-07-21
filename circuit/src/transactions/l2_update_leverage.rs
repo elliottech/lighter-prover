@@ -16,6 +16,7 @@ use crate::eddsa::schnorr::hash_to_quintic_extension_circuit;
 use crate::tx_interface::{Apply, TxHash, Verify};
 use crate::types::config::{BIG_U96_LIMBS, Builder, F};
 use crate::types::constants::*;
+use crate::types::market_details::MarketFlags;
 use crate::types::tx_state::TxState;
 use crate::types::tx_type::TxTypeTargets;
 
@@ -118,8 +119,11 @@ impl Verify for L2UpdateLeverageTxTarget {
             tx_state.market.perps_market_index,
         );
 
-        // cancel mode - Possible values: CROSS_MARGIN(0) and ISOLATED_MARGIN(1)
-        builder.assert_bool(BoolTarget::new_unsafe(self.margin_mode));
+        let is_isolated_margin_mode =
+            builder.is_equal_constant(self.margin_mode, ISOLATED_MARGIN as u64);
+        let is_cross_margin_mode = builder.is_equal_constant(self.margin_mode, CROSS_MARGIN as u64);
+        let is_valid_margin_mode = builder.or(is_isolated_margin_mode, is_cross_margin_mode);
+        builder.conditional_assert_true(is_enabled, is_valid_margin_mode);
 
         // We only allow to update margin mode if there is no active position or order in the market
         self.is_position_active_on_market =
@@ -180,6 +184,18 @@ impl Verify for L2UpdateLeverageTxTarget {
         let is_account_pool_and_new_margin_mode_isolated =
             builder.and(is_account_pool, is_new_margin_mode_isolated);
         builder.conditional_assert_false(is_enabled, is_account_pool_and_new_margin_mode_isolated);
+
+        // Non-IF: can't set non-isolated on an isolated-only market.
+        let market_flags = MarketFlags::from_target(builder, tx_state.market_details.market_flags);
+        let is_market_isolated_only = market_flags.is_isolated_only();
+        let is_not_insurance_fund = builder.not(is_insurance_fund_account_type);
+        let is_new_mode_not_isolated = builder.not(is_new_margin_mode_isolated);
+        let non_if_non_isolated_on_isolated_market = builder.multi_and(&[
+            is_not_insurance_fund,
+            is_new_mode_not_isolated,
+            is_market_isolated_only,
+        ]);
+        builder.conditional_assert_false(is_enabled, non_if_non_isolated_on_isolated_market);
     }
 }
 
@@ -194,6 +210,12 @@ impl Apply for L2UpdateLeverageTxTarget {
             self.success,
             self.margin_mode,
             tx_state.positions[OWNER_ACCOUNT_ID].margin_mode,
+        );
+        let margin_set = builder.constant_usize(MARGIN_SET);
+        tx_state.positions[OWNER_ACCOUNT_ID].margin_set_flag = builder.select(
+            self.success,
+            margin_set,
+            tx_state.positions[OWNER_ACCOUNT_ID].margin_set_flag,
         );
 
         let old_risk_parameters = tx_state.risk_infos[OWNER_ACCOUNT_ID]

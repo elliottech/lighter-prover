@@ -284,6 +284,8 @@ impl Apply for InternalDeleverageTxTarget {
             trade_quote: self.quote,
             taker_position: &tx_state.positions[BANKRUPT_ACCOUNT_ID].clone(),
             maker_position: &tx_state.positions[DELEVERAGER_ACCOUNT_ID].clone(),
+            taker_account_type: tx_state.accounts[BANKRUPT_ACCOUNT_ID].account_type,
+            maker_account_type: tx_state.accounts[DELEVERAGER_ACCOUNT_ID].account_type,
             taker_risk_info: &tx_state.risk_infos[BANKRUPT_ACCOUNT_ID].clone(),
             maker_risk_info: &tx_state.risk_infos[DELEVERAGER_ACCOUNT_ID].clone(),
             taker_fee: builder.zero_signed(),

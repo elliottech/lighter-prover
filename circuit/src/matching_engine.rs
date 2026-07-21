@@ -33,6 +33,7 @@ use crate::types::config::{BIG_U96_LIMBS, Builder, F};
 use crate::types::constants::*;
 use crate::types::margined_asset::MarginedAssetTarget;
 use crate::types::market::MarketTarget;
+use crate::types::market_details::MarketFlags;
 use crate::types::order::{
     OrderTarget, get_market_index_and_order_nonce_from_order_index, select_order_target,
 };
@@ -829,6 +830,8 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
         trade_quote,
         taker_position: &tx_state.positions[TAKER_ACCOUNT_ID],
         maker_position: &tx_state.positions[MAKER_ACCOUNT_ID],
+        taker_account_type: tx_state.accounts[TAKER_ACCOUNT_ID].account_type,
+        maker_account_type: tx_state.accounts[MAKER_ACCOUNT_ID].account_type,
         taker_risk_info: &tx_state.risk_infos[TAKER_ACCOUNT_ID],
         maker_risk_info: &tx_state.risk_infos[MAKER_ACCOUNT_ID],
         taker_fee: SignedTarget::new_unsafe(
@@ -1184,8 +1187,17 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
                 tx_state.account_order.remaining_base_amount,
             );
 
-            let decrement_locked_balance_flag =
-                builder.multi_and(&[update_status_flags, is_spot, is_maker_limit_order]);
+            let is_maker_insurance_fund = builder.is_equal_constant(
+                tx_state.accounts[MAKER_ACCOUNT_ID].account_type,
+                INSURANCE_FUND_ACCOUNT_TYPE as u64,
+            );
+            let is_maker_not_insurance_fund = builder.not(is_maker_insurance_fund);
+            let decrement_locked_balance_flag = builder.multi_and(&[
+                update_status_flags,
+                is_spot,
+                is_maker_limit_order,
+                is_maker_not_insurance_fund,
+            ]);
             decrement_locked_balance_for_partial_order(
                 builder,
                 decrement_locked_balance_flag,
@@ -1407,8 +1419,19 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
             tx_state.account_order.reduce_only,
         );
 
-        let decrement_locked_balance_flag =
-            builder.multi_and(&[*flag, is_spot, is_maker_limit_order]);
+        // Skip locked balance for the insurance fund — it relies on
+        // strategy-1 non-negative checks instead of per-asset locked balance.
+        let is_insurance_fund = builder.is_equal_constant(
+            tx_state.accounts[*account_id].account_type,
+            INSURANCE_FUND_ACCOUNT_TYPE as u64,
+        );
+        let not_insurance_fund_for_lock = builder.not(is_insurance_fund);
+        let decrement_locked_balance_flag = builder.multi_and(&[
+            *flag,
+            is_spot,
+            is_maker_limit_order,
+            not_insurance_fund_for_lock,
+        ]);
         decrement_locked_balance_for_order(
             builder,
             decrement_locked_balance_flag,
@@ -1515,8 +1538,19 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
         register_account_order.reduce_only,
     );
 
-    let increment_locked_balance_flag =
-        builder.multi_and(&[insert_taker_to_order_book, is_spot, is_limit_order]);
+    // Skip locked balance for the insurance fund — it relies on
+    // strategy-1 non-negative checks instead of per-asset locked balance.
+    let is_taker_insurance_fund = builder.is_equal_constant(
+        tx_state.accounts[TAKER_ACCOUNT_ID].account_type,
+        INSURANCE_FUND_ACCOUNT_TYPE as u64,
+    );
+    let not_taker_insurance_fund_for_lock = builder.not(is_taker_insurance_fund);
+    let increment_locked_balance_flag = builder.multi_and(&[
+        insert_taker_to_order_book,
+        is_spot,
+        is_limit_order,
+        not_taker_insurance_fund_for_lock,
+    ]);
     increment_locked_balance_for_order(
         builder,
         increment_locked_balance_flag,
@@ -2391,14 +2425,28 @@ fn is_valid_spot_trade(
 
     /************************************************************************************/
     /************************************************************************************/
-    // Update risks if any asset is used as margin
+    // Update risks if any asset is used as margin.
+    // Insurance fund spot trades skip risk updates: non-USDC deltas go to
+    // MarginBalance but are not perps margin, and USDC deltas go to strategy-1
+    // while risk uses strategy-0 (unchanged), so the update would be a no-op.
+    let is_taker_insurance_fund_for_risk = builder.is_equal_constant(
+        tx_state.accounts[TAKER_ACCOUNT_ID].account_type,
+        INSURANCE_FUND_ACCOUNT_TYPE as u64,
+    );
+    let is_maker_insurance_fund = builder.is_equal_constant(
+        tx_state.accounts[MAKER_ACCOUNT_ID].account_type,
+        INSURANCE_FUND_ACCOUNT_TYPE as u64,
+    );
+    let not_taker_insurance_fund_for_risk = builder.not(is_taker_insurance_fund_for_risk);
+    let not_maker_insurance_fund = builder.not(is_maker_insurance_fund);
     let new_taker_risk_info = {
         let mut new_taker_cross_risk_parameters =
             input.taker_risk_info.cross_risk_parameters.clone();
-        let update_taker_risk_for_base = builder.and(
+        let update_taker_risk_for_base = builder.multi_and(&[
             is_enabled,
             tx_state.is_asset_used_as_margin[TAKER_ACCOUNT_ID][BASE_ASSET_ID],
-        );
+            not_taker_insurance_fund_for_risk,
+        ]);
         new_taker_cross_risk_parameters.update_for_spot_trade(
             builder,
             update_taker_risk_for_base,
@@ -2407,10 +2455,11 @@ fn is_valid_spot_trade(
             &tx_state.account_margined_assets[TAKER_ACCOUNT_ID][BASE_ASSET_ID].balance,
             &taker_base_margin_balance,
         );
-        let update_taker_risk_for_quote = builder.and(
+        let update_taker_risk_for_quote = builder.multi_and(&[
             is_enabled,
             tx_state.is_asset_used_as_margin[TAKER_ACCOUNT_ID][QUOTE_ASSET_ID],
-        );
+            not_taker_insurance_fund_for_risk,
+        ]);
         new_taker_cross_risk_parameters.update_for_spot_trade(
             builder,
             update_taker_risk_for_quote,
@@ -2427,10 +2476,11 @@ fn is_valid_spot_trade(
     let new_maker_risk_info = {
         let mut new_maker_cross_risk_parameters =
             input.maker_risk_info.cross_risk_parameters.clone();
-        let update_maker_risk_for_base = builder.and(
+        let update_maker_risk_for_base = builder.multi_and(&[
             is_enabled,
             tx_state.is_asset_used_as_margin[MAKER_ACCOUNT_ID][BASE_ASSET_ID],
-        );
+            not_maker_insurance_fund,
+        ]);
         new_maker_cross_risk_parameters.update_for_spot_trade(
             builder,
             update_maker_risk_for_base,
@@ -2439,10 +2489,11 @@ fn is_valid_spot_trade(
             &tx_state.account_margined_assets[MAKER_ACCOUNT_ID][BASE_ASSET_ID].balance,
             &maker_base_margin_balance,
         );
-        let update_maker_risk_for_quote = builder.and(
+        let update_maker_risk_for_quote = builder.multi_and(&[
             is_enabled,
             tx_state.is_asset_used_as_margin[MAKER_ACCOUNT_ID][QUOTE_ASSET_ID],
-        );
+            not_maker_insurance_fund,
+        ]);
         new_maker_cross_risk_parameters.update_for_spot_trade(
             builder,
             update_maker_risk_for_quote,
@@ -2470,12 +2521,14 @@ fn is_valid_spot_trade(
                 .sign,
         );
         let is_taker_base_collateral_invalid = builder.multi_and(&[
+            not_taker_insurance_fund_for_risk,
             is_base_asset_universal,
             is_taker_ask,
             is_taker_collateral_negative,
         ]);
         valid_taker_base = builder.and_not(valid_taker_base, is_taker_base_collateral_invalid);
         let is_taker_quote_collateral_invalid = builder.multi_and(&[
+            not_taker_insurance_fund_for_risk,
             is_quote_asset_universal,
             is_taker_bid,
             is_taker_collateral_negative,
@@ -2485,8 +2538,12 @@ fn is_valid_spot_trade(
         let is_taker_valid_risk_change = tx_state.risk_infos[TAKER_ACCOUNT_ID]
             .current_risk_parameters
             .is_valid_risk_change(builder, &new_taker_risk_info.current_risk_parameters);
-        let is_taker_invalid_risk_change =
-            builder.and_not(is_taker_unified, is_taker_valid_risk_change);
+        let is_taker_unified_non_insurance_fund =
+            builder.and_not(is_taker_unified, is_taker_insurance_fund_for_risk);
+        let is_taker_invalid_risk_change = builder.and_not(
+            is_taker_unified_non_insurance_fund,
+            is_taker_valid_risk_change,
+        );
         let is_taker_valid_risk_change_for_spot = builder.not(is_taker_invalid_risk_change);
 
         let valid_taker_balances = builder.multi_and(&[
@@ -2507,12 +2564,14 @@ fn is_valid_spot_trade(
                 .sign,
         );
         let is_maker_base_collateral_invalid = builder.multi_and(&[
+            not_maker_insurance_fund,
             is_base_asset_universal,
             is_taker_bid,
             is_maker_collateral_negative,
         ]);
         valid_maker_base = builder.and_not(valid_maker_base, is_maker_base_collateral_invalid);
         let is_maker_quote_collateral_invalid = builder.multi_and(&[
+            not_maker_insurance_fund,
             is_quote_asset_universal,
             is_taker_ask,
             is_maker_collateral_negative,
@@ -2522,8 +2581,12 @@ fn is_valid_spot_trade(
         let is_maker_valid_risk_change = tx_state.risk_infos[MAKER_ACCOUNT_ID]
             .current_risk_parameters
             .is_valid_risk_change(builder, &new_maker_risk_info.current_risk_parameters);
-        let is_maker_invalid_risk_change =
-            builder.and_not(is_maker_unified, is_maker_valid_risk_change);
+        let is_maker_unified_non_insurance_fund =
+            builder.and_not(is_maker_unified, is_maker_insurance_fund);
+        let is_maker_invalid_risk_change = builder.and_not(
+            is_maker_unified_non_insurance_fund,
+            is_maker_valid_risk_change,
+        );
         let is_maker_valid_risk_change_for_spot = builder.not(is_maker_invalid_risk_change);
 
         let valid_maker_balances = builder.multi_and(&[
@@ -2533,6 +2596,36 @@ fn is_valid_spot_trade(
         ]);
         let invalid_maker_balances = builder.and_not(is_enabled, valid_maker_balances);
         *cancel_maker_order = builder.or(invalid_maker_balances, *cancel_maker_order);
+        *update_status_flags = builder.and_not(*update_status_flags, *cancel_maker_order);
+    }
+
+    // Insurance fund spot: strategy-1 (spot USDC budget) must not go negative.
+    // This replaces the locked-balance guard that normal accounts use.
+    {
+        let is_taker_insurance_fund = builder.is_equal_constant(
+            tx_state.accounts[TAKER_ACCOUNT_ID].account_type,
+            INSURANCE_FUND_ACCOUNT_TYPE as u64,
+        );
+        let is_taker_strategy_negative = builder.is_sign_negative(taker_strategy.sign);
+        let taker_strategy_invalid = builder.multi_and(&[
+            is_enabled,
+            is_taker_insurance_fund,
+            is_taker_strategy_negative,
+        ]);
+        *cancel_taker_order = builder.or(taker_strategy_invalid, *cancel_taker_order);
+        *update_status_flags = builder.and_not(*update_status_flags, *cancel_taker_order);
+
+        let is_maker_insurance_fund = builder.is_equal_constant(
+            tx_state.accounts[MAKER_ACCOUNT_ID].account_type,
+            INSURANCE_FUND_ACCOUNT_TYPE as u64,
+        );
+        let is_maker_strategy_negative = builder.is_sign_negative(maker_strategy.sign);
+        let maker_strategy_invalid = builder.multi_and(&[
+            is_enabled,
+            is_maker_insurance_fund,
+            is_maker_strategy_negative,
+        ]);
+        *cancel_maker_order = builder.or(maker_strategy_invalid, *cancel_maker_order);
         *update_status_flags = builder.and_not(*update_status_flags, *cancel_maker_order);
     }
 
@@ -2592,8 +2685,17 @@ fn apply_self_trade_reduce(
         tx_state.account_order.remaining_base_amount,
     );
 
-    let decrement_locked_balance_flag =
-        builder.multi_and(&[not_post_only_flag, is_spot, is_maker_limit_order]);
+    let is_taker_insurance_fund = builder.is_equal_constant(
+        tx_state.accounts[TAKER_ACCOUNT_ID].account_type,
+        INSURANCE_FUND_ACCOUNT_TYPE as u64,
+    );
+    let is_taker_not_insurance_fund = builder.not(is_taker_insurance_fund);
+    let decrement_locked_balance_flag = builder.multi_and(&[
+        not_post_only_flag,
+        is_spot,
+        is_maker_limit_order,
+        is_taker_not_insurance_fund,
+    ]);
     decrement_locked_balance_for_partial_order(
         builder,
         decrement_locked_balance_flag,
@@ -2717,6 +2819,17 @@ pub fn increment_order_count_in_place(
     );
 
     let flag = builder.and_not(flag, is_spot); // Early return for spot
+
+    // Fix the market-default margin mode and lock margin_set_flag before the order-count
+    // increments below so is_empty still holds.
+    let market_flags = MarketFlags::from_target(builder, tx_state.market_details.market_flags);
+    let account_type = tx_state.accounts[TAKER_ACCOUNT_ID].account_type;
+    tx_state.positions[TAKER_ACCOUNT_ID].init_if_empty(
+        builder,
+        flag,
+        account_type,
+        market_flags.default_margin_mode,
+    );
 
     let trigger_status_parent_order = builder.constant_from_u8(TRIGGER_STATUS_PARENT_ORDER);
     let is_not_trigger_status_parent_order =

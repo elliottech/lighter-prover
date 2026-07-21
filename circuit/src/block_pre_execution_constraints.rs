@@ -426,6 +426,7 @@ impl BlockPreExecutionCircuit {
         );
 
         let eight = builder.constant_usize(8);
+        let funding_premium_multiplier_tick = builder.constant_u64(FUNDING_PREMIUM_MULTIPLIER_TICK);
         let market_details_after = core::array::from_fn(|market_index| {
             let mut market_details = self.target.all_market_details_before[market_index].clone();
 
@@ -441,6 +442,16 @@ impl BlockPreExecutionCircuit {
                 builder.abs(market_details.aggregate_premium_sum);
             let (abs_avarage_premium, _) =
                 builder.div_rem(abs_premium_sum, max_premium_sample_count, 6);
+            // Scale the premium by the market funding premium multiplier, in (0, 100] where 100 = 1x
+            let scaled_avarage_premium_abs = builder.mul(
+                abs_avarage_premium,
+                market_details.funding_premium_multiplier,
+            );
+            let (abs_avarage_premium, _) = builder.div_rem(
+                scaled_avarage_premium_abs,
+                funding_premium_multiplier_tick,
+                FUNDING_PREMIUM_MULTIPLIER_BITS,
+            );
             let avarage_premium =
                 SignedTarget::new_unsafe(builder.mul(abs_avarage_premium, sign_premium_sum.target));
 

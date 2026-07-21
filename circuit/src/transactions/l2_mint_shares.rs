@@ -19,7 +19,7 @@ use crate::liquidation::{
     get_shares_usdc_value_for_public_pool,
 };
 use crate::tx_interface::{Apply, TxHash, Verify};
-use crate::types::config::{BIG_U96_LIMBS, Builder, F};
+use crate::types::config::{BIG_U64_LIMBS, BIG_U96_LIMBS, Builder, F};
 use crate::types::constants::*;
 use crate::types::tx_state::TxState;
 use crate::types::tx_type::TxTypeTargets;
@@ -195,17 +195,21 @@ impl Verify for L2MintSharesTxTarget {
             BoolOrTarget::False,
         );
 
-        self.principal_amount = get_shares_usdc_value_for_public_pool(
+        let big_principal_amount = get_shares_usdc_value_for_public_pool(
             builder,
             &tx_state.risk_infos[SUB_ACCOUNT_ID].cross_risk_parameters,
             &tx_state.accounts[SUB_ACCOUNT_ID],
             self.share_amount,
         );
-        let big_principal_amount = builder.target_to_biguint(self.principal_amount);
+        let (success, big_principal_amount) =
+            builder.try_trim_biguint(&big_principal_amount, BIG_U64_LIMBS);
+        builder.conditional_assert_true(self.success, success);
+
         builder.range_check_biguint(
             &big_principal_amount,
             MAX_POOL_SHARES_TO_MINT_OR_BURN_USDC_BITS,
         );
+        self.principal_amount = builder.biguint_to_target_safe(&big_principal_amount);
 
         let usdc_to_collateral_multiplier =
             builder.constant_biguint(&BigUint::from(USDC_TO_COLLATERAL_MULTIPLIER));

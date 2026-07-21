@@ -136,6 +136,13 @@ impl Apply for L2CreateSubAccountTxTarget {
             self.account_index,
             tx_state.accounts[SUB_ACCOUNT_ID].master_account_index,
         );
+        let unified_trading_mode =
+            builder.constant(F::from_canonical_u8(ACCOUNT_ACCOUNT_TRADING_MODE_UNIFIED));
+        tx_state.accounts[SUB_ACCOUNT_ID].account_trading_mode = builder.select(
+            self.success,
+            unified_trading_mode,
+            tx_state.accounts[SUB_ACCOUNT_ID].account_trading_mode,
+        );
 
         self.success
     }

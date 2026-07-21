@@ -54,6 +54,19 @@ impl BlobPolynomialTarget {
         )
     }
 
+    pub fn eval_horner(
+        &self,
+        builder: &mut Builder<F, D>,
+        x: &NonNativeTarget<BLS12381Scalar>,
+    ) -> NonNativeTarget<BLS12381Scalar> {
+        let mut result = builder.zero_nonnative::<BLS12381Scalar>();
+        for coeff in self.0.iter().rev() {
+            result = builder.mul_nonnative(&result, x);
+            result = builder.add_nonnative(&result, coeff);
+        }
+        result
+    }
+
     /// Evaluate a polynomial (in evaluation form) at an arbitrary point ``z``.
     /// - When ``z`` is in the domain, the evaluation can be found by indexing the polynomial at the
     ///   position that ``z`` is in the domain.
@@ -66,7 +79,7 @@ impl BlobPolynomialTarget {
     /// - ``DOMAIN`` is the bit_reversal_permutation roots of unity
     /// - ``f(DOMAIN[i])`` is the blob[i]
     ///
-    pub fn eval_at(
+    pub fn eval_barycentric(
         &self,
         builder: &mut Builder<F, D>,
         x: &NonNativeTarget<BLS12381Scalar>,

@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::Result;
-use circuit::blob::blob_constraints::{BlobEvaluationCircuit, Circuit as _};
+use circuit::blob::blob_constraints::{BlobEvaluationCircuit, Circuit as _, PubDataMode};
 use circuit::blob::bls12_381_scalar_field::BLS12381Scalar;
 use circuit::circuit_serializer::{
     DefaultPoseidonBN128GeneratorSerializer, InnerWrapperGateSerializer,
@@ -99,6 +99,7 @@ fn main() -> Result<()> {
     );
 
     // Define blob evaluation circuit
+    info!("Polynomial circuit in {:?} mode", PubDataMode::from_env());
     let blob_evaluation_circuit = BlobEvaluationCircuit::define(CIRCUIT_CONFIG);
     let blob_evaluation_circuit_data = blob_evaluation_circuit.builder.build::<C>();
     let blob_evaluation_circuit_digest = hex::encode(

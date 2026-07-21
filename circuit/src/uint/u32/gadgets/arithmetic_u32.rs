@@ -280,6 +280,25 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilderU32<F, D> for B
             return Some((self.constant_u32(low), self.constant_u32(high)));
         }
 
+        // If either multiplicand is the constant zero, the result is just `z`.
+        if x_const == Some(F::ZERO) || y_const == Some(F::ZERO) {
+            let zero = self.zero_u32();
+            return Some((z, zero));
+        }
+
+        // If one multiplicand is the constant one and the addend is the constant zero,
+        // the result is the other multiplicand.
+        if z_const == Some(F::ZERO) {
+            if x_const == Some(F::ONE) {
+                let zero = self.zero_u32();
+                return Some((y, zero));
+            }
+            if y_const == Some(F::ONE) {
+                let zero = self.zero_u32();
+                return Some((x, zero));
+            }
+        }
+
         None
     }
 
@@ -348,6 +367,23 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilderU32<F, D> for B
             return self.add_u32(to_add[0], carry);
         }
 
+        // Drop addends that are the constant zero; they don't affect the sum.
+        let filtered: Vec<U32Target> = to_add
+            .iter()
+            .copied()
+            .filter(|t| self.target_as_constant(t.0) != Some(F::ZERO))
+            .collect();
+        if filtered.len() < to_add.len() {
+            if filtered.is_empty() {
+                let zero = self.zero_u32();
+                return self.add_u32(zero, carry);
+            }
+            if filtered.len() == 1 {
+                return self.add_u32(filtered[0], carry);
+            }
+            return self.add_u32s_with_carry(&filtered, carry);
+        }
+
         // See if we've already computed the same operation.
         let operation = U32AddManyOperation {
             addends: to_add.to_vec(),
@@ -403,6 +439,14 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilderU32<F, D> for B
 
     // Returns x - y - borrow, as a pair (result, borrow), where borrow is 0 or 1 depending on whether borrowing from the next digit is required (iff y + borrow > x).
     fn sub_u32(&mut self, x: U32Target, y: U32Target, borrow: U32Target) -> (U32Target, U32Target) {
+        // Subtracting the constant zero with no incoming borrow is the identity.
+        if self.target_as_constant(y.0) == Some(F::ZERO)
+            && self.target_as_constant(borrow.0) == Some(F::ZERO)
+        {
+            let zero = self.zero_u32();
+            return (x, zero);
+        }
+
         // See if we've already computed the same operation.
         let operation = U32SubtractionOperation { x, y, borrow };
         if let Some(&result) = self.u32_sub_results.get(&operation) {

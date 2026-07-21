@@ -334,8 +334,17 @@ impl Apply for InternalCancelOrderTxTarget {
             builder.is_equal_constant(tx_state.market.market_type, MARKET_TYPE_SPOT);
         let is_limit_order =
             builder.is_equal_constant(tx_state.account_order.order_type, LIMIT_ORDER as u64);
-        let decrement_locked_balance_flag =
-            builder.multi_and(&[self.success, is_spot_market, is_limit_order]);
+        let is_insurance_fund = builder.is_equal_constant(
+            tx_state.accounts[OWNER_ACCOUNT_ID].account_type,
+            INSURANCE_FUND_ACCOUNT_TYPE as u64,
+        );
+        let is_not_insurance_fund = builder.not(is_insurance_fund);
+        let decrement_locked_balance_flag = builder.multi_and(&[
+            update_state,
+            is_spot_market,
+            is_limit_order,
+            is_not_insurance_fund,
+        ]);
         decrement_locked_balance_for_order(
             builder,
             decrement_locked_balance_flag,

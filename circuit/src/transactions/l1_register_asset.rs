@@ -45,8 +45,6 @@ pub struct L1RegisterAssetTx {
     pub liquidation_fee: u32,
     #[serde(rename = "ipd", default)]
     pub index_price_divider: i64,
-    #[serde(rename = "mi", default)]
-    pub margin_index: u8, // Given by sequencer, circuit verifies that given index was empty
     #[serde(rename = "ip", default)]
     pub index_price: i64, // Given by sequencer
 }
@@ -63,7 +61,6 @@ pub struct L1RegisterAssetTxTarget {
     pub liquidation_factor: Target,
     pub liquidation_fee: Target,
     pub index_price_divider: Target,
-    pub margin_index: Target,
     pub index_price: Target,
 
     // helpers
@@ -87,7 +84,6 @@ impl L1RegisterAssetTxTarget {
             liquidation_factor: builder.add_virtual_target(),
             liquidation_fee: builder.add_virtual_target(),
             index_price_divider: builder.add_virtual_target(),
-            margin_index: builder.add_virtual_target(),
             index_price: builder.add_virtual_target(),
 
             is_enabled: BoolTarget::default(),
@@ -153,6 +149,9 @@ impl Verify for L1RegisterAssetTxTarget {
         builder.conditional_assert_not_zero_biguint(self.is_enabled, &self.min_transfer_amount);
         builder.conditional_assert_not_zero_biguint(self.is_enabled, &self.min_withdrawal_amount);
 
+        builder.register_range_check(self.index_price, MAX_ASSET_PRICE_BITS);
+        builder.register_range_check(self.index_price_divider, MAX_ASSET_PRICE_BITS);
+
         builder.range_check_biguint(&self.extension_multiplier, EXTENSION_MULTIPLIER_BITS);
         builder.range_check_biguint(&self.min_transfer_amount, MAX_EXCHANGE_ASSET_BALANCE_BITS);
         builder.range_check_biguint(&self.min_withdrawal_amount, MAX_EXCHANGE_ASSET_BALANCE_BITS);
@@ -187,18 +186,6 @@ impl Verify for L1RegisterAssetTxTarget {
         );
         builder.conditional_assert_lte(self.is_enabled, should_be_lte_fee_tick, fee_tick, 32);
 
-        let max_index_price_divider = builder.constant_u64(MAX_INDEX_PRICE_DIVIDER);
-        builder.conditional_assert_lte(
-            self.is_enabled,
-            self.index_price_divider,
-            max_index_price_divider,
-            64,
-        );
-        builder.conditional_assert_not_zero(self.is_enabled, self.index_price_divider);
-
-        builder.register_range_check(self.margin_index, MARGINED_ASSET_LIST_SIZE_BITS);
-        builder.register_range_check(self.index_price, MAX_ASSET_PRICE_BITS);
-
         self.margin_enabled = BoolTarget::new_unsafe(self.margin_mode);
 
         // LTV can't be zero if margin mode is enabled
@@ -224,8 +211,10 @@ impl Verify for L1RegisterAssetTxTarget {
             let is_usdc_asset = builder.is_equal_constant(self.asset_index, USDC_ASSET_INDEX);
 
             // USDC must have margin index 0
-            let is_usdc_margin_index_zero =
-                builder.is_equal_constant(self.margin_index, USDC_MARGIN_ASSET_INDEX as u64);
+            let is_usdc_margin_index_zero = builder.is_equal_constant(
+                tx_state.next_margin_asset_index,
+                USDC_MARGIN_ASSET_INDEX as u64,
+            );
             let is_usdc_margin_index_not_zero =
                 builder.and_not(is_usdc_asset, is_usdc_margin_index_zero);
             builder.conditional_assert_false(self.is_enabled, is_usdc_margin_index_not_zero);
@@ -246,28 +235,12 @@ impl Verify for L1RegisterAssetTxTarget {
         let is_asset_empty = tx_state.assets[TX_ASSET_ID].is_empty(builder);
         self.success = builder.and(self.success, is_asset_empty);
 
-        // If margin is disabled, margin index should be nil.
-        let success_and_margin_disabled = builder.and_not(self.success, self.margin_enabled);
-        builder.conditional_assert_eq_constant(
-            success_and_margin_disabled,
-            self.margin_index,
-            NIL_MARGIN_ASSET_INDEX,
-        );
-
-        // If margin is enabled but margin index is given as nil by the sequencer, reject the transaction
+        // If margin is enabled but next available margin index is nil, reject the transaction
         let is_margin_index_nil =
-            builder.is_equal_constant(self.margin_index, NIL_MARGIN_ASSET_INDEX);
+            builder.is_equal_constant(tx_state.next_margin_asset_index, NIL_MARGIN_ASSET_INDEX);
         let is_margin_index_nil_and_margin_enabled =
             builder.and(self.margin_enabled, is_margin_index_nil);
         self.success = builder.and_not(self.success, is_margin_index_nil_and_margin_enabled);
-
-        // Only allow usdc and eth ti be margin enabled for now
-        let is_usdc = builder.is_equal_constant(self.asset_index, USDC_ASSET_INDEX);
-        let is_eth = builder.is_equal_constant(self.asset_index, NATIVE_ASSET_INDEX);
-        let is_allowed_margin_asset = builder.or(is_usdc, is_eth);
-        let is_margin_enabled_for_disallowed_asset =
-            builder.and_not(self.margin_enabled, is_allowed_margin_asset);
-        self.success = builder.and_not(self.success, is_margin_enabled_for_disallowed_asset);
 
         // If margin enabled and margin index is not nil, check that margin index is empty
         let is_margin_index_empty = tx_state.margined_asset[TX_ASSET_ID].is_empty(builder);
@@ -282,8 +255,10 @@ impl Apply for L1RegisterAssetTxTarget {
         let zero = builder.zero();
 
         let is_margin_index_nil =
-            builder.is_equal_constant(self.margin_index, NIL_MARGIN_ASSET_INDEX);
-        let margin_index = builder.select(is_margin_index_nil, zero, self.margin_index);
+            builder.is_equal_constant(tx_state.next_margin_asset_index, NIL_MARGIN_ASSET_INDEX);
+        let margin_index =
+            builder.select(is_margin_index_nil, zero, tx_state.next_margin_asset_index);
+        let margin_index = builder.select(self.margin_enabled, margin_index, zero);
         tx_state.assets[TX_ASSET_ID] = select_asset_target(
             builder,
             self.success,
@@ -362,7 +337,6 @@ impl<T: Witness<F>, F: PrimeField64> L1RegisterAssetTxTargetWitness<F> for T {
             a.liquidation_factor,
             F::from_canonical_u16(b.liquidation_factor),
         )?;
-        self.set_target(a.margin_index, F::from_canonical_u8(b.margin_index))?;
         self.set_target(a.index_price, F::from_canonical_i64(b.index_price))?;
 
         Ok(())

@@ -21,7 +21,7 @@ use crate::types::config::{
 };
 use crate::types::constants::*;
 use crate::types::market::MarketTarget;
-use crate::types::market_details::MarketDetailsTarget;
+use crate::types::market_details::{MarketDetailsTarget, MarketFlags};
 use crate::types::risk_info::{RiskInfoTarget, RiskParametersTarget};
 use crate::utils::CircuitBuilderUtils;
 
@@ -33,6 +33,8 @@ pub struct ApplyTradeParams<'a> {
     pub trade_quote: SignedTarget, // For deleverage tx, quote can be non-positive
     pub taker_position: &'a AccountPositionTarget,
     pub maker_position: &'a AccountPositionTarget,
+    pub taker_account_type: Target,
+    pub maker_account_type: Target,
     pub taker_risk_info: &'a RiskInfoTarget,
     pub maker_risk_info: &'a RiskInfoTarget,
     pub taker_fee: SignedTarget,
@@ -222,6 +224,20 @@ pub fn apply_perps_trade(
     let zero_bigint = builder.zero_bigint();
     let one = builder.one();
     let isolated_margin_mode = builder.constant_usize(ISOLATED_MARGIN);
+
+    let market_flags = MarketFlags::from_target(builder, input.market_details.market_flags);
+    old_taker_position.init_if_empty(
+        builder,
+        is_enabled,
+        input.taker_account_type,
+        market_flags.default_margin_mode,
+    );
+    old_maker_position.init_if_empty(
+        builder,
+        is_enabled,
+        input.maker_account_type,
+        market_flags.default_margin_mode,
+    );
 
     let is_taker_position_isolated =
         builder.is_equal(old_taker_position.margin_mode, isolated_margin_mode);
@@ -673,6 +689,7 @@ pub fn calculate_position_change(
         total_order_count: position.total_order_count,
         total_position_tied_order_count: position.total_position_tied_order_count,
         margin_mode: position.margin_mode,
+        margin_set_flag: position.margin_set_flag,
         allocated_margin: position.allocated_margin.clone(),
     };
 
@@ -716,8 +733,12 @@ pub fn calculate_position_change(
     let entry_quote_times_new_position =
         builder.mul_biguint_non_carry(&entry_quote_big, &abs_new_position_big, BIG_U128_LIMBS);
     let abs_old_position_big = builder.target_to_biguint(abs_old_position);
-    let new_entry_quote_2 =
-        builder.div_biguint(&entry_quote_times_new_position, &abs_old_position_big);
+    // The quotient must fit a single target; constrain it to two limbs directly.
+    let new_entry_quote_2 = builder.div_biguint_trimmed(
+        &entry_quote_times_new_position,
+        &abs_old_position_big,
+        BIG_U64_LIMBS,
+    );
     let new_entry_quote_2 = builder.biguint_to_target_safe(&new_entry_quote_2);
 
     let new_entry_quote_1_2 =

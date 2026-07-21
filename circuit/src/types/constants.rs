@@ -113,10 +113,10 @@ pub const EMPTY_ORDER_BOOK_TREE_ROOT: HashOut<F> = const_hash_out([
 ]);
 
 pub const EMPTY_ACCOUNT_HASH: HashOut<F> = const_hash_out([
-    4915815754874637843,
-    13340589046232056959,
-    2288143452309297546,
-    3402452211644817020,
+    16496574717886153423,
+    6271885065761349139,
+    16208258067531002960,
+    18356876270155499168,
 ]);
 
 /// Tx Types
@@ -226,6 +226,8 @@ pub const FUNDING_BIG_CLAMP: i64 = 4 * 1_000_000 / 100;
 pub const FUNDING_RATE_CLAMP_BITS: usize = 13;
 pub const FUNDING_RATE_BITS: usize = 58;
 pub const FUNDING_PERIOD: usize = HOUR_IN_MS; // 1 hour = 3,600,000 ms
+pub const FUNDING_PREMIUM_MULTIPLIER_TICK: u64 = 100; // scales the market funding premium multiplier, 100 = 1x
+pub const FUNDING_PREMIUM_MULTIPLIER_BITS: usize = 8; // multiplier is in (0, 100], keep bit size 8 for split bytes gate
 
 // Ticks
 pub const FUNDING_RATE_TICK: u32 = 1_000_000;
@@ -267,6 +269,9 @@ pub const STRATEGY_INDEX_BITS: usize = 3;
 pub const DEFAULT_STRATEGY_INDEX: usize = 0;
 pub const NIL_STRATEGY_INDEX: usize = 8;
 pub const MARGIN_STRATEGY_INDEX: usize = 1;
+/// The insurance fund holds its spot USDC in strategy bucket 1,
+/// separate from perps margin in strategy 0.
+pub const INSURANCE_FUND_SPOT_STRATEGY_INDEX: usize = 1;
 
 /// Before changing these, see [`crate::transactions::l2_change_pubkey::L2ChangePubKeyTxTarget::verify()`]
 pub const MAX_ACCOUNT_INDEX: i64 = 281474976710654; // 2^48 - 2
@@ -538,6 +543,12 @@ pub const SELF_TRADE_BEHAVIOR_REDUCE: u64 = 3;
 // Margin Modes
 pub const CROSS_MARGIN: usize = 0;
 pub const ISOLATED_MARGIN: usize = 1;
+
+// Margin Set Flag
+pub const MARGIN_UNSET: usize = 0;
+pub const MARGIN_SET: usize = 1;
+
+pub const MARKET_FLAGS_BITS: usize = 2;
 
 // Margin Move Types
 pub const REMOVE_MARGIN: u8 = 0;

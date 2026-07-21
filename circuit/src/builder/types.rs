@@ -43,7 +43,7 @@ pub struct Builder<F: RichField + Extendable<D>, const D: usize> {
     pub(crate) cmp_cache: HashMap<(Target, Target), (SignTarget, usize)>,
     pub(crate) cmp_biguint_cache: HashMap<(BigUintTarget, BigUintTarget), SignTarget>,
     pub(crate) div_rem_biguint_cache:
-        HashMap<(BigUintTarget, BigUintTarget), (BigUintTarget, BigUintTarget)>,
+        HashMap<(BigUintTarget, BigUintTarget, usize), (BigUintTarget, BigUintTarget)>,
     pub(crate) random_access_cache: HashMap<(Target, Vec<Target>), Target>,
 
     pub(crate) range_checks: BTreeMap<usize, BTreeSet<Target>>, // Bit size to a set of targets. Using BTreeMap and BTreeSet to get deterministic circuit build

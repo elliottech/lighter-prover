@@ -23,6 +23,7 @@ use crate::types::account_order::{AccountOrderTarget, OrderFlags, select_account
 use crate::types::account_order_type::AccountOrderTypes;
 use crate::types::config::{Builder, F};
 use crate::types::constants::*;
+use crate::types::market_details::MarketFlags;
 use crate::types::order::get_order_index;
 use crate::types::register::BaseRegisterInfoTarget;
 use crate::types::tx_state::TxState;
@@ -314,6 +315,54 @@ impl Verify for L2CreateOrderTxTarget {
             USDC_ASSET_INDEX,
         );
 
+        // Perps market margin-mode gating.
+        {
+            let market_flags =
+                MarketFlags::from_target(builder, tx_state.market_details.market_flags);
+
+            let is_taker_public_pool = builder.is_equal_constant(
+                tx_state.accounts[TAKER_ACCOUNT_ID].account_type,
+                PUBLIC_POOL_ACCOUNT_TYPE as u64,
+            );
+            let is_taker_insurance_fund = builder.is_equal_constant(
+                tx_state.accounts[TAKER_ACCOUNT_ID].account_type,
+                INSURANCE_FUND_ACCOUNT_TYPE as u64,
+            );
+            let flag = builder.and_not(perps_flag, is_taker_insurance_fund);
+
+            let is_taker_isolated = builder.is_equal_constant(
+                tx_state.positions[TAKER_ACCOUNT_ID].margin_mode,
+                ISOLATED_MARGIN as u64,
+            );
+            let is_taker_cross = builder.is_equal_constant(
+                tx_state.positions[TAKER_ACCOUNT_ID].margin_mode,
+                CROSS_MARGIN as u64,
+            );
+            let is_margin_set = builder.is_equal_constant(
+                tx_state.positions[TAKER_ACCOUNT_ID].margin_set_flag,
+                MARGIN_SET as u64,
+            );
+
+            // Pools can't trade on isolated-only markets
+            let pool_on_isolated_only =
+                builder.and(is_taker_public_pool, market_flags.is_isolated_only());
+            builder.conditional_assert_false(flag, pool_on_isolated_only);
+
+            // On isolated-only: explicitly-cross position (MarginSetFlag=Set AND MarginMode=Cross) conflicts
+            let explicitly_cross = builder.and(is_margin_set, is_taker_cross);
+            let explicitly_cross_on_isolated =
+                builder.and(market_flags.is_isolated_only(), explicitly_cross);
+            builder.conditional_assert_false(flag, explicitly_cross_on_isolated);
+
+            // On isolated-only without fallback: must already be isolated
+            let isolated_no_fallback = builder.and_not(
+                market_flags.is_isolated_only(),
+                BoolTarget::new_unsafe(market_flags.default_margin_mode),
+            );
+            let should_be_false = builder.and_not(isolated_no_fallback, is_taker_isolated);
+            builder.conditional_assert_false(flag, should_be_false);
+        }
+
         // TimeInForce - Either IOC (0), GTT (1) or POST_ONLY (2)
         let is_time_in_force_valid = builder.multi_or(&[is_ioc, is_gtt, is_post_only]);
         builder.assert_true(is_time_in_force_valid);
@@ -503,17 +552,27 @@ impl Verify for L2CreateOrderTxTarget {
             // Trigger price has to be 0
             builder.conditional_assert_zero(flag, self.trigger_price);
 
-            // Insurance fund or public pools can't open spot orders
-            let is_insurance_fund = builder.is_equal_constant(
-                tx_state.accounts[TAKER_ACCOUNT_ID].account_type,
-                INSURANCE_FUND_ACCOUNT_TYPE as u64,
-            );
+            // Public pools can't open spot orders.
             let is_public_pool = builder.is_equal_constant(
                 tx_state.accounts[TAKER_ACCOUNT_ID].account_type,
                 PUBLIC_POOL_ACCOUNT_TYPE as u64,
             );
-            let is_insurance_or_public_pool = builder.or(is_insurance_fund, is_public_pool);
-            builder.conditional_assert_false(flag, is_insurance_or_public_pool);
+            builder.conditional_assert_false(flag, is_public_pool);
+
+            // Insurance funds may spot-trade, but only assets in the margined assets list.
+            let is_insurance_fund = builder.is_equal_constant(
+                tx_state.accounts[TAKER_ACCOUNT_ID].account_type,
+                INSURANCE_FUND_ACCOUNT_TYPE as u64,
+            );
+            let insurance_fund_spot_flag = builder.and(flag, is_insurance_fund);
+            builder.conditional_assert_true(
+                insurance_fund_spot_flag,
+                BoolTarget::new_unsafe(tx_state.assets[BASE_ASSET_ID].margin_mode),
+            );
+            builder.conditional_assert_true(
+                insurance_fund_spot_flag,
+                BoolTarget::new_unsafe(tx_state.assets[QUOTE_ASSET_ID].margin_mode),
+            );
         }
 
         // Perps validations

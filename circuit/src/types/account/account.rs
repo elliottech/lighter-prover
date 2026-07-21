@@ -847,13 +847,19 @@ impl AccountTarget {
         let simple_margin_delta = builder.select_bigint(is_perps, &asset_delta, &zero_bigint);
         let simple_spot_delta = builder.select_bigint(is_perps, &zero_bigint, &asset_delta);
 
-        let margin_delta = builder.select_bigint(
+        let mut margin_delta = builder.select_bigint(
             is_account_unified,
             &unified_margin_delta,
             &simple_margin_delta,
         );
-        let spot_delta =
+        let mut spot_delta =
             builder.select_bigint(is_account_unified, &unified_spot_delta, &simple_spot_delta);
+
+        // Insurance fund spot: entire delta goes to margin_balance (and strategy for USDC),
+        // nothing goes to spot balance, supply caps are skipped.
+        let is_insurance_fund_spot = builder.and_not(is_insurance_fund, is_perps);
+        margin_delta = builder.select_bigint(is_insurance_fund_spot, &asset_delta, &margin_delta);
+        spot_delta = builder.select_bigint(is_insurance_fund_spot, &zero_bigint, &spot_delta);
 
         // Update margin balance
         *margin_balance = builder.add_bigint_non_carry(margin_balance, &margin_delta, limb_count);
@@ -888,8 +894,9 @@ impl AccountTarget {
         *strategy_balance =
             builder.add_bigint_non_carry(strategy_balance, &strategy_delta, BIG_U96_LIMBS);
 
-        // Apply margin balance total supplied amount
-        let supply_delta = builder.mul_bigint_by_bool(&margin_delta, is_asset_not_universal);
+        // Apply margin balance total supplied amount (skip for IF spot — not counted towards supply caps)
+        let count_supply = builder.and_not(is_asset_not_universal, is_insurance_fund_spot);
+        let supply_delta = builder.mul_bigint_by_bool(&margin_delta, count_supply);
         let mut total_supplied_amount_big =
             builder.biguint_to_bigint(&margined_asset.total_supplied_amount);
         total_supplied_amount_big =

@@ -24,6 +24,7 @@ PRIORITY_OPERATIONS_LIMIT=1
 CHAIN_ID=${CHAIN_ID:-304} # Default to mainnet if not set
 SRS_FILE=${SRS_FILE:-"./srs_file"} # Path to the SRS file. Source: https://aztec-ignition.s3.amazonaws.com/
 DELTA_ACCOUNT_COUNT=225
+PUBDATA_MODE=${PUBDATA_MODE:-"blob"}
 
 echo "Using:"
 echo "TX_PER_PROOF: $TX_PER_PROOF"
@@ -32,6 +33,7 @@ echo "PRIORITY_OPERATIONS_LIMIT: $PRIORITY_OPERATIONS_LIMIT"
 echo "CHAIN_ID: $CHAIN_ID"
 echo "SRS_FILE: $SRS_FILE"
 echo "DELTA_ACCOUNT_COUNT: $DELTA_ACCOUNT_COUNT"
+echo "PUBDATA_MODE: $PUBDATA_MODE"
 
 # Wait y/Y for user input to continue
 read -p "Press y/Y to continue with the build: " -n 1 -r

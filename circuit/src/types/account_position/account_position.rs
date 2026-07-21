@@ -24,9 +24,9 @@ use crate::hints::CircuitBuilderHints;
 use crate::signed::signed_target::{CircuitBuilderSigned, SignedTarget};
 use crate::types::config::{BIG_U96_LIMBS, BIGU16_U64_LIMBS, Builder, F};
 use crate::types::constants::{
-    ENTRY_QUOTE_BITS, MARGIN_FRACTION_BITS, MAX_ORDER_BASE_AMOUNT, ORDER_PRICE_BITS,
-    POSITION_HASH_BUCKET_SIZE, POSITION_SIZE_BITS, QUOTE_MULTIPLIER_BITS,
-    USDC_TO_COLLATERAL_MULTIPLIER,
+    CROSS_MARGIN, ENTRY_QUOTE_BITS, INSURANCE_FUND_ACCOUNT_TYPE, MARGIN_FRACTION_BITS, MARGIN_SET,
+    MAX_ORDER_BASE_AMOUNT, ORDER_PRICE_BITS, POSITION_SIZE_BITS, PUBLIC_POOL_ACCOUNT_TYPE,
+    QUOTE_MULTIPLIER_BITS, USDC_TO_COLLATERAL_MULTIPLIER,
 };
 use crate::types::market_details::MarketDetailsTarget;
 use crate::utils::CircuitBuilderUtils;
@@ -57,6 +57,9 @@ pub struct AccountPosition {
     #[serde(rename = "mmd")]
     pub margin_mode: u8,
 
+    #[serde(rename = "msf")]
+    pub margin_set_flag: u8,
+
     #[serde(rename = "almrg")]
     #[serde(deserialize_with = "deserializers::int_to_bigint")]
     pub allocated_margin: BigInt,
@@ -71,6 +74,7 @@ pub struct AccountPositionTarget {
     pub total_order_count: Target,
     pub total_position_tied_order_count: Target,
     pub margin_mode: Target,
+    pub margin_set_flag: Target,
     pub allocated_margin: BigIntTarget, // 96 bits
 }
 
@@ -85,6 +89,7 @@ impl AccountPositionTarget {
             total_order_count: builder.add_virtual_target(),
             total_position_tied_order_count: builder.add_virtual_target(),
             margin_mode: builder.add_virtual_target(),
+            margin_set_flag: builder.add_virtual_target(),
             allocated_margin: builder.add_virtual_bigint_target_unsafe(BIG_U96_LIMBS), // safe because it is read from the state using merkle proofs
         }
     }
@@ -118,6 +123,7 @@ impl AccountPositionTarget {
             &format!("{} total_position_tied_order_count", tag),
         );
         builder.println(self.margin_mode, &format!("{} margin_mode", tag));
+        builder.println(self.margin_set_flag, &format!("{} margin_set_flag", tag));
         builder.println_bigint(&self.allocated_margin, &format!("{} allocated_margin", tag));
     }
 
@@ -146,6 +152,57 @@ impl AccountPositionTarget {
         builder.or(is_order_open, is_position_open)
     }
 
+    fn is_empty(&self, builder: &mut Builder) -> BoolTarget {
+        let mut terms: Vec<Target> = Vec::new();
+        terms.extend(
+            self.last_funding_rate_prefix_sum
+                .abs
+                .limbs
+                .iter()
+                .map(|l| l.0),
+        );
+        terms.extend(self.position.abs.limbs.iter().map(|l| l.0));
+        terms.extend(self.allocated_margin.abs.limbs.iter().map(|l| l.0));
+        terms.extend_from_slice(&[
+            self.entry_quote,
+            self.initial_margin_fraction,
+            self.total_order_count,
+            self.total_position_tied_order_count,
+            self.margin_mode,
+            self.margin_set_flag,
+        ]);
+        let sum = builder.add_many(terms);
+        builder.is_zero(sum)
+    }
+
+    pub fn init_if_empty(
+        &mut self,
+        builder: &mut Builder,
+        is_enabled: BoolTarget,
+        account_type: Target,
+        default_margin_mode: Target,
+    ) {
+        let was_empty = self.is_empty(builder);
+        let flag = builder.and(is_enabled, was_empty);
+
+        let is_insurance_fund =
+            builder.is_equal_constant(account_type, INSURANCE_FUND_ACCOUNT_TYPE as u64);
+        let is_public_pool =
+            builder.is_equal_constant(account_type, PUBLIC_POOL_ACCOUNT_TYPE as u64);
+        let is_pool_or_insurance_fund = builder.or(is_insurance_fund, is_public_pool);
+
+        // Pools and the insurance fund are forced cross; everyone else takes the market default.
+        let cross_margin_mode = builder.constant_usize(CROSS_MARGIN);
+        let init_mode = builder.select(
+            is_pool_or_insurance_fund,
+            cross_margin_mode,
+            default_margin_mode,
+        );
+        let margin_set = builder.constant_usize(MARGIN_SET);
+        self.margin_mode = builder.select(flag, init_mode, self.margin_mode);
+        self.margin_set_flag = builder.select(flag, margin_set, self.margin_set_flag);
+    }
+
     pub fn empty(builder: &mut Builder) -> Self {
         AccountPositionTarget {
             last_funding_rate_prefix_sum: builder.zero_bigint_u16(),
@@ -155,6 +212,7 @@ impl AccountPositionTarget {
             total_order_count: builder.zero(),
             total_position_tied_order_count: builder.zero(),
             margin_mode: builder.zero(),
+            margin_set_flag: builder.zero(),
             allocated_margin: builder.zero_bigint(),
         }
     }
@@ -240,6 +298,11 @@ impl AccountPositionTarget {
                 owner_position.initial_margin_fraction,
             ),
             margin_mode: builder.select(flag, sub_position.margin_mode, owner_position.margin_mode),
+            margin_set_flag: builder.select(
+                flag,
+                sub_position.margin_set_flag,
+                owner_position.margin_set_flag,
+            ),
 
             // No need to select allocated_margin as insurance fund doesn't have isolated positions
             ..owner_position.clone()
@@ -267,17 +330,9 @@ impl AccountPositionTarget {
                 b.total_position_tied_order_count,
             ),
             margin_mode: builder.select(flag, a.margin_mode, b.margin_mode),
+            margin_set_flag: builder.select(flag, a.margin_set_flag, b.margin_set_flag),
             allocated_margin: builder.select_bigint(flag, &a.allocated_margin, &b.allocated_margin),
         }
-    }
-
-    pub fn select_position_bucket(
-        builder: &mut Builder,
-        flag: BoolTarget,
-        a: &[Self; POSITION_HASH_BUCKET_SIZE],
-        b: &[Self; POSITION_HASH_BUCKET_SIZE],
-    ) -> [Self; POSITION_HASH_BUCKET_SIZE] {
-        core::array::from_fn(|i| Self::select_position(builder, flag, &a[i], &b[i]))
     }
 
     pub fn diff(
@@ -300,6 +355,7 @@ impl AccountPositionTarget {
                 old.total_position_tied_order_count,
             ),
             margin_mode: builder.sub(new.margin_mode, old.margin_mode),
+            margin_set_flag: builder.sub(new.margin_set_flag, old.margin_set_flag),
             allocated_margin: builder
                 .bigint_vector_diff(&new.allocated_margin, &old.allocated_margin),
         }
@@ -338,6 +394,11 @@ impl AccountPositionTarget {
                 base.total_position_tied_order_count,
             ),
             margin_mode: builder.mul_add(flag.target, diff.margin_mode, base.margin_mode),
+            margin_set_flag: builder.mul_add(
+                flag.target,
+                diff.margin_set_flag,
+                base.margin_set_flag,
+            ),
             allocated_margin: builder.bigint_vector_sum(
                 flag,
                 &diff.allocated_margin,
@@ -352,7 +413,7 @@ pub fn random_access_account_position(
     access_index: Target,
     v: Vec<AccountPositionTarget>,
 ) -> AccountPositionTarget {
-    assert!(v.len() % 64 == 0);
+    assert!(v.len().is_power_of_two());
     AccountPositionTarget {
         last_funding_rate_prefix_sum: builder.random_access_bigint_u16(
             access_index,
@@ -382,6 +443,8 @@ pub fn random_access_account_position(
                 .collect(),
         ),
         margin_mode: builder.random_access(access_index, v.iter().map(|x| x.margin_mode).collect()),
+        margin_set_flag: builder
+            .random_access(access_index, v.iter().map(|x| x.margin_set_flag).collect()),
         allocated_margin: builder.random_access_bigint(
             access_index,
             v.iter()
@@ -439,6 +502,7 @@ impl<T: Witness<F> + PartialWitnessCurve<F>, F: PrimeField64 + Extendable<5> + R
             F::from_canonical_u16(b.initial_margin_fraction),
         )?;
         self.set_target(a.margin_mode, F::from_canonical_u8(b.margin_mode))?;
+        self.set_target(a.margin_set_flag, F::from_canonical_u8(b.margin_set_flag))?;
         self.set_bigint_target(&a.allocated_margin, &b.allocated_margin)?;
         self.set_target(
             a.total_order_count,

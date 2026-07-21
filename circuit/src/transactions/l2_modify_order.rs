@@ -519,8 +519,17 @@ impl Apply for L2ModifyOrderTxTarget {
         let is_limit_order =
             builder.is_equal_constant(tx_state.account_order.order_type, LIMIT_ORDER as u64);
         let spot_flag = builder.not(self.is_perps_market);
-        let locked_balance_flag =
-            builder.multi_and(&[is_filled_or_in_progress, spot_flag, is_limit_order]);
+        let is_insurance_fund = builder.is_equal_constant(
+            tx_state.accounts[OWNER_ACCOUNT_ID].account_type,
+            INSURANCE_FUND_ACCOUNT_TYPE as u64,
+        );
+        let is_not_insurance_fund = builder.not(is_insurance_fund);
+        let locked_balance_flag = builder.multi_and(&[
+            is_filled_or_in_progress,
+            spot_flag,
+            is_limit_order,
+            is_not_insurance_fund,
+        ]);
         decrement_locked_balance_for_order(
             builder,
             locked_balance_flag,

@@ -229,6 +229,30 @@ impl Verify for L1DepositTxTarget {
 
 impl Apply for L1DepositTxTarget {
     fn apply(&mut self, builder: &mut Builder, tx_state: &mut TxState) -> BoolTarget {
+        // Handle account creation
+        let master_account_type = builder.constant_from_u8(MASTER_ACCOUNT_TYPE);
+        tx_state.accounts[OWNER_ACCOUNT_ID].l1_address = builder.select_biguint(
+            self.is_new_account,
+            &self.l1_address,
+            &tx_state.accounts[OWNER_ACCOUNT_ID].l1_address,
+        );
+        tx_state.accounts[OWNER_ACCOUNT_ID].master_account_index = builder.select(
+            self.is_new_account,
+            self.account_index,
+            tx_state.accounts[OWNER_ACCOUNT_ID].master_account_index,
+        );
+        tx_state.accounts[OWNER_ACCOUNT_ID].account_type = builder.select(
+            self.is_new_account,
+            master_account_type,
+            tx_state.accounts[OWNER_ACCOUNT_ID].account_type,
+        );
+        let unified_trading_mode = builder.constant_from_u8(ACCOUNT_ACCOUNT_TRADING_MODE_UNIFIED);
+        tx_state.accounts[OWNER_ACCOUNT_ID].account_trading_mode = builder.select(
+            self.is_new_account,
+            unified_trading_mode,
+            tx_state.accounts[OWNER_ACCOUNT_ID].account_trading_mode,
+        );
+
         let extended_balance_delta = builder.mul_biguint_non_carry(
             &self.accepted_amount,
             &tx_state.assets[TX_ASSET_ID].extension_multiplier,
@@ -255,24 +279,6 @@ impl Apply for L1DepositTxTarget {
             &mut tx_state.account_margined_assets[OWNER_ACCOUNT_ID][TX_ASSET_ID].balance,
             &mut tx_state.strategies[OWNER_ACCOUNT_ID],
             false, // sequencer should accept zero if this operation is overflowed
-        );
-
-        // Handle account creation
-        let master_account_type = builder.constant_from_u8(MASTER_ACCOUNT_TYPE);
-        tx_state.accounts[OWNER_ACCOUNT_ID].l1_address = builder.select_biguint(
-            self.is_new_account,
-            &self.l1_address,
-            &tx_state.accounts[OWNER_ACCOUNT_ID].l1_address,
-        );
-        tx_state.accounts[OWNER_ACCOUNT_ID].master_account_index = builder.select(
-            self.is_new_account,
-            self.account_index,
-            tx_state.accounts[OWNER_ACCOUNT_ID].master_account_index,
-        );
-        tx_state.accounts[OWNER_ACCOUNT_ID].account_type = builder.select(
-            self.is_new_account,
-            master_account_type,
-            tx_state.accounts[OWNER_ACCOUNT_ID].account_type,
         );
 
         // Create withdraw onchain operation when accepted_amount is less than usdc_amount

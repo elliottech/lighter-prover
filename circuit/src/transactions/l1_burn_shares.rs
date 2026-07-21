@@ -18,7 +18,7 @@ use crate::liquidation::{
     get_available_shares_to_burn_for_public_pool, get_shares_usdc_value_for_public_pool,
 };
 use crate::tx_interface::{Apply, PriorityOperationsPubData, Verify};
-use crate::types::config::{BIG_U96_LIMBS, BIG_U128_LIMBS, Builder, F};
+use crate::types::config::{BIG_U64_LIMBS, BIG_U96_LIMBS, BIG_U128_LIMBS, Builder, F};
 use crate::types::constants::*;
 use crate::types::target_pub_data_helper::*;
 use crate::types::tx_state::TxState;
@@ -199,6 +199,7 @@ impl Verify for L1BurnSharesTxTarget {
         let available_shares_to_burn = get_available_shares_to_burn_for_public_pool(
             builder,
             &tx_state.risk_infos[POOL_STRATEGY_RISK_ID].cross_risk_parameters,
+            &tx_state.risk_infos[POOL_CROSS_RISK_ID].cross_risk_parameters,
             &tx_state.accounts[SUB_ACCOUNT_ID],
         );
         let has_enough_shares_to_burn =
@@ -212,10 +213,15 @@ impl Verify for L1BurnSharesTxTarget {
             self.share_amount,
         );
 
-        let max_pool_shares_to_burn = builder.constant_u64(MAX_POOL_SHARES_TO_MINT_OR_BURN_USDC);
+        let max_pool_shares_to_burn =
+            &builder.constant_biguint(&BigUint::from(MAX_POOL_SHARES_TO_MINT_OR_BURN_USDC));
         let is_burn_amount_not_too_high =
-            builder.is_lte(shares_to_burn_usdc_value, max_pool_shares_to_burn, 64);
+            builder.is_lte_biguint(&shares_to_burn_usdc_value, max_pool_shares_to_burn);
         self.success = builder.and(self.success, is_burn_amount_not_too_high);
+        let shares_to_burn_usdc_value =
+            builder.biguint_to_target_unsafe(&shares_to_burn_usdc_value);
+        let shares_to_burn_usdc_value =
+            builder.select(self.success, shares_to_burn_usdc_value, zero);
 
         // Operator and public pool not frozen - Share availability check
         {
@@ -309,14 +315,15 @@ impl Verify for L1BurnSharesTxTarget {
         }
 
         self.shares_to_burn = builder.sub(self.share_amount, self.operator_fee_share);
-        let shares_to_burn_usdc_value = get_shares_usdc_value_for_public_pool(
+        let big_shares_usdc_value = get_shares_usdc_value_for_public_pool(
             builder,
             &tx_state.risk_infos[POOL_CROSS_RISK_ID].cross_risk_parameters,
             &tx_state.accounts[SUB_ACCOUNT_ID],
             self.shares_to_burn,
         );
-
-        let big_shares_usdc_value = builder.target_to_biguint(shares_to_burn_usdc_value);
+        let (success, big_shares_usdc_value) =
+            builder.try_trim_biguint(&big_shares_usdc_value, BIG_U64_LIMBS);
+        builder.conditional_assert_true(self.success, success);
         let biguint_collateral_amount = builder.mul_biguint_non_carry(
             &big_shares_usdc_value,
             &usdc_to_collateral_multiplier,

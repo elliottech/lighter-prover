@@ -149,7 +149,7 @@ impl L1UpdateMarketTxTarget {
     }
 
     fn verify_perps_market_type(&mut self, builder: &mut Builder, is_enabled: BoolTarget) {
-        let flag = builder.and(self.success, is_enabled);
+        let flag = builder.and(self.is_enabled, is_enabled);
 
         let max_perps_market_index = builder.constant_usize(MAX_PERPS_MARKET_INDEX);
         builder.conditional_assert_lte(is_enabled, self.market_index, max_perps_market_index, 16);
@@ -195,7 +195,7 @@ impl L1UpdateMarketTxTarget {
     }
 
     fn verify_spot_market_type(&mut self, builder: &mut Builder, is_enabled: BoolTarget) {
-        let flag = builder.and(self.success, is_enabled);
+        let flag = builder.and(self.is_enabled, is_enabled);
 
         ensure_spot_market_index(builder, flag, self.market_index);
 
@@ -223,11 +223,6 @@ impl Verify for L1UpdateMarketTxTarget {
             self.market_index,
             tx_state.market.market_index,
         );
-        builder.conditional_assert_eq(
-            self.is_enabled,
-            self.market_type,
-            tx_state.market.market_type,
-        );
 
         let is_perps_market_type = builder.is_equal_constant(self.market_type, MARKET_TYPE_PERPS);
         let is_spot_market_type = builder.not(is_perps_market_type);
@@ -237,23 +232,26 @@ impl Verify for L1UpdateMarketTxTarget {
 
         // 0 < min_base_amount < 2^ORDER_SIZE_BITS
         // 0 < min_quote_amount < 2^ORDER_QUOTE_SIZE_BITS and min_quote_amount < order_quote_limit
-        builder.conditional_assert_not_zero(self.success, self.min_base_amount);
-        builder.conditional_assert_not_zero(self.success, self.min_quote_amount);
+        builder.conditional_assert_not_zero(self.is_enabled, self.min_base_amount);
+        builder.conditional_assert_not_zero(self.is_enabled, self.min_quote_amount);
         builder.conditional_assert_lte(
-            self.success,
+            self.is_enabled,
             self.min_quote_amount,
             self.order_quote_limit,
             ORDER_QUOTE_SIZE_BITS,
         );
 
         let fee_tick = builder.constant(F::from_canonical_u64(FEE_TICK));
-        builder.conditional_assert_lte(self.success, self.taker_fee, fee_tick, 24);
-        builder.conditional_assert_lte(self.success, self.maker_fee, fee_tick, 24);
+        builder.conditional_assert_lte(self.is_enabled, self.taker_fee, fee_tick, 24);
+        builder.conditional_assert_lte(self.is_enabled, self.maker_fee, fee_tick, 24);
 
         // Do not allow updating an already expired market
         let expired_status = builder.constant_from_u8(MARKET_STATUS_EXPIRED);
         let order_book_expired = builder.is_equal(tx_state.market.status, expired_status);
         self.success = builder.and_not(self.success, order_book_expired);
+
+        // Verify that the market type in the tx matches the market type in the state
+        builder.conditional_assert_eq(self.success, self.market_type, tx_state.market.market_type);
     }
 }
 

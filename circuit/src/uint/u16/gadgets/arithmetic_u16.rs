@@ -201,6 +201,25 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilderU16<F, D> for B
             return Some((self.constant_u16(low), self.constant_u16(high)));
         }
 
+        // If either multiplicand is the constant zero, the result is just `z`.
+        if x_const == Some(F::ZERO) || y_const == Some(F::ZERO) {
+            let zero = self.zero_u16();
+            return Some((z, zero));
+        }
+
+        // If one multiplicand is the constant one and the addend is the constant zero,
+        // the result is the other multiplicand.
+        if z_const == Some(F::ZERO) {
+            if x_const == Some(F::ONE) {
+                let zero = self.zero_u16();
+                return Some((y, zero));
+            }
+            if y_const == Some(F::ONE) {
+                let zero = self.zero_u16();
+                return Some((x, zero));
+            }
+        }
+
         None
     }
 
@@ -270,6 +289,23 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilderU16<F, D> for B
             return self.add_u16(to_add[0], carry);
         }
 
+        // Drop addends that are the constant zero; they don't affect the sum.
+        let filtered: Vec<U16Target> = to_add
+            .iter()
+            .copied()
+            .filter(|t| self.target_as_constant(t.0) != Some(F::ZERO))
+            .collect();
+        if filtered.len() < to_add.len() {
+            if filtered.is_empty() {
+                let zero = self.zero_u16();
+                return self.add_u16(zero, carry);
+            }
+            if filtered.len() == 1 {
+                return self.add_u16(filtered[0], carry);
+            }
+            return self.add_u16s_with_carry(&filtered, carry);
+        }
+
         // See if we've already computed the same operation.
         let operation = U16AddManyOperation {
             addends: to_add.to_vec(),
@@ -306,6 +342,14 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilderU16<F, D> for B
 
     // Returns x - y - borrow, as a pair (result, borrow), where borrow is 0 or 1 depending on whether borrowing from the next digit is required (iff y + borrow > x).
     fn sub_u16(&mut self, x: U16Target, y: U16Target, borrow: U16Target) -> (U16Target, U16Target) {
+        // Subtracting the constant zero with no incoming borrow is the identity.
+        if self.target_as_constant(y.0) == Some(F::ZERO)
+            && self.target_as_constant(borrow.0) == Some(F::ZERO)
+        {
+            let zero = self.zero_u16();
+            return (x, zero);
+        }
+
         // See if we've already computed the same operation.
         let operation = U16SubtractionOperation { x, y, borrow };
         if let Some(&result) = self.u16_sub_results.get(&operation) {

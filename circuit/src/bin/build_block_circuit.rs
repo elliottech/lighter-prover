@@ -43,6 +43,17 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
 
+    info!("tx_per_proof: {}", args.tx_per_proof);
+    info!(
+        "on_chain_operations_limit: {}",
+        args.on_chain_operations_limit
+    );
+    info!(
+        "priority_operations_limit: {}",
+        args.priority_operations_limit
+    );
+    info!("chain_id: {}", args.chain_id);
+
     assert_eq!(
         args.on_chain_operations_limit, 1,
         "only 1 on-chain operation is supported"

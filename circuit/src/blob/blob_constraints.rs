@@ -32,6 +32,22 @@ use crate::types::market_details::{
 use crate::uint::u8::{CircuitBuilderU8, U8Target, WitnessU8};
 use crate::uint::u32::gadgets::arithmetic_u32::{CircuitBuilderU32, U32Target};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PubDataMode {
+    Blob,
+    Calldata,
+}
+
+impl PubDataMode {
+    pub fn from_env() -> Self {
+        match std::env::var("PUBDATA_MODE") {
+            Err(_) => PubDataMode::Blob,
+            Ok(v) if v.eq_ignore_ascii_case("calldata") => PubDataMode::Calldata,
+            Ok(_) => PubDataMode::Blob,
+        }
+    }
+}
+
 #[derive(Debug)]
 /// Public + Secret Witness for single blob evaluation
 pub struct BlobEvaluation<F>
@@ -274,9 +290,17 @@ impl BlobEvaluationCircuit {
         let blob_data_hash = self._get_blob_data_hash();
         let pce_evaluation_point = self._get_pce_evaluation_point(&blob_data_hash);
 
-        let pce_evaluation_result =
-            BlobPolynomialTarget::from_bytes(&mut self.builder, &self.target.blob_bytes)
-                .eval_at(&mut self.builder, &pce_evaluation_point);
+        let polynomial =
+            BlobPolynomialTarget::from_bytes(&mut self.builder, &self.target.blob_bytes);
+        let pce_evaluation_result = match PubDataMode::from_env() {
+            PubDataMode::Blob => {
+                polynomial.eval_barycentric(&mut self.builder, &pce_evaluation_point)
+            }
+            PubDataMode::Calldata => {
+                polynomial.eval_horner(&mut self.builder, &pce_evaluation_point)
+            }
+        };
+
         let point_y_nonnative = NonNativeTarget::<BLS12381Scalar>::from(
             self.builder
                 .biguint_from_bytes_be(&self.target.blob_polynomial_opening_y),

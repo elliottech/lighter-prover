@@ -163,7 +163,9 @@ use crate::types::account_margined_asset::{
     AccountMarginedAssetTarget, select_account_margined_asset_target,
 };
 use crate::types::account_order::{AccountOrderTarget, AccountOrderTargetWitness};
-use crate::types::account_position::{AccountPositionTarget, PositionWithDelta};
+use crate::types::account_position::{
+    AccountPositionTarget, PositionWithDelta, random_access_account_position,
+};
 use crate::types::api_key::{ApiKeyTarget, ApiKeyTargetWitness};
 use crate::types::asset::{AssetTarget, apply_diff_assets, diff_assets, random_access_assets};
 use crate::types::config::{BIG_U96_LIMBS, Builder, F};
@@ -583,10 +585,12 @@ impl TxTarget {
             random_access_assets(builder, self.asset_indices[i], all_assets_before.to_vec())
         });
         // Load the margin asset belongs to first asset loaded. For L1 register/update asset, load the target margin index
+        let next_margin_asset_index =
+            self.get_next_margin_asset_index(builder, all_margined_assets_before);
         let mut first_asset_margin_index = assets_before[0].margin_index(builder);
         first_asset_margin_index = builder.select(
             tx_type.is_l1_register_asset,
-            self.l1_register_asset_tx_target.inner.margin_index,
+            next_margin_asset_index,
             first_asset_margin_index,
         );
         let second_asset_margin_index = assets_before[1].margin_index(builder);
@@ -674,8 +678,7 @@ impl TxTarget {
         // /******************************/
         let tx_state = &mut TxState {
             first_asset_margin_index,
-            next_margin_asset_index: self
-                .get_next_margin_asset_index(builder, all_margined_assets_before),
+            next_margin_asset_index,
             new_instructions: [BaseRegisterInfoTarget::empty(builder); NEW_INSTRUCTIONS_MAX_SIZE],
             new_instructions_count: builder.zero(),
             register_stack: *register_stack_before,
@@ -962,11 +965,24 @@ impl TxTarget {
             };
             margined_assets[USDC_MARGIN_ASSET_INDEX].balance = usdc_collateral;
             let zero_bigint = builder.zero_bigint();
+            // For burn shares the cross risk uses the pool's USDC (selected above) and
+            // traditionally zeroes non-USDC.  But the insurance fund can now hold
+            // non-USDC spot in MarginBalance, and those must count towards TPV for
+            // correct share pricing.  So: keep the pool's non-USDC when the pool is
+            // the insurance fund, zero them otherwise (original behaviour).
+            let is_pool_insurance_fund = builder.is_equal_constant(
+                self.accounts_before[SUB_ACCOUNT_ID].account_type,
+                INSURANCE_FUND_ACCOUNT_TYPE as u64,
+            );
+            let use_pool_non_usdc = builder.and(tx_type.is_share_burn_tx, is_pool_insurance_fund);
+            let zero_non_usdc = builder.and_not(tx_type.is_share_burn_tx, is_pool_insurance_fund);
             for i in 1..MARGINED_ASSET_LIST_SIZE {
+                let zeroed =
+                    builder.select_bigint(zero_non_usdc, &zero_bigint, &margined_assets[i].balance);
                 margined_assets[i].balance = builder.select_bigint(
-                    tx_type.is_share_burn_tx,
-                    &zero_bigint,
-                    &margined_assets[i].balance,
+                    use_pool_non_usdc,
+                    &self.accounts_before[SUB_ACCOUNT_ID].margined_assets[i].balance,
+                    &zeroed,
                 );
             }
 
@@ -1124,15 +1140,17 @@ impl TxTarget {
         [BigIntTarget; NB_ACCOUNTS_PER_TX],
     ) {
         let default_strategy_index = builder.constant_usize(DEFAULT_STRATEGY_INDEX);
+        let spot_strategy_index = builder.constant_usize(INSURANCE_FUND_SPOT_STRATEGY_INDEX);
 
         let strategy_index_0 = {
+            let is_owner_insurance_fund = builder.is_equal_constant(
+                self.accounts_before[OWNER_ACCOUNT_ID].account_type,
+                INSURANCE_FUND_ACCOUNT_TYPE as u64,
+            );
             let use_strategy = {
                 let assertions = [
                     builder.not(tx_type.is_share_burn_tx), // First slot will be cross risk of sub account, not the owner
-                    builder.is_equal_constant(
-                        self.accounts_before[OWNER_ACCOUNT_ID].account_type,
-                        INSURANCE_FUND_ACCOUNT_TYPE as u64,
-                    ),
+                    is_owner_insurance_fund,
                 ];
                 builder.multi_and(&assertions)
             };
@@ -1149,6 +1167,11 @@ impl TxTarget {
                 self.internal_transfer_tx_target.inner.strategy_index,
                 result,
             );
+            // Insurance fund spot orders use strategy-1 for USDC instead of the market's strategy
+            let is_market_spot =
+                builder.is_equal_constant(self.market_before.market_type, MARKET_TYPE_SPOT);
+            let is_insurance_fund_spot = builder.and(is_owner_insurance_fund, is_market_spot);
+            result = builder.select(is_insurance_fund_spot, spot_strategy_index, result);
             builder.select(use_strategy, result, default_strategy_index)
         };
 
@@ -1173,6 +1196,12 @@ impl TxTarget {
                 self.internal_transfer_tx_target.inner.strategy_index,
                 result,
             );
+            // Insurance fund spot orders (maker side) use strategy-1 for USDC
+            let is_market_spot =
+                builder.is_equal_constant(self.market_before.market_type, MARKET_TYPE_SPOT);
+            let is_insurance_fund_spot =
+                builder.and(is_second_account_insurance_fund, is_market_spot);
+            result = builder.select(is_insurance_fund_spot, spot_strategy_index, result);
             builder.select(use_strategy, result, default_strategy_index)
         };
 
@@ -1403,33 +1432,21 @@ impl TxTarget {
                 &positions_with_pub_data_before[i].position,
             );
 
-            // Select the position bucket that corresponds to current market index
+            // Load the position bucket that corresponds to current market index
             let mut position_bucket: [AccountPositionTarget; POSITION_HASH_BUCKET_SIZE] =
-                array::from_fn(|j| tx_state.accounts[i].positions[j].clone());
-
-            for bucket_index in 1..POSITION_HASH_BUCKET_COUNT {
-                let t_bucket_index = builder.constant_usize(bucket_index);
-                let is_current_position_bucket =
-                    builder.is_equal(t_bucket_index, current_bucket_index);
-
-                let start_index = bucket_index * POSITION_HASH_BUCKET_SIZE;
-                let end_index = ((bucket_index + 1) * POSITION_HASH_BUCKET_SIZE)
-                    .min(tx_state.accounts[i].positions.len());
-                let current_bucket: [AccountPositionTarget; POSITION_HASH_BUCKET_SIZE] =
-                    array::from_fn(|j| {
-                        if start_index + j < end_index {
-                            tx_state.accounts[i].positions[start_index + j].clone()
-                        } else {
-                            empty_position.clone()
-                        }
-                    });
-                position_bucket = AccountPositionTarget::select_position_bucket(
-                    builder,
-                    is_current_position_bucket,
-                    &current_bucket,
-                    &position_bucket,
-                );
-            }
+                array::from_fn(|j| {
+                    let candidates = (0..POSITION_HASH_BUCKET_COUNT)
+                        .map(|bucket_index| {
+                            let position_index = bucket_index * POSITION_HASH_BUCKET_SIZE + j;
+                            if position_index < tx_state.accounts[i].positions.len() {
+                                tx_state.accounts[i].positions[position_index].clone()
+                            } else {
+                                empty_position.clone()
+                            }
+                        })
+                        .collect();
+                    random_access_account_position(builder, current_bucket_index, candidates)
+                });
 
             // Apply the difference to correct position for the current market
             for market_index_in_bucket in 0..POSITION_HASH_BUCKET_SIZE {

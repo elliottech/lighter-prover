@@ -17,7 +17,7 @@ use crate::tx_interface::{Apply, PriorityOperationsPubData, Verify};
 use crate::types::config::{Builder, F};
 use crate::types::constants::*;
 use crate::types::market::{MarketTarget, ensure_spot_market_index, select_market};
-use crate::types::market_details::{MarketDetailsTarget, select_market_details};
+use crate::types::market_details::{MarketDetailsTarget, MarketFlags, select_market_details};
 use crate::types::target_pub_data_helper::*;
 use crate::types::tx_state::TxState;
 use crate::types::tx_type::TxTypeTargets;
@@ -411,6 +411,12 @@ impl Apply for L1CreateMarketTxTarget {
             funding_clamp_big: self.funding_clamp_big,
             open_interest_limit: self.open_interest_limit,
             strategy_index: builder.constant_usize(DEFAULT_STRATEGY_INDEX),
+            market_flags: MarketFlags {
+                margin_mode: builder.zero(),
+                default_margin_mode: builder.zero(),
+            }
+            .to_target(builder),
+            funding_premium_multiplier: builder.constant_u64(FUNDING_PREMIUM_MULTIPLIER_TICK),
         };
         tx_state.market_details = select_market_details(
             builder,

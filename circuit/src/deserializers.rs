@@ -281,15 +281,22 @@ where
 
     let h: String = Deserialize::deserialize(deserializer)?;
     let hex = Vec::from_hex(&h).map_err(serde::de::Error::custom)?;
-    if hex.len() != BLOB_DATA_BYTES_COUNT {
+    if hex.len() % BLOB_SCALAR_FIELD_ELEM_BYTES_COUNT != 0 {
         return Err(serde::de::Error::custom(format!(
-            "Blob data has incorrect length: expected {}, got {}",
+            "Blob data length must be divisible by {}, got {}",
+            BLOB_SCALAR_FIELD_ELEM_BYTES_COUNT,
+            hex.len()
+        )));
+    }
+    if hex.len() > BLOB_DATA_BYTES_COUNT {
+        return Err(serde::de::Error::custom(format!(
+            "Blob data is too large: max {}, got {}",
             BLOB_DATA_BYTES_COUNT,
             hex.len()
         )));
     }
 
-    result.copy_from_slice(&hex[..BLOB_DATA_BYTES_COUNT]);
+    result[..hex.len()].copy_from_slice(&hex);
 
     Ok(result)
 }

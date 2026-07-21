@@ -450,7 +450,7 @@ pub fn get_shares_usdc_value_for_public_pool(
     risk_info: &RiskParametersTarget,
     account: &AccountTarget,
     share_amount: Target,
-) -> Target {
+) -> BigUintTarget {
     let is_total_shares_zero = builder.is_zero(account.public_pool_info.total_shares);
 
     let big_share_amount = builder.target_to_biguint(share_amount);
@@ -458,41 +458,42 @@ pub fn get_shares_usdc_value_for_public_pool(
         builder.constant_biguint(&BigUint::from(INITIAL_POOL_SHARE_VALUE));
     let default_usdc_value = builder.mul_biguint(&big_share_amount, &big_initial_pool_share_value);
 
-    let share_amount_mul_total_account_value =
-        builder.mul_biguint(&big_share_amount, &risk_info.total_account_value.abs);
+    let share_amount_mul_total_portfolio_value =
+        builder.mul_biguint(&big_share_amount, &risk_info.total_portfolio_value.abs);
     let big_old_total_shares = builder.target_to_biguint(account.public_pool_info.total_shares);
     let usdc_to_collateral_multiplier =
         builder.constant_biguint(&BigUint::from(USDC_TO_COLLATERAL_MULTIPLIER));
     let old_total_shares_mul_usdc_to_collateral_multiplier =
         builder.mul_biguint(&big_old_total_shares, &usdc_to_collateral_multiplier);
     let c_big_usdc_to_mint_shares = builder.div_biguint(
-        &share_amount_mul_total_account_value,
+        &share_amount_mul_total_portfolio_value,
         &old_total_shares_mul_usdc_to_collateral_multiplier,
     );
 
-    let big_usdc_to_mint_shares = builder.select_biguint(
+    builder.select_biguint(
         is_total_shares_zero,
         &default_usdc_value,
         &c_big_usdc_to_mint_shares,
-    );
-
-    builder.biguint_to_target_safe(&big_usdc_to_mint_shares)
+    )
 }
 
-// Ensure total account value is positive before calling this function
+// Ensure total portfolio value is positive before calling this function.
+// strategy_risk_info provides available collateral; cross_risk_info provides total_portfolio_value
+// for the denominator (so insurance fund non-USDC spot is included in the share value).
 pub fn get_available_shares_to_burn_for_public_pool(
     builder: &mut Builder,
-    risk_info: &RiskParametersTarget,
+    strategy_risk_info: &RiskParametersTarget,
+    cross_risk_info: &RiskParametersTarget,
     pool_account: &AccountTarget,
 ) -> Target {
-    let available_collateral = get_available_usdc_collateral(builder, risk_info);
+    let available_collateral = get_available_usdc_collateral(builder, strategy_risk_info);
     let big_total_shares = builder.target_to_biguint(pool_account.public_pool_info.total_shares);
     let available_collateral_mul_total_shares =
         builder.mul_biguint(&available_collateral, &big_total_shares);
     let big_available_shares = builder.div_biguint(
         &available_collateral_mul_total_shares,
-        &risk_info.total_account_value.abs,
-    ); // since total account value is always bigger than the available collateral, result should be <= total shares
+        &cross_risk_info.total_portfolio_value.abs,
+    ); // since total portfolio value is always bigger than the available collateral, result should be <= total shares
     builder.biguint_to_target_unsafe(&big_available_shares)
 }
 

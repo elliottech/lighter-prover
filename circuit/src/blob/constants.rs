@@ -5,7 +5,8 @@ use crate::types::constants::POSITION_LIST_SIZE;
 
 pub const BLOB_WIDTH: usize = 4096;
 
-pub const BLOB_DATA_BYTES_COUNT: usize = BLOB_WIDTH * 31;
+pub const BLOB_SCALAR_FIELD_ELEM_BYTES_COUNT: usize = 31;
+pub const BLOB_DATA_BYTES_COUNT: usize = BLOB_WIDTH * BLOB_SCALAR_FIELD_ELEM_BYTES_COUNT;
 
 pub const BLOB_WIDTH_BITS: usize = 12;
 
