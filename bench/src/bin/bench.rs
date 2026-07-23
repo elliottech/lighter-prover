@@ -12,7 +12,7 @@ use circuit::block::{Block, BlockWitness};
 use circuit::block_constraints::{BlockCircuit, Circuit as _};
 use circuit::block_pre_execution::{BlockPreExec, BlockPreExecWitness};
 use circuit::block_pre_execution_constraints::{BlockPreExecutionCircuit, Circuit as _};
-use circuit::block_tx::{BlockTx, BlockTxWitness};
+use circuit::block_tx::{BlockTx, BlockTxWitness, JumpState};
 use circuit::block_tx_chain::BlockTxChainWitness;
 use circuit::block_tx_chain_constraints::{BlockTxChainCircuit, Circuit as _};
 use circuit::block_tx_constraints::{BlockTxCircuit, BlockTxTarget, Circuit as _};
@@ -25,7 +25,8 @@ use circuit::types::{account_delta, state_metadata};
 use env_logger::{Builder, DEFAULT_FILTER_ENV, Env, try_init_from_env};
 use log::{Level, LevelFilter, Log, Metadata, Record, debug, info};
 use plonky2::field::goldilocks_field::GoldilocksField;
-use plonky2::field::types::PrimeField64;
+use plonky2::field::types::{Field, PrimeField64};
+use plonky2::hash::hash_types::HashOut;
 use plonky2::plonk::proof::CompressedProofWithPublicInputs;
 use plonky2::recursion::dummy_circuit::{self, dummy_circuit};
 use rayon::vec;
@@ -37,7 +38,7 @@ fn main() {
     init_logger_no_warn();
 
     let block = get_test_block_json_file("bench_test.json");
-    let tx_chunks = block.txs.chunks(TX_PER_PROOF);
+    let tx_chunks = block.tx_chunks.iter();
     let chunks_count = tx_chunks.len();
 
     info!(
@@ -46,11 +47,11 @@ fn main() {
             "There are {} txs in the test block, so there will be {} iterations of proving.\n\n"
         ),
         TX_PER_PROOF,
-        block.txs.len(),
+        block.tx_chunks.iter().map(|c| c.len()).sum::<usize>(),
         chunks_count
     );
 
-    let circuit = BlockTxCircuit::define(CIRCUIT_CONFIG, TX_PER_PROOF, CHAIN_ID);
+    let circuit = BlockTxCircuit::define(CIRCUIT_CONFIG, TX_PER_PROOF, CHAIN_ID, TX_HEAVY);
     let bt = circuit.target;
     let data = circuit.builder.build::<C>();
     info!("BlockTxCircuit defined!");
@@ -68,22 +69,38 @@ fn main() {
     let pre_exec_data = pre_exec_circuit.builder.build::<C>();
     info!("BlockPreExecutionCircuit defined!");
 
-    let chain_circuit = BlockTxChainCircuit::define(CIRCUIT_CONFIG, &data, TX_PER_PROOF, 1);
-    let chain_circuit_t = chain_circuit.target;
-    let chain_circuit_data = chain_circuit.builder.build::<C>();
+    let light_circuit = BlockTxCircuit::define(CIRCUIT_CONFIG, TX_PER_PROOF, CHAIN_ID, TX_LIGHT);
+    let light_bt = light_circuit.target;
+    let light_data = light_circuit.builder.build::<C>();
+    info!("Light BlockTxCircuit defined!");
+
+    let heavy_chain_circuit = BlockTxChainCircuit::define(CIRCUIT_CONFIG, &data, 1);
+    let heavy_chain_circuit_t = heavy_chain_circuit.target;
+    let heavy_chain_circuit_data = heavy_chain_circuit.builder.build::<C>();
+    let light_chain_circuit = BlockTxChainCircuit::define(CIRCUIT_CONFIG, &light_data, 1);
+    let light_chain_circuit_t = light_chain_circuit.target;
+    let light_chain_circuit_data = light_chain_circuit.builder.build::<C>();
     info!("BlockTxChainCircuit defined!");
     info!(
         "BlockTxChainCircuit # public inputs = {:?}",
-        chain_circuit_data.common.num_public_inputs
+        heavy_chain_circuit_data.common.num_public_inputs
     );
 
-    let dummy_tx_chain_circuit = dummy_circuit(&chain_circuit_data.common);
+    let dummy_heavy_tx_chain_circuit = dummy_circuit(&heavy_chain_circuit_data.common);
+    let dummy_light_tx_chain_circuit = dummy_circuit(&light_chain_circuit_data.common);
     info!("Dummy Tx Chain Circuit defined!");
 
-    let dummy_proof = cyclic_base_proof(
-        &chain_circuit_data.common,
-        &chain_circuit_data.verifier_only,
-        &dummy_tx_chain_circuit,
+    let dummy_heavy_proof = cyclic_base_proof(
+        &heavy_chain_circuit_data.common,
+        &heavy_chain_circuit_data.verifier_only,
+        &dummy_heavy_tx_chain_circuit,
+        Vec::<F>::new().iter().copied().enumerate().collect(),
+    )
+    .unwrap();
+    let dummy_light_proof = cyclic_base_proof(
+        &light_chain_circuit_data.common,
+        &light_chain_circuit_data.verifier_only,
+        &dummy_light_tx_chain_circuit,
         Vec::<F>::new().iter().copied().enumerate().collect(),
     )
     .unwrap();
@@ -102,50 +119,52 @@ fn main() {
         BlockPreExecWitness::from_public_inputs(&pre_proof.clone().public_inputs);
 
     let state_metadata = pre_exec_witness.new_state_metadata.clone();
-    let mut all_assets = block.all_assets.clone();
-    let mut all_margined_assets = pre_exec_witness.new_margined_assets.clone();
-    let mut all_market_details = pre_exec_witness.new_market_details.clone();
-    let mut system_config = block.old_system_config;
-    let mut register_stack = block.register_stack_before;
-    let mut account_tree_root = block.old_account_tree_root;
-    let mut account_pub_data_tree_root = block.old_account_pub_data_tree_root;
-    let mut account_delta_tree_root = block.old_account_delta_tree_root;
-    let mut market_tree_root = block.old_market_tree_root;
     let created_at = block.created_at;
 
-    let mut current_chain_proof = BlockTxChainCircuit::cyclic_base_proof(
-        &chain_circuit_data,
-        &dummy_tx_chain_circuit,
+    let mut current_heavy_chain_proof = BlockTxChainCircuit::cyclic_base_proof(
+        &heavy_chain_circuit_data,
+        &dummy_heavy_tx_chain_circuit,
         block.block_number,
         block.created_at,
         pre_exec_witness.new_state_root,
+        pre_exec_witness.new_validium_root,
+        block.old_account_delta_tree_root,
+    );
+    let mut current_light_chain_proof = BlockTxChainCircuit::cyclic_base_proof(
+        &light_chain_circuit_data,
+        &dummy_light_tx_chain_circuit,
+        block.block_number,
+        block.created_at,
         pre_exec_witness.new_state_root,
         pre_exec_witness.new_validium_root,
         block.old_account_delta_tree_root,
-        chain_circuit.block_tx_witness_size,
-        &state_metadata,
     );
 
+    let mut heavy_jump = JumpState::initial(
+        pre_exec_witness.new_state_root,
+        block.old_account_delta_tree_root,
+    );
+    let mut light_jump = heavy_jump;
     let mut tx_prove_total = Duration::ZERO;
     let mut chain_prove_total = Duration::ZERO;
 
+    let mut heavy_index: u64 = 0;
+    let mut light_index: u64 = 0;
     for (index, tx) in tx_chunks.enumerate() {
+        let is_light = tx[0].tx_circuit_type == TX_LIGHT;
         let block_tx = BlockTx {
             created_at,
-            old_system_config: system_config,
-            register_stack_before: register_stack,
-            all_assets_before: all_assets.clone(),
-            all_margined_assets_before: all_margined_assets.clone(),
-            all_market_details_before: all_market_details.clone(),
-            old_account_tree_root: account_tree_root,
-            old_account_pub_data_tree_root: account_pub_data_tree_root,
-            old_account_delta_tree_root: account_delta_tree_root,
-            old_market_tree_root: market_tree_root,
+            state_metadata_hash: state_metadata.hash(),
+            old_jump: if is_light { light_jump } else { heavy_jump },
             txs: tx.to_vec(),
         };
 
         let tx_dt = Instant::now();
-        let tx_proof = BlockTxCircuit::prove(&data, &block_tx, &bt);
+        let tx_proof = if is_light {
+            BlockTxCircuit::prove(&light_data, &block_tx, &light_bt)
+        } else {
+            BlockTxCircuit::prove(&data, &block_tx, &bt)
+        };
         let tx_dt = tx_dt.elapsed();
         if let Err(err) = tx_proof {
             panic!("Failed to prove tx chunk #{}. err = {:?}", index, err);
@@ -160,25 +179,32 @@ fn main() {
         let tx_proof = tx_proof.unwrap();
 
         let tx_witness = BlockTxWitness::from_public_inputs(&tx_proof.public_inputs.clone());
-        all_assets = tx_witness.all_assets_after.clone();
-        all_margined_assets = tx_witness.all_margined_assets_after.clone();
-        all_market_details = tx_witness.all_market_details_after.clone();
-        register_stack = tx_witness.register_stack_after;
-        system_config = tx_witness.new_system_config;
-        account_tree_root = tx_witness.new_account_tree_root;
-        account_pub_data_tree_root = tx_witness.new_account_pub_data_tree_root;
-        account_delta_tree_root = tx_witness.new_account_delta_tree_root;
-        market_tree_root = tx_witness.new_market_tree_root;
+        if is_light {
+            light_jump = tx_witness.new_jump;
+        } else {
+            heavy_jump = tx_witness.new_jump;
+        }
 
         let chain_dt = Instant::now();
-        let chain_proof = BlockTxChainCircuit::prove(
-            &chain_circuit_t,
-            &chain_circuit_data,
-            index as u64,
-            &current_chain_proof,
-            &dummy_proof,
-            &tx_proof,
-        );
+        let chain_proof = if is_light {
+            BlockTxChainCircuit::prove(
+                &light_chain_circuit_t,
+                &light_chain_circuit_data,
+                light_index,
+                &current_light_chain_proof,
+                &dummy_light_proof,
+                &tx_proof,
+            )
+        } else {
+            BlockTxChainCircuit::prove(
+                &heavy_chain_circuit_t,
+                &heavy_chain_circuit_data,
+                heavy_index,
+                &current_heavy_chain_proof,
+                &dummy_heavy_proof,
+                &tx_proof,
+            )
+        };
         let chain_dt = chain_dt.elapsed();
         if let Err(err) = chain_proof {
             panic!("Block Chain circuit failed to prove. err = {:?}", err);
@@ -190,7 +216,13 @@ fn main() {
             chunks_count, chain_dt
         );
 
-        current_chain_proof = chain_proof.unwrap();
+        if is_light {
+            current_light_chain_proof = chain_proof.unwrap();
+            light_index += 1;
+        } else {
+            current_heavy_chain_proof = chain_proof.unwrap();
+            heavy_index += 1;
+        }
     }
 
     info!(
@@ -216,9 +248,9 @@ fn main() {
 
 pub fn get_test_block_json_file(file_name: &str) -> Block<F> {
     let path = Path::new(".").join(file_name);
-    let data = fs::read_to_string(path).expect("Unable to read file");
+    let data = fs::read(path).expect("Unable to read file");
 
-    serde_json::from_str(&data).expect("JSON does not have correct format.")
+    Block::from_json(&data, TX_PER_PROOF, TX_PER_PROOF).expect("JSON does not have correct format.")
 }
 
 struct NoWarnLogger(env_logger::Logger);

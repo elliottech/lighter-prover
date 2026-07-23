@@ -17,7 +17,10 @@ use crate::tx_interface::{Apply, PriorityOperationsPubData, Verify};
 use crate::types::config::{Builder, F};
 use crate::types::constants::*;
 use crate::types::market::{MarketTarget, ensure_spot_market_index, select_market};
-use crate::types::market_details::{MarketDetailsTarget, MarketFlags, select_market_details};
+use crate::types::market_details::{
+    MarketDetailsTarget, MarketFlags, MarketRiskDetailsTarget, select_market_details,
+    select_market_risk_details,
+};
 use crate::types::target_pub_data_helper::*;
 use crate::types::tx_state::TxState;
 use crate::types::tx_type::TxTypeTargets;
@@ -257,7 +260,7 @@ impl L1CreateMarketTxTarget {
 
         let market_status_expired = builder.constant_from_u8(MARKET_STATUS_EXPIRED);
         let market_is_not_expired =
-            builder.is_not_equal(tx_state.market_details.status, market_status_expired);
+            builder.is_not_equal(tx_state.market_risk_details.status, market_status_expired);
         let is_market_open_interest_not_zero =
             builder.is_not_zero(tx_state.market_details.open_interest);
         let not_expired_or_nonzero_open_interest =
@@ -392,12 +395,6 @@ impl Apply for L1CreateMarketTxTarget {
 
         let update_market_details_flag = builder.and(self.success, is_perps_market_type);
         let market_details_after = MarketDetailsTarget {
-            default_initial_margin_fraction: self.default_initial_margin_fraction,
-            min_initial_margin_fraction: self.min_initial_margin_fraction,
-            maintenance_margin_fraction: self.maintenance_margin_fraction,
-            close_out_margin_fraction: self.close_out_margin_fraction,
-            quote_multiplier: self.quote_multiplier,
-            funding_rate_prefix_sum: builder.zero_bigint_u16(),
             aggregate_premium_sum: builder.zero_signed(),
             interest_rate: self.interest_rate,
             impact_price: builder.zero(),
@@ -405,12 +402,9 @@ impl Apply for L1CreateMarketTxTarget {
             impact_ask_price: builder.zero(),
             open_interest: builder.zero(),
             index_price: builder.zero(),
-            mark_price: builder.zero(),
-            status: builder.constant_from_u8(MARKET_STATUS_ACTIVE),
             funding_clamp_small: self.funding_clamp_small,
             funding_clamp_big: self.funding_clamp_big,
             open_interest_limit: self.open_interest_limit,
-            strategy_index: builder.constant_usize(DEFAULT_STRATEGY_INDEX),
             market_flags: MarketFlags {
                 margin_mode: builder.zero(),
                 default_margin_mode: builder.zero(),
@@ -423,6 +417,24 @@ impl Apply for L1CreateMarketTxTarget {
             update_market_details_flag,
             &market_details_after,
             &tx_state.market_details,
+        );
+
+        let market_risk_details_after = MarketRiskDetailsTarget {
+            default_initial_margin_fraction: self.default_initial_margin_fraction,
+            min_initial_margin_fraction: self.min_initial_margin_fraction,
+            maintenance_margin_fraction: self.maintenance_margin_fraction,
+            close_out_margin_fraction: self.close_out_margin_fraction,
+            quote_multiplier: self.quote_multiplier,
+            funding_rate_prefix_sum: builder.zero_bigint_u16(),
+            mark_price: builder.zero(),
+            status: builder.constant_from_u8(MARKET_STATUS_ACTIVE),
+            strategy_index: builder.constant_usize(DEFAULT_STRATEGY_INDEX),
+        };
+        tx_state.market_risk_details = select_market_risk_details(
+            builder,
+            update_market_details_flag,
+            &market_risk_details_after,
+            &tx_state.market_risk_details,
         );
 
         self.success

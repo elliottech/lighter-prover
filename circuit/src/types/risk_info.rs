@@ -9,7 +9,7 @@ use super::account::AccountTarget;
 use super::account_position::{AccountPositionTarget, get_position_unrealized_pnl};
 use super::config::{BIG_U96_LIMBS, Builder};
 use super::constants::*;
-use super::market_details::{MarketDetailsTarget, select_market_details};
+use super::market_details::{MarketRiskDetailsTarget, select_market_risk_details};
 use crate::bigint::big_u16::{CircuitBuilderBigIntU16, CircuitBuilderBiguint16};
 use crate::bigint::bigint::{BigIntTarget, CircuitBuilderBigInt, SignTarget};
 use crate::bigint::biguint::{BigUintTarget, CircuitBuilderBiguint};
@@ -51,23 +51,69 @@ impl RiskInfoTarget {
         builder: &mut Builder,
         account: &AccountTarget,
         position: &AccountPositionTarget,
-        current_market_details: &MarketDetailsTarget,
-        all_market_details: &[MarketDetailsTarget; POSITION_LIST_SIZE],
+        current_market_details: &MarketRiskDetailsTarget,
+        all_market_risk_details: &[MarketRiskDetailsTarget; POSITION_LIST_SIZE],
         all_margined_assets: &[MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
         strategy_index: Target, // Assumed not to be nil strategy index
+    ) -> Self {
+        Self::new_with_mode(
+            builder,
+            account,
+            position,
+            current_market_details,
+            all_market_risk_details,
+            all_margined_assets,
+            strategy_index,
+            false,
+        )
+    }
+
+    pub fn new_light(
+        builder: &mut Builder,
+        account: &AccountTarget,
+        position: &AccountPositionTarget,
+        current_market_details: &MarketRiskDetailsTarget,
+        all_market_risk_details: &[MarketRiskDetailsTarget; POSITION_LIST_SIZE],
+        all_margined_assets: &[MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
+        strategy_index: Target,
+    ) -> Self {
+        Self::new_with_mode(
+            builder,
+            account,
+            position,
+            current_market_details,
+            all_market_risk_details,
+            all_margined_assets,
+            strategy_index,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_mode(
+        builder: &mut Builder,
+        account: &AccountTarget,
+        position: &AccountPositionTarget,
+        current_market_details: &MarketRiskDetailsTarget,
+        all_market_risk_details: &[MarketRiskDetailsTarget; POSITION_LIST_SIZE],
+        all_margined_assets: &[MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
+        strategy_index: Target, // Assumed not to be nil strategy index
+        light: bool,
     ) -> Self {
         let cross_risk_parameters = RiskParametersTarget::new_cross(
             builder,
             account,
-            all_market_details,
+            all_market_risk_details,
             all_margined_assets,
             strategy_index,
+            light,
         );
         let isolated_risk_parameters = RiskParametersTarget::new_isolated(
             builder,
             strategy_index,
             position,
             current_market_details,
+            light,
         );
 
         let current_risk_parameters = RiskParametersTarget::select(
@@ -93,15 +139,16 @@ impl RiskParametersTarget {
     fn new_cross(
         builder: &mut Builder,
         account: &AccountTarget,
-        all_market_details: &[MarketDetailsTarget; POSITION_LIST_SIZE],
+        all_market_risk_details: &[MarketRiskDetailsTarget; POSITION_LIST_SIZE],
         all_margined_assets: &[MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
         strategy_index: Target,
+        light: bool,
     ) -> Self {
         let (position_base_notional_values, cross_position_base_notional_value) =
             get_cross_position_base_notional_values(
                 builder,
                 &account.positions,
-                all_market_details,
+                all_market_risk_details,
                 strategy_index,
             );
         let usdc_to_collateral_multiplier =
@@ -114,7 +161,7 @@ impl RiskParametersTarget {
         let cross_funding = get_cross_unrealized_funding(
             builder,
             &account.positions,
-            all_market_details,
+            all_market_risk_details,
             strategy_index,
         );
         let cross_position_notional_with_funding = builder.add_bigint_non_carry(
@@ -140,6 +187,13 @@ impl RiskParametersTarget {
                 is_insurance_fund,
             );
 
+        let maintenance_margin_requirement = get_maintenance_margin_requirement(
+            builder,
+            &account.positions,
+            &position_base_notional_values,
+            all_market_risk_details,
+        );
+
         Self {
             usdc_collateral_with_funding: builder.add_bigint_non_carry(
                 &cross_usdc_collateral,
@@ -163,24 +217,27 @@ impl RiskParametersTarget {
                 BIG_U96_LIMBS,
             ),
             usdc_portfolio_value,
-            initial_margin_requirement: get_initial_margin_requirement(
-                builder,
-                &account.positions,
-                &position_base_notional_values,
-                all_market_details,
-            ),
-            maintenance_margin_requirement: get_maintenance_margin_requirement(
-                builder,
-                &account.positions,
-                &position_base_notional_values,
-                all_market_details,
-            ),
-            close_out_margin_requirement: get_close_out_margin_requirement(
-                builder,
-                &account.positions,
-                &position_base_notional_values,
-                all_market_details,
-            ),
+            initial_margin_requirement: if light {
+                maintenance_margin_requirement.clone()
+            } else {
+                get_initial_margin_requirement(
+                    builder,
+                    &account.positions,
+                    &position_base_notional_values,
+                    all_market_risk_details,
+                )
+            },
+            close_out_margin_requirement: if light {
+                maintenance_margin_requirement.clone()
+            } else {
+                get_close_out_margin_requirement(
+                    builder,
+                    &account.positions,
+                    &position_base_notional_values,
+                    all_market_risk_details,
+                )
+            },
+            maintenance_margin_requirement,
         }
     }
 
@@ -188,7 +245,8 @@ impl RiskParametersTarget {
         builder: &mut Builder,
         strategy_index: Target,
         position: &AccountPositionTarget,
-        current_market_details: &MarketDetailsTarget,
+        current_market_details: &MarketRiskDetailsTarget,
+        light: bool,
     ) -> Self {
         let (isolated_position_notional, isolated_position_base_notinal_value) = {
             let zero = builder.zero();
@@ -247,6 +305,7 @@ impl RiskParametersTarget {
             position,
             &isolated_position_notional,
             current_market_details,
+            light,
         );
 
         Self {
@@ -538,12 +597,12 @@ impl RiskParametersTarget {
         collateral_delta: &BigIntTarget,
         old_position: &AccountPositionTarget,
         new_position: &AccountPositionTarget,
-        market_details: &MarketDetailsTarget,
+        market_details: &MarketRiskDetailsTarget,
         is_enabled: BoolTarget,
     ) -> Self {
         let zero_bigint = builder.zero_bigint();
         let empty_position = AccountPositionTarget::empty(builder);
-        let empty_market = MarketDetailsTarget::empty(builder);
+        let empty_market = MarketRiskDetailsTarget::empty(builder);
 
         // Prevent overflow when inactive
         let collateral_delta = builder.select_bigint(is_enabled, collateral_delta, &zero_bigint);
@@ -560,7 +619,7 @@ impl RiskParametersTarget {
             &empty_position,
         );
         let market_details =
-            select_market_details(builder, is_enabled, market_details, &empty_market);
+            select_market_risk_details(builder, is_enabled, market_details, &empty_market);
 
         // Apply collateral delta
         let collateral =
@@ -813,7 +872,7 @@ impl RiskParametersTarget {
 fn position_base_notional(
     builder: &mut Builder,
     position: &AccountPositionTarget,
-    market_details: &MarketDetailsTarget,
+    market_details: &MarketRiskDetailsTarget,
     given_strategy_index: Target,
 ) -> (Target, Target, Target) {
     let is_correct_strategy = builder.is_equal(market_details.strategy_index, given_strategy_index);
@@ -842,7 +901,7 @@ fn position_base_notional(
 fn position_unrealized_funding(
     builder: &mut Builder,
     position: &AccountPositionTarget,
-    market_details: &MarketDetailsTarget,
+    market_details: &MarketRiskDetailsTarget,
 ) -> BigIntTarget {
     let last_funding_rate_ps = builder.bigint_u16_to_bigint(&position.last_funding_rate_prefix_sum);
     let market_funding_rate_ps =
@@ -872,10 +931,34 @@ fn position_margin_requirements(
     builder: &mut Builder,
     position: &AccountPositionTarget,
     position_notional_value: &BigUintTarget,
-    market_details: &MarketDetailsTarget,
+    market_details: &MarketRiskDetailsTarget,
+    light: bool,
 ) -> (BigUintTarget, BigUintTarget, BigUintTarget) {
     let margin_fraction_multiplier =
         builder.constant_biguint(&BigUint::from(MARGIN_FRACTION_MULTIPLIER));
+
+    let maintenance_margin_fraction = BigUintTarget {
+        // Set a single limb from initial margin fraction
+        limbs: vec![U32Target(market_details.maintenance_margin_fraction)],
+    };
+    let position_times_maintenance_margin = builder.mul_biguint_non_carry(
+        position_notional_value,
+        &maintenance_margin_fraction,
+        BIG_U96_LIMBS,
+    );
+    let maintenance_margin_requirement = builder.mul_biguint_non_carry(
+        &position_times_maintenance_margin,
+        &margin_fraction_multiplier,
+        BIG_U96_LIMBS,
+    );
+
+    if light {
+        return (
+            maintenance_margin_requirement.clone(),
+            maintenance_margin_requirement.clone(),
+            maintenance_margin_requirement,
+        );
+    }
 
     let initial_margin_fraction = BigUintTarget {
         // Set a single limb from initial margin fraction
@@ -892,21 +975,6 @@ fn position_margin_requirements(
     );
     let initial_margin_requirement = builder.mul_biguint_non_carry(
         &position_times_initial_margin,
-        &margin_fraction_multiplier,
-        BIG_U96_LIMBS,
-    );
-
-    let maintenance_margin_fraction = BigUintTarget {
-        // Set a single limb from initial margin fraction
-        limbs: vec![U32Target(market_details.maintenance_margin_fraction)],
-    };
-    let position_times_maintenance_margin = builder.mul_biguint_non_carry(
-        position_notional_value,
-        &maintenance_margin_fraction,
-        BIG_U96_LIMBS,
-    );
-    let maintenance_margin_requirement = builder.mul_biguint_non_carry(
-        &position_times_maintenance_margin,
         &margin_fraction_multiplier,
         BIG_U96_LIMBS,
     );
@@ -936,7 +1004,7 @@ fn position_margin_requirements(
 fn get_cross_position_base_notional_values(
     builder: &mut Builder,
     account_positions: &[AccountPositionTarget; POSITION_LIST_SIZE],
-    all_market_details: &[MarketDetailsTarget; POSITION_LIST_SIZE],
+    all_market_risk_details: &[MarketRiskDetailsTarget; POSITION_LIST_SIZE],
     strategy_index: Target,
 ) -> ([BigUintTarget; POSITION_LIST_SIZE], BigIntTarget) {
     let mut base_position_notional_values = core::array::from_fn(|_| builder.zero_biguint());
@@ -946,7 +1014,7 @@ fn get_cross_position_base_notional_values(
 
     for market_index in 0..POSITION_LIST_SIZE {
         let position = &account_positions[market_index];
-        let market_details = &all_market_details[market_index];
+        let market_details = &all_market_risk_details[market_index];
 
         let (abs_position_notional, positive_tpv_component, negative_tpv_component) =
             position_base_notional(builder, position, market_details, strategy_index);
@@ -994,14 +1062,14 @@ fn get_cross_position_base_notional_values(
 fn get_cross_unrealized_funding(
     builder: &mut Builder,
     account_positions: &[AccountPositionTarget; POSITION_LIST_SIZE],
-    all_market_details: &[MarketDetailsTarget; POSITION_LIST_SIZE],
+    all_market_risk_details: &[MarketRiskDetailsTarget; POSITION_LIST_SIZE],
     strategy_index: Target,
 ) -> BigIntTarget {
     let mut unsafe_unrealized_funding = UnsafeBigTarget {
         limbs: vec![builder.zero(); BIGU16_U112_LIMBS],
     };
     for market_index in 0..POSITION_LIST_SIZE {
-        let market_details = all_market_details[market_index].clone();
+        let market_details = all_market_risk_details[market_index].clone();
         let position = account_positions[market_index].clone();
 
         let lhs = builder.sub_bigint_u16_unsafe(
@@ -1040,7 +1108,7 @@ fn get_initial_margin_requirement(
     builder: &mut Builder,
     account_positions: &[AccountPositionTarget; POSITION_LIST_SIZE],
     position_notional_values: &[BigUintTarget; POSITION_LIST_SIZE],
-    all_market_details: &[MarketDetailsTarget; POSITION_LIST_SIZE],
+    all_market_risk_details: &[MarketRiskDetailsTarget; POSITION_LIST_SIZE],
 ) -> BigUintTarget {
     let margin_fraction_multiplier =
         builder.constant_biguint(&BigUint::from(MARGIN_FRACTION_MULTIPLIER));
@@ -1054,8 +1122,8 @@ fn get_initial_margin_requirement(
         let is_cross_position = position.is_cross_unsafe(builder);
         let margin_fraction = position.get_initial_margin_fraction(
             builder,
-            all_market_details[market_index].default_initial_margin_fraction,
-            all_market_details[market_index].min_initial_margin_fraction,
+            all_market_risk_details[market_index].default_initial_margin_fraction,
+            all_market_risk_details[market_index].min_initial_margin_fraction,
         );
         let lhs = builder.unsafe_big_from_biguint(&position_notional_values[market_index]); // each limb 32 bit
         let rhs = builder.mul(margin_fraction, is_cross_position.target); // 14 bits
@@ -1070,7 +1138,7 @@ fn get_maintenance_margin_requirement(
     builder: &mut Builder,
     account_positions: &[AccountPositionTarget; POSITION_LIST_SIZE],
     position_notional_values: &[BigUintTarget; POSITION_LIST_SIZE],
-    all_market_details: &[MarketDetailsTarget; POSITION_LIST_SIZE],
+    all_market_risk_details: &[MarketRiskDetailsTarget; POSITION_LIST_SIZE],
 ) -> BigUintTarget {
     let margin_fraction_multiplier =
         builder.constant_biguint(&BigUint::from(MARGIN_FRACTION_MULTIPLIER));
@@ -1084,7 +1152,7 @@ fn get_maintenance_margin_requirement(
         let is_cross_position = position.is_cross_unsafe(builder);
         let lhs = builder.unsafe_big_from_biguint(&position_notional_values[market_index]); // each limb 32 bit
         let rhs = builder.mul(
-            all_market_details[market_index].maintenance_margin_fraction,
+            all_market_risk_details[market_index].maintenance_margin_fraction,
             is_cross_position.target,
         ); // 14 bits
         cross_value = builder.mul_add_unsafe_big(&lhs, rhs, &cross_value); // each limb 46 bit + accumulating at most 255 markets = each limb 54 bit
@@ -1099,7 +1167,7 @@ fn get_close_out_margin_requirement(
     builder: &mut Builder,
     account_positions: &[AccountPositionTarget; POSITION_LIST_SIZE],
     position_notional_values: &[BigUintTarget; POSITION_LIST_SIZE],
-    all_market_details: &[MarketDetailsTarget; POSITION_LIST_SIZE],
+    all_market_risk_details: &[MarketRiskDetailsTarget; POSITION_LIST_SIZE],
 ) -> BigUintTarget {
     let margin_fraction_multiplier =
         builder.constant_biguint(&BigUint::from(MARGIN_FRACTION_MULTIPLIER));
@@ -1113,7 +1181,7 @@ fn get_close_out_margin_requirement(
         let is_cross_position = position.is_cross_unsafe(builder);
         let lhs = builder.unsafe_big_from_biguint(&position_notional_values[market_index]); // each limb 32 bit
         let rhs = builder.mul(
-            all_market_details[market_index].close_out_margin_fraction,
+            all_market_risk_details[market_index].close_out_margin_fraction,
             is_cross_position.target,
         ); // 14 bits
         cross_value = builder.mul_add_unsafe_big(&lhs, rhs, &cross_value); // each limb 46 bit + accumulating at most 255 markets = each limb 54 bit

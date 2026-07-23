@@ -11,7 +11,9 @@ use crate::types::asset::Asset;
 use crate::types::config::F;
 use crate::types::constants::{ASSET_LIST_SIZE, MARGINED_ASSET_LIST_SIZE, POSITION_LIST_SIZE};
 use crate::types::margined_asset::{MARGINED_ASSET_SIZE, MarginedAsset, MarginedAssetTarget};
-use crate::types::market_details::{MARKET_DETAIL_SIZE, MarketDetails, MarketDetailsTarget};
+use crate::types::market_details::{
+    MarketDetails, MarketRiskDetails, MarketRiskDetailsTarget, PublicMarketDetails,
+};
 use crate::types::price_updates::PriceUpdates;
 use crate::types::register::RegisterStack;
 use crate::types::state_metadata::{STATE_METADATA_SIZE, StateMetadata, StateMetadataTarget};
@@ -30,7 +32,9 @@ where
     pub register_stack_before: RegisterStack,
     pub all_assets: [Asset; ASSET_LIST_SIZE],
     pub all_margined_assets: [MarginedAsset; MARGINED_ASSET_LIST_SIZE],
+
     pub all_market_details: [MarketDetails; POSITION_LIST_SIZE],
+    pub all_market_risk_details: [MarketRiskDetails; POSITION_LIST_SIZE],
     pub state_metadata: StateMetadata,
 
     pub price_updates: PriceUpdates,
@@ -54,6 +58,7 @@ impl BlockPreExec<F> {
             all_assets: block.all_assets.clone(),
             all_margined_assets: block.all_margined_assets.clone(),
             all_market_details: block.all_market_details.clone(),
+            all_market_risk_details: block.all_market_risk_details.clone(),
             price_updates: block.price_updates.clone(),
             calculate_premium: block.calculate_premium,
             calculate_funding: block.calculate_funding,
@@ -74,7 +79,7 @@ where
     F: Field + RichField,
 {
     pub new_state_metadata: StateMetadata,
-    pub new_market_details: [MarketDetails; POSITION_LIST_SIZE],
+    pub new_public_market_details: [PublicMarketDetails; POSITION_LIST_SIZE],
     pub new_margined_assets: [MarginedAsset; MARGINED_ASSET_LIST_SIZE],
     pub old_state_root: HashOut<F>,
     pub new_state_root: HashOut<F>,
@@ -94,84 +99,85 @@ where
             new_state_metadata: StateMetadata::from_public_inputs(
                 &public_inputs[0..STATE_METADATA_SIZE],
             ),
-            new_market_details: core::array::from_fn(|market_index| {
-                MarketDetails::from_public_inputs(
-                    market_index as u16,
-                    &public_inputs[STATE_METADATA_SIZE + market_index * MARKET_DETAIL_SIZE
-                        ..STATE_METADATA_SIZE + (market_index + 1) * MARKET_DETAIL_SIZE],
+            new_public_market_details: core::array::from_fn(|market_index| {
+                PublicMarketDetails::from_public_inputs(
+                    &public_inputs[STATE_METADATA_SIZE
+                        + market_index * PublicMarketDetails::PARTIAL_PUBLIC_INPUTS_SIZE
+                        ..STATE_METADATA_SIZE
+                            + (market_index + 1) * PublicMarketDetails::PARTIAL_PUBLIC_INPUTS_SIZE],
                 )
             }),
             new_margined_assets: core::array::from_fn(|asset_index| {
                 MarginedAsset::from_public_inputs(
                     asset_index as u8,
                     &public_inputs[STATE_METADATA_SIZE
-                        + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE
+                        + POSITION_LIST_SIZE * PublicMarketDetails::PARTIAL_PUBLIC_INPUTS_SIZE
                         + asset_index * MARGINED_ASSET_SIZE
                         ..STATE_METADATA_SIZE
-                            + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE
+                            + POSITION_LIST_SIZE * PublicMarketDetails::PARTIAL_PUBLIC_INPUTS_SIZE
                             + (asset_index + 1) * MARGINED_ASSET_SIZE],
                 )
             }),
             old_state_root: HashOut::<F>::from_vec(vec![
                 public_inputs[STATE_METADATA_SIZE
-                    + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE
+                    + POSITION_LIST_SIZE * PublicMarketDetails::PARTIAL_PUBLIC_INPUTS_SIZE
                     + MARGINED_ASSET_LIST_SIZE * MARGINED_ASSET_SIZE],
                 public_inputs[STATE_METADATA_SIZE
-                    + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE
+                    + POSITION_LIST_SIZE * PublicMarketDetails::PARTIAL_PUBLIC_INPUTS_SIZE
                     + MARGINED_ASSET_LIST_SIZE * MARGINED_ASSET_SIZE
                     + 1],
                 public_inputs[STATE_METADATA_SIZE
-                    + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE
+                    + POSITION_LIST_SIZE * PublicMarketDetails::PARTIAL_PUBLIC_INPUTS_SIZE
                     + MARGINED_ASSET_LIST_SIZE * MARGINED_ASSET_SIZE
                     + 2],
                 public_inputs[STATE_METADATA_SIZE
-                    + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE
+                    + POSITION_LIST_SIZE * PublicMarketDetails::PARTIAL_PUBLIC_INPUTS_SIZE
                     + MARGINED_ASSET_LIST_SIZE * MARGINED_ASSET_SIZE
                     + 3],
             ]),
             new_state_root: HashOut::<F>::from_vec(vec![
                 public_inputs[STATE_METADATA_SIZE
-                    + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE
+                    + POSITION_LIST_SIZE * PublicMarketDetails::PARTIAL_PUBLIC_INPUTS_SIZE
                     + MARGINED_ASSET_LIST_SIZE * MARGINED_ASSET_SIZE
                     + 4],
                 public_inputs[STATE_METADATA_SIZE
-                    + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE
+                    + POSITION_LIST_SIZE * PublicMarketDetails::PARTIAL_PUBLIC_INPUTS_SIZE
                     + MARGINED_ASSET_LIST_SIZE * MARGINED_ASSET_SIZE
                     + 5],
                 public_inputs[STATE_METADATA_SIZE
-                    + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE
+                    + POSITION_LIST_SIZE * PublicMarketDetails::PARTIAL_PUBLIC_INPUTS_SIZE
                     + MARGINED_ASSET_LIST_SIZE * MARGINED_ASSET_SIZE
                     + 6],
                 public_inputs[STATE_METADATA_SIZE
-                    + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE
+                    + POSITION_LIST_SIZE * PublicMarketDetails::PARTIAL_PUBLIC_INPUTS_SIZE
                     + MARGINED_ASSET_LIST_SIZE * MARGINED_ASSET_SIZE
                     + 7],
             ]),
             new_validium_root: HashOut::<F>::from_vec(vec![
                 public_inputs[STATE_METADATA_SIZE
-                    + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE
+                    + POSITION_LIST_SIZE * PublicMarketDetails::PARTIAL_PUBLIC_INPUTS_SIZE
                     + MARGINED_ASSET_LIST_SIZE * MARGINED_ASSET_SIZE
                     + 8],
                 public_inputs[STATE_METADATA_SIZE
-                    + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE
+                    + POSITION_LIST_SIZE * PublicMarketDetails::PARTIAL_PUBLIC_INPUTS_SIZE
                     + MARGINED_ASSET_LIST_SIZE * MARGINED_ASSET_SIZE
                     + 9],
                 public_inputs[STATE_METADATA_SIZE
-                    + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE
+                    + POSITION_LIST_SIZE * PublicMarketDetails::PARTIAL_PUBLIC_INPUTS_SIZE
                     + MARGINED_ASSET_LIST_SIZE * MARGINED_ASSET_SIZE
                     + 10],
                 public_inputs[STATE_METADATA_SIZE
-                    + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE
+                    + POSITION_LIST_SIZE * PublicMarketDetails::PARTIAL_PUBLIC_INPUTS_SIZE
                     + MARGINED_ASSET_LIST_SIZE * MARGINED_ASSET_SIZE
                     + 11],
             ]),
             block_number: public_inputs[STATE_METADATA_SIZE
-                + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE
+                + POSITION_LIST_SIZE * PublicMarketDetails::PARTIAL_PUBLIC_INPUTS_SIZE
                 + MARGINED_ASSET_LIST_SIZE * MARGINED_ASSET_SIZE
                 + 12]
                 .to_canonical_u64(),
             created_at: public_inputs[STATE_METADATA_SIZE
-                + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE
+                + POSITION_LIST_SIZE * PublicMarketDetails::PARTIAL_PUBLIC_INPUTS_SIZE
                 + MARGINED_ASSET_LIST_SIZE * MARGINED_ASSET_SIZE
                 + 13]
                 .to_canonical_u64() as i64,
@@ -183,7 +189,7 @@ where
 /// In circuit represantion of [`BlockPreExecWitness`]
 pub struct BlockPreExecWitnessTarget {
     pub new_state_metadata: StateMetadataTarget,
-    pub new_market_details: [MarketDetailsTarget; POSITION_LIST_SIZE],
+    pub new_market_risk_details: [MarketRiskDetailsTarget; POSITION_LIST_SIZE],
     pub new_margined_assets: [MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
     pub old_state_root: HashOutTarget,
     pub new_state_root: HashOutTarget,
@@ -201,16 +207,18 @@ impl BlockPreExecWitnessTarget {
                 last_oracle_price_timestamp: pis[1],
                 last_premium_timestamp: pis[2],
             },
-            new_market_details: pis[STATE_METADATA_SIZE
-                ..STATE_METADATA_SIZE + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE]
-                .chunks(MARKET_DETAIL_SIZE)
-                .map(|chunk| MarketDetailsTarget::from_public_inputs(chunk.to_vec()))
+            new_market_risk_details: pis[STATE_METADATA_SIZE
+                ..STATE_METADATA_SIZE
+                    + POSITION_LIST_SIZE * PublicMarketDetails::PARTIAL_PUBLIC_INPUTS_SIZE]
+                .chunks(PublicMarketDetails::PARTIAL_PUBLIC_INPUTS_SIZE)
+                .map(|chunk| MarketRiskDetailsTarget::partial_from_public_inputs(chunk.to_vec()))
                 .collect::<Vec<_>>()
                 .try_into()
                 .unwrap(),
-            new_margined_assets: pis[STATE_METADATA_SIZE + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE
+            new_margined_assets: pis[STATE_METADATA_SIZE
+                + POSITION_LIST_SIZE * PublicMarketDetails::PARTIAL_PUBLIC_INPUTS_SIZE
                 ..STATE_METADATA_SIZE
-                    + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE
+                    + POSITION_LIST_SIZE * PublicMarketDetails::PARTIAL_PUBLIC_INPUTS_SIZE
                     + MARGINED_ASSET_LIST_SIZE * MARGINED_ASSET_SIZE]
                 .chunks(MARGINED_ASSET_SIZE)
                 .map(MarginedAssetTarget::from_public_inputs)
@@ -220,18 +228,18 @@ impl BlockPreExecWitnessTarget {
             old_state_root: HashOutTarget {
                 elements: [
                     pis[STATE_METADATA_SIZE
-                        + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE
+                        + POSITION_LIST_SIZE * PublicMarketDetails::PARTIAL_PUBLIC_INPUTS_SIZE
                         + MARGINED_ASSET_LIST_SIZE * MARGINED_ASSET_SIZE],
                     pis[STATE_METADATA_SIZE
-                        + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE
+                        + POSITION_LIST_SIZE * PublicMarketDetails::PARTIAL_PUBLIC_INPUTS_SIZE
                         + MARGINED_ASSET_LIST_SIZE * MARGINED_ASSET_SIZE
                         + 1],
                     pis[STATE_METADATA_SIZE
-                        + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE
+                        + POSITION_LIST_SIZE * PublicMarketDetails::PARTIAL_PUBLIC_INPUTS_SIZE
                         + MARGINED_ASSET_LIST_SIZE * MARGINED_ASSET_SIZE
                         + 2],
                     pis[STATE_METADATA_SIZE
-                        + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE
+                        + POSITION_LIST_SIZE * PublicMarketDetails::PARTIAL_PUBLIC_INPUTS_SIZE
                         + MARGINED_ASSET_LIST_SIZE * MARGINED_ASSET_SIZE
                         + 3],
                 ],
@@ -239,19 +247,19 @@ impl BlockPreExecWitnessTarget {
             new_state_root: HashOutTarget {
                 elements: [
                     pis[STATE_METADATA_SIZE
-                        + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE
+                        + POSITION_LIST_SIZE * PublicMarketDetails::PARTIAL_PUBLIC_INPUTS_SIZE
                         + MARGINED_ASSET_LIST_SIZE * MARGINED_ASSET_SIZE
                         + 4],
                     pis[STATE_METADATA_SIZE
-                        + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE
+                        + POSITION_LIST_SIZE * PublicMarketDetails::PARTIAL_PUBLIC_INPUTS_SIZE
                         + MARGINED_ASSET_LIST_SIZE * MARGINED_ASSET_SIZE
                         + 5],
                     pis[STATE_METADATA_SIZE
-                        + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE
+                        + POSITION_LIST_SIZE * PublicMarketDetails::PARTIAL_PUBLIC_INPUTS_SIZE
                         + MARGINED_ASSET_LIST_SIZE * MARGINED_ASSET_SIZE
                         + 6],
                     pis[STATE_METADATA_SIZE
-                        + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE
+                        + POSITION_LIST_SIZE * PublicMarketDetails::PARTIAL_PUBLIC_INPUTS_SIZE
                         + MARGINED_ASSET_LIST_SIZE * MARGINED_ASSET_SIZE
                         + 7],
                 ],
@@ -259,29 +267,29 @@ impl BlockPreExecWitnessTarget {
             new_validium_root: HashOutTarget {
                 elements: [
                     pis[STATE_METADATA_SIZE
-                        + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE
+                        + POSITION_LIST_SIZE * PublicMarketDetails::PARTIAL_PUBLIC_INPUTS_SIZE
                         + MARGINED_ASSET_LIST_SIZE * MARGINED_ASSET_SIZE
                         + 8],
                     pis[STATE_METADATA_SIZE
-                        + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE
+                        + POSITION_LIST_SIZE * PublicMarketDetails::PARTIAL_PUBLIC_INPUTS_SIZE
                         + MARGINED_ASSET_LIST_SIZE * MARGINED_ASSET_SIZE
                         + 9],
                     pis[STATE_METADATA_SIZE
-                        + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE
+                        + POSITION_LIST_SIZE * PublicMarketDetails::PARTIAL_PUBLIC_INPUTS_SIZE
                         + MARGINED_ASSET_LIST_SIZE * MARGINED_ASSET_SIZE
                         + 10],
                     pis[STATE_METADATA_SIZE
-                        + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE
+                        + POSITION_LIST_SIZE * PublicMarketDetails::PARTIAL_PUBLIC_INPUTS_SIZE
                         + MARGINED_ASSET_LIST_SIZE * MARGINED_ASSET_SIZE
                         + 11],
                 ],
             },
             block_number: pis[STATE_METADATA_SIZE
-                + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE
+                + POSITION_LIST_SIZE * PublicMarketDetails::PARTIAL_PUBLIC_INPUTS_SIZE
                 + MARGINED_ASSET_LIST_SIZE * MARGINED_ASSET_SIZE
                 + 12],
             created_at: pis[STATE_METADATA_SIZE
-                + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE
+                + POSITION_LIST_SIZE * PublicMarketDetails::PARTIAL_PUBLIC_INPUTS_SIZE
                 + MARGINED_ASSET_LIST_SIZE * MARGINED_ASSET_SIZE
                 + 13],
         }

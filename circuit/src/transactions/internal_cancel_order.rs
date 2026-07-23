@@ -17,7 +17,9 @@ use crate::types::account_order::{AccountOrderTarget, select_account_order_targe
 use crate::types::config::Builder;
 use crate::types::constants::*;
 use crate::types::market::{MarketTarget, select_market};
-use crate::types::market_details::{MarketDetailsTarget, select_market_details};
+use crate::types::market_details::{
+    MarketDetailsTarget, MarketRiskDetailsTarget, select_market_details, select_market_risk_details,
+};
 use crate::types::order::{
     OrderTarget, get_market_index_and_order_nonce_from_order_index, select_order_target,
 };
@@ -372,6 +374,7 @@ impl Apply for InternalCancelOrderTxTarget {
             tx_state.market.perps_market_index,
             empty_order_book_tree_root,
         );
+        let empty_market_risk_details = MarketRiskDetailsTarget::empty(builder);
         tx_state.market_details = select_market_details(
             builder,
             is_expired_market_is_empty_and_enabled,
@@ -383,6 +386,12 @@ impl Apply for InternalCancelOrderTxTarget {
             is_expired_market_is_empty_and_enabled,
             &empty_market,
             &tx_state.market,
+        );
+        tx_state.market_risk_details = select_market_risk_details(
+            builder,
+            is_expired_market_is_empty_and_enabled,
+            &empty_market_risk_details,
+            &tx_state.market_risk_details,
         );
 
         // Trigger cancel child orders if instruction type != cancel all kind

@@ -144,8 +144,9 @@ impl BlobEvaluationTarget {
             .unwrap();
 
         let mut offset = BLOB_DATA_BYTES_COUNT + 3 * KECCAK_HASH_OUT_BYTE_SIZE;
-        let public_market_details = public_inputs[offset..offset + POSITION_LIST_SIZE * 5]
-            .chunks(5)
+        let public_market_details = public_inputs
+            [offset..offset + POSITION_LIST_SIZE * PublicMarketDetails::PUBLIC_INPUTS_SIZE]
+            .chunks(PublicMarketDetails::PUBLIC_INPUTS_SIZE)
             .map(|chunk| PublicMarketDetailsTarget {
                 funding_rate_prefix_sum: BigIntTarget {
                     sign: SignTarget::new_unsafe(chunk[0]),
@@ -160,7 +161,7 @@ impl BlobEvaluationTarget {
             .try_into()
             .unwrap();
 
-        offset += POSITION_LIST_SIZE * 5;
+        offset += POSITION_LIST_SIZE * PublicMarketDetails::PUBLIC_INPUTS_SIZE;
         let account_delta_tree_root = HashOutTarget {
             elements: public_inputs[offset..offset + NUM_HASH_OUT_ELTS]
                 .try_into()

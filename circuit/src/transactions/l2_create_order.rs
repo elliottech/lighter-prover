@@ -511,7 +511,7 @@ impl Verify for L2CreateOrderTxTarget {
         let position_tied_order_base_amount = tx_state.positions[TAKER_ACCOUNT_ID]
             .calculate_position_tied_order_base_amount(
                 builder,
-                tx_state.market_details.quote_multiplier,
+                tx_state.market_risk_details.quote_multiplier,
                 self.price,
                 tx_state.market.order_quote_limit,
             );
@@ -580,7 +580,7 @@ impl Verify for L2CreateOrderTxTarget {
             let flag = builder.and(self.success, self.is_perps_market);
 
             builder.conditional_assert_not_zero(flag, tx_state.market_details.index_price);
-            builder.conditional_assert_not_zero(flag, tx_state.market_details.mark_price);
+            builder.conditional_assert_not_zero(flag, tx_state.market_risk_details.mark_price);
 
             // Reduce only direction validation
             let invalid_reduce_only_direction = is_not_valid_reduce_only_direction(

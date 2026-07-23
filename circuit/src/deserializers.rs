@@ -29,9 +29,10 @@ use crate::types::account_position::AccountPosition;
 use crate::types::constants::{
     ACCOUNT_MERKLE_LEVELS, ACCOUNT_ORDERS_MERKLE_LEVELS, API_KEY_MERKLE_LEVELS, ASSET_LIST_SIZE,
     ASSET_MERKLE_LEVELS, KECCAK_HASH_OUT_BIT_SIZE, KECCAK_HASH_OUT_BYTE_SIZE,
-    MARGINED_ASSET_LIST_SIZE, MARKET_MERKLE_LEVELS, NB_ACCOUNT_ORDERS_PATHS_PER_TX,
-    NB_ACCOUNTS_PER_TX, NB_ASSETS_PER_TX, ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE,
-    POSITION_LIST_SIZE, POSITION_MERKLE_LEVELS, REGISTER_STACK_SIZE, SHARES_DELTA_LIST_SIZE,
+    MARGINED_ASSET_LIST_SIZE, MARKET_DETAILS_TREE_HEIGHT, MARKET_MERKLE_LEVELS,
+    NB_ACCOUNT_ORDERS_PATHS_PER_TX, NB_ACCOUNTS_PER_TX, NB_ASSETS_PER_TX,
+    ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE, POSITION_LIST_SIZE, POSITION_MERKLE_LEVELS,
+    REGISTER_STACK_SIZE, SHARES_DELTA_LIST_SIZE,
 };
 use crate::types::register::{BaseRegisterInfo, RegisterStack};
 
@@ -129,15 +130,45 @@ where
     Ok(result)
 }
 
-pub fn account_assets_before<'de, D>(
+pub fn account_assets_before<'de, D, const NB_ACCOUNTS: usize>(
     deserializer: D,
-) -> Result<[[AccountAsset; NB_ASSETS_PER_TX]; NB_ACCOUNTS_PER_TX], D::Error>
+) -> Result<[[AccountAsset; NB_ASSETS_PER_TX]; NB_ACCOUNTS], D::Error>
 where
     D: Deserializer<'de>,
 {
-    let raw: [[Option<AccountAsset>; NB_ASSETS_PER_TX]; NB_ACCOUNTS_PER_TX] =
-        Deserialize::deserialize(deserializer)?;
-    Ok(raw.map(|row| row.map(|cell| cell.unwrap_or_default())))
+    let raw: Vec<Vec<Option<AccountAsset>>> = Deserialize::deserialize(deserializer)?;
+
+    if raw.is_empty() {
+        return Err(de::Error::custom(
+            "Expected at least 1 account asset row, got 0",
+        ));
+    }
+    if raw.len() > NB_ACCOUNTS {
+        return Err(de::Error::custom(format!(
+            "Expected at most {} account asset rows, got {}",
+            NB_ACCOUNTS,
+            raw.len()
+        )));
+    }
+
+    let mut result = core::array::from_fn(|_| core::array::from_fn(|_| AccountAsset::default()));
+
+    for (account_i, row) in raw.into_iter().enumerate() {
+        if row.len() > NB_ASSETS_PER_TX {
+            return Err(de::Error::custom(format!(
+                "Expected at most {} account assets for account {}, got {}",
+                NB_ASSETS_PER_TX,
+                account_i,
+                row.len()
+            )));
+        }
+
+        for (asset_i, cell) in row.into_iter().enumerate() {
+            result[account_i][asset_i] = cell.unwrap_or_default();
+        }
+    }
+
+    Ok(result)
 }
 
 pub fn all_aggregated_asset_deltas<'de, D>(
@@ -649,6 +680,21 @@ where
     Ok(proof)
 }
 
+pub fn market_details_tree_merkle_proof<'de, D, F>(
+    deserializer: D,
+) -> Result<[HashOut<F>; MARKET_DETAILS_TREE_HEIGHT], D::Error>
+where
+    D: Deserializer<'de>,
+    F: Field,
+{
+    let elements: [[u64; 4]; MARKET_DETAILS_TREE_HEIGHT] = Deserialize::deserialize(deserializer)?;
+    let mut proof: [HashOut<F>; MARKET_DETAILS_TREE_HEIGHT] = Default::default();
+    for i in 0..MARKET_DETAILS_TREE_HEIGHT {
+        proof[i] = u64_array_to_hash_out(elements[i]);
+    }
+    Ok(proof)
+}
+
 pub fn asset_tree_merkle_proof<'de, D, F>(
     deserializer: D,
 ) -> Result<[[HashOut<F>; ASSET_MERKLE_LEVELS]; NB_ASSETS_PER_TX], D::Error>
@@ -738,20 +784,43 @@ where
     Ok(proof)
 }
 
-pub fn account_tree_merkle_proofs<'de, D, F>(
+pub fn account_tree_merkle_proofs<'de, D, F, const NB_ACCOUNTS: usize>(
     deserializer: D,
-) -> Result<[[HashOut<F>; ACCOUNT_MERKLE_LEVELS]; NB_ACCOUNTS_PER_TX], D::Error>
+) -> Result<[[HashOut<F>; ACCOUNT_MERKLE_LEVELS]; NB_ACCOUNTS], D::Error>
 where
     D: Deserializer<'de>,
     F: Field,
 {
     let elements: ProofData = Deserialize::deserialize(deserializer)?;
-    let mut proof: [[HashOut<F>; ACCOUNT_MERKLE_LEVELS]; NB_ACCOUNTS_PER_TX] =
+
+    if elements.is_empty() {
+        return Err(de::Error::custom(
+            "Expected at least 1 account merkle proof row, got 0",
+        ));
+    }
+    if elements.len() > NB_ACCOUNTS {
+        return Err(de::Error::custom(format!(
+            "Expected at most {} account merkle proof rows, got {}",
+            NB_ACCOUNTS,
+            elements.len()
+        )));
+    }
+
+    let mut proof: [[HashOut<F>; ACCOUNT_MERKLE_LEVELS]; NB_ACCOUNTS] =
         std::array::from_fn(|_| std::array::from_fn(|_| HashOut::<F>::default()));
 
-    for account in 0..NB_ACCOUNTS_PER_TX {
-        for i in 0..ACCOUNT_MERKLE_LEVELS {
-            proof[account][i] = u64_array_to_hash_out(elements[account][i]);
+    for (account, account_path) in elements.into_iter().enumerate() {
+        if account_path.len() > ACCOUNT_MERKLE_LEVELS {
+            return Err(de::Error::custom(format!(
+                "Expected at most {} merkle levels for account {}, got {}",
+                ACCOUNT_MERKLE_LEVELS,
+                account,
+                account_path.len()
+            )));
+        }
+
+        for (i, node) in account_path.into_iter().enumerate() {
+            proof[account][i] = u64_array_to_hash_out(node);
         }
     }
     Ok(proof)

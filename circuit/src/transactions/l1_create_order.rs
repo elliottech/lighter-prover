@@ -169,7 +169,7 @@ impl Verify for L1CreateOrderTxTarget {
         let position_tied_order_base_amount = tx_state.positions[TAKER_ACCOUNT_ID]
             .calculate_position_tied_order_base_amount(
                 builder,
-                tx_state.market_details.quote_multiplier,
+                tx_state.market_risk_details.quote_multiplier,
                 self.price,
                 tx_state.market.order_quote_limit,
             );
@@ -210,7 +210,7 @@ impl Verify for L1CreateOrderTxTarget {
 
         // Oracle prices should be set for the market
         let is_index_price_non_zero = builder.is_not_zero(tx_state.market_details.index_price);
-        let is_mark_price_non_zero = builder.is_not_zero(tx_state.market_details.mark_price);
+        let is_mark_price_non_zero = builder.is_not_zero(tx_state.market_risk_details.mark_price);
         let is_price_oracle_set = builder.and(is_index_price_non_zero, is_mark_price_non_zero);
         self.success = builder.and(self.success, is_price_oracle_set);
 

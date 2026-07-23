@@ -9,7 +9,7 @@ use plonky2::field::types::Field;
 use plonky2::gates::constant::ConstantGate;
 use plonky2::gates::equality_base::EqualityGate;
 use plonky2::gates::select_base::SelectionGate;
-use plonky2::hash::hash_types::{HashOut, HashOutTarget, RichField};
+use plonky2::hash::hash_types::{HashOut, RichField};
 use plonky2::iop::target::{BoolTarget, Target};
 use plonky2::iop::witness::{PartialWitness, WitnessWrite};
 use plonky2::plonk::circuit_data::{
@@ -20,28 +20,25 @@ use plonky2::plonk::proof::{ProofWithPublicInputs, ProofWithPublicInputsTarget};
 use plonky2::timed;
 use plonky2::util::timing::TimingTree;
 
-use crate::bigint::big_u16::CircuitBuilderBigIntU16;
-use crate::block_tx::BlockTxWitnessTarget;
+use crate::block_tx::{BlockTxWitnessTarget, JUMP_STATE_SIZE, JumpState, JumpStateTarget};
 use crate::block_tx_chain::BlockTxChainWitnessTarget;
 use crate::builder::custom::cyclic_base_proof;
 use crate::byte::split_gate::ByteDecompositionGate;
-use crate::hash_utils::CircuitBuilderHashUtils;
 use crate::poseidon2::Poseidon2Gate;
-use crate::types::approve_integrator::ApproveIntegratorMessageTarget;
-use crate::types::asset::all_assets_hash;
-use crate::types::change_pub_key::ChangePubKeyMessageTarget;
+use crate::types::approve_integrator::{
+    APPROVE_INTEGRATOR_PUBLIC_INPUTS_LEN, ApproveIntegratorMessageTarget,
+};
+use crate::types::change_pub_key::{CHANGE_PK_PUBLIC_INPUTS_LEN, ChangePubKeyMessageTarget};
 use crate::types::config::{Builder, C, CIRCUIT_CONFIG, D, F};
-use crate::types::constants::ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE;
-use crate::types::margined_asset::all_margined_assets_hash;
-use crate::types::market_details::{
-    PublicMarketDetailsTarget, all_market_details_hash, all_public_market_details_hash,
+use crate::types::constants::{
+    MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX, ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE,
 };
-use crate::types::state_metadata::{
-    STATE_METADATA_SIZE, StateMetadata, StateMetadataTarget, connect_state_metadata_target,
-};
-use crate::types::transfer::TransferMessageTarget;
+use crate::types::transfer::{TRANSFER_PUBLIC_INPUTS_LEN, TransferMessageTarget};
 use crate::uint::u8::{CircuitBuilderU8, U8Target};
 use crate::utils::CircuitBuilderUtils;
+
+const CHAIN_LOG_GATES: usize = 14;
+const PADDING_HEADROOM: usize = 512;
 
 pub trait Circuit<C: GenericConfig<D, F = F>, F: RichField + Extendable<D>, const D: usize> {
     /// Defines the circuit and its each target. Returns `builder` and `target`.
@@ -49,8 +46,7 @@ pub trait Circuit<C: GenericConfig<D, F = F>, F: RichField + Extendable<D>, cons
     /// `target` can be used to assign partial witness in [`BlockTxChainCircuit::prove()`] function
     fn define(
         config: CircuitConfig,
-        block_tx_circuit: &CircuitData<F, C, D>,
-        tx_per_proof: usize,
+        tx_circuit: &CircuitData<F, C, D>,
         on_chain_operations_limit: usize,
     ) -> Self;
 
@@ -58,7 +54,7 @@ pub trait Circuit<C: GenericConfig<D, F = F>, F: RichField + Extendable<D>, cons
     fn generate_witness(
         target: &BlockTxChainTarget,
         circuit_data: &CircuitData<F, C, D>,
-        tx_index: u64, // index of current tx in the block
+        recursion_step: u64, // index of the current recursion step (tx pack) of this circuit type in the block
         cyclic_proof: &ProofWithPublicInputs<F, C, D>,
         dummy_proof_cyclic: &ProofWithPublicInputs<F, C, D>,
         current_block_tx_proof: &ProofWithPublicInputs<F, C, D>,
@@ -67,7 +63,7 @@ pub trait Circuit<C: GenericConfig<D, F = F>, F: RichField + Extendable<D>, cons
     fn prove(
         target: &BlockTxChainTarget,
         circuit_data: &CircuitData<F, C, D>,
-        tx_index: u64,
+        recursion_step: u64,
         cyclic_proof: &ProofWithPublicInputs<F, C, D>,
         dummy_proof_cyclic: &ProofWithPublicInputs<F, C, D>,
         current_block_tx_proof: &ProofWithPublicInputs<F, C, D>,
@@ -79,12 +75,9 @@ pub trait Circuit<C: GenericConfig<D, F = F>, F: RichField + Extendable<D>, cons
         dummy_circuit: &CircuitData<F, C, D>,
         block_number: u64,
         created_at: i64,
-        old_state_root: HashOut<F>,
         new_state_root: HashOut<F>,
         new_validium_root: HashOut<F>,
         new_account_delta_tree_root: HashOut<F>,
-        block_tx_witness_size: usize,
-        state_metadata: &StateMetadata,
     ) -> ProofWithPublicInputs<F, C, D>;
 }
 
@@ -100,20 +93,19 @@ pub struct BlockTxChainTarget {
     pub cyclic_proof: ProofWithPublicInputsTarget<D>, // proof of previous iteration
     pub self_verifier_data: VerifierCircuitTarget,    // Verifier Circuit Data for this circuit
 
-    pub current_block_tx_proof: ProofWithPublicInputsTarget<D>, // proof of next block tx
-    pub tx_index: Target,                                       // index of current tx in the block
+    pub tx_proof: ProofWithPublicInputsTarget<D>, // proof of next block tx of this circuit type
+
+    pub recursion_step: Target, // index of the current recursion step (tx pack) of this circuit type in the block
 
     pub dummy_proof_with_pis_target_cyclic: ProofWithPublicInputsTarget<D>, // Filled with dummy proof for first iteration
 
     pub new_block: BlockTxChainWitnessTarget, // Public witness - Block state after iterating current block
-    pub state_metadata_target: StateMetadataTarget, // Public witness - Carry data between all iterations to calculate state roots, doesn't change between iterations
 }
 
 impl BlockTxChainCircuit {
     pub fn new(
         config: CircuitConfig,
-        block_tx_common_circuit: &CommonCircuitData<F, D>,
-        tx_per_proof: usize,
+        tx_common_circuit: &CommonCircuitData<F, D>,
         on_chain_operations_limit: usize,
     ) -> (Self, CommonCircuitData<F, D>) {
         let mut builder = Builder::new(config);
@@ -121,28 +113,30 @@ impl BlockTxChainCircuit {
         // Register public inputs
         let new_block =
             BlockTxChainWitnessTarget::new_public(&mut builder, on_chain_operations_limit);
-        let state_metadata_target = StateMetadataTarget::new_public(&mut builder);
+
+        // Recursion counter. Public so each step can enforce it increments over the
+        // previous proof's counter, preventing a prover from resetting the chain mid-way.
+        let recursion_step = builder.add_virtual_public_input();
 
         let self_verifier_data = builder.add_verifier_data_public_inputs();
-
-        let mut log_gates = 13;
-        if tx_per_proof > 6 {
-            log_gates = 14;
-        }
 
         // IMPORTANT: DO NOT ADD PUBLIC INPUTS AFTER THIS POINT.
         // Building common data for current circuit
         let common_data_for_recursion = CommonCircuitData {
             num_public_inputs: builder.num_public_inputs(),
-            ..common_data_for_recursion(log_gates)
+            ..common_data_for_recursion(CHAIN_LOG_GATES)
         };
+
+        log::info!(
+            "Chain circuit tx degree_bits: {}",
+            tx_common_circuit.degree_bits(),
+        );
 
         (
             Self {
                 target: BlockTxChainTarget {
-                    tx_index: builder.add_virtual_target(),
+                    recursion_step,
                     new_block,
-                    state_metadata_target,
 
                     self_verifier_data,
 
@@ -150,8 +144,7 @@ impl BlockTxChainCircuit {
                     dummy_proof_with_pis_target_cyclic: builder
                         .add_virtual_proof_with_pis(&common_data_for_recursion), // This value will be overwritten
 
-                    current_block_tx_proof: builder
-                        .add_virtual_proof_with_pis(block_tx_common_circuit),
+                    tx_proof: builder.add_virtual_proof_with_pis(tx_common_circuit),
                 },
                 builder,
                 block_tx_witness_size: 0, // will be calculated in `handle_cyclic_and_block_proofs`
@@ -164,13 +157,9 @@ impl BlockTxChainCircuit {
         &mut self,
         on_chain_operations_limit: usize,
         self_common_data: CommonCircuitData<F, D>,
-        block_tx_circuit: &CircuitData<F, C, D>,
-    ) -> (
-        BlockTxChainWitnessTarget,
-        BlockTxWitnessTarget,
-        StateMetadataTarget,
-    ) {
-        let not_first_recursion = self.builder.is_not_zero(self.target.tx_index);
+        tx_circuit: &CircuitData<F, C, D>,
+    ) -> (BlockTxChainWitnessTarget, BlockTxWitnessTarget) {
+        let not_first_recursion = self.builder.is_not_zero(self.target.recursion_step);
 
         // Verify cyclic proof
         self.target.dummy_proof_with_pis_target_cyclic = self
@@ -183,16 +172,15 @@ impl BlockTxChainCircuit {
             .unwrap();
 
         // Verify current block tx proof
-        let block_tx_verifier_data = self
+        let tx_verifier_data = self
             .builder
-            .constant_verifier_data(&block_tx_circuit.verifier_only);
+            .constant_verifier_data(&tx_circuit.verifier_only);
         self.builder.verify_proof::<C>(
-            &self.target.current_block_tx_proof,
-            &block_tx_verifier_data,
-            &block_tx_circuit.common,
+            &self.target.tx_proof,
+            &tx_verifier_data,
+            &tx_circuit.common,
         );
 
-        // Extract old block and state metadata from cyclic proof
         let (block, block_pis_size) = BlockTxChainWitnessTarget::from_public_inputs(
             &self.target.cyclic_proof.public_inputs,
             on_chain_operations_limit,
@@ -201,27 +189,14 @@ impl BlockTxChainCircuit {
 
         self.block_tx_witness_size = block_pis_size;
 
-        let state_metadata_target = StateMetadataTarget {
-            last_funding_round_timestamp: self.target.cyclic_proof.public_inputs[block_pis_size],
-            last_oracle_price_timestamp: self.target.cyclic_proof.public_inputs[block_pis_size + 1],
-            last_premium_timestamp: self.target.cyclic_proof.public_inputs[block_pis_size + 2],
-        };
+        let current_block_tx =
+            BlockTxWitnessTarget::from_public_inputs(&self.target.tx_proof.public_inputs);
 
-        // Extract current tx from tx proof
-        let current_block_tx = BlockTxWitnessTarget::from_public_inputs(
-            &self.target.current_block_tx_proof.public_inputs,
-        );
-
-        (block, current_block_tx, state_metadata_target)
+        (block, current_block_tx)
     }
 
-    fn perform_sanity_checks(
-        &mut self,
-        block: &BlockTxChainWitnessTarget,
-        current_tx: &BlockTxWitnessTarget,
-        state_metadata_hash: HashOutTarget,
-    ) {
-        let is_first_recursion = self.builder.is_zero(self.target.tx_index);
+    fn perform_sanity_checks(&mut self, block: &BlockTxChainWitnessTarget) {
+        let is_first_recursion = self.builder.is_zero(self.target.recursion_step);
 
         // Assert that tx, priority and on-chain operations are empty for the first iteration
         self.builder
@@ -255,109 +230,57 @@ impl BlockTxChainCircuit {
                 self.builder
                     .conditional_assert_zero(is_first_recursion, pub_data.0);
             });
-
-        // Calculate old validium and state roots
-        let system_config_hash = current_tx.old_system_config.hash(&mut self.builder);
-        let register_stack_hash = current_tx.register_stack_before.hash(&mut self.builder);
-        let all_assets_hash = all_assets_hash(&mut self.builder, &current_tx.all_assets_before);
-        let all_margined_assets_hash =
-            all_margined_assets_hash(&mut self.builder, &current_tx.all_margined_assets_before);
-        let all_market_details_hash =
-            all_market_details_hash(&mut self.builder, &current_tx.all_market_details_before);
-        let all_public_market_details_hash = all_public_market_details_hash(
-            &mut self.builder,
-            &current_tx.all_market_details_before,
-        );
-        let validium_root = self.builder.hash_n_to_one(&[
-            register_stack_hash,
-            current_tx.old_account_tree_root,
-            current_tx.old_market_tree_root,
-            all_assets_hash,
-            all_margined_assets_hash,
-            all_market_details_hash,
-            state_metadata_hash,
-            system_config_hash,
-        ]);
-
-        let state_root = self.builder.hash_n_to_one(&[
-            current_tx.old_account_pub_data_tree_root,
-            all_public_market_details_hash,
-            validium_root,
-        ]);
-
-        // Verify that old block's new state root is the same as new tx's old state root
-        self.builder
-            .connect_hashes(block.new_state_root, state_root);
-        self.builder
-            .connect_hashes(block.new_validium_root, validium_root);
-
-        // Verify that at first recursion, old state root is the same as new state root because there is no tx in the block
-        self.builder.conditional_assert_eq_hash(
-            is_first_recursion,
-            &block.old_state_root,
-            &block.new_state_root,
-        );
-
-        // Verify continuity of account delta tree root
-        self.builder.connect_hashes(
-            block.new_account_delta_tree_root,
-            current_tx.old_account_delta_tree_root,
-        );
     }
 }
 
 impl Circuit<C, F, D> for BlockTxChainCircuit {
     fn define(
         config: CircuitConfig,
-        block_tx_circuit: &CircuitData<F, C, D>,
-        tx_per_proof: usize,
+        tx_circuit: &CircuitData<F, C, D>,
         on_chain_operations_limit: usize,
     ) -> Self {
-        let (mut circuit, common_data) = Self::new(
-            config,
-            &block_tx_circuit.common,
-            tx_per_proof,
-            on_chain_operations_limit,
-        );
+        let (mut circuit, common_data) =
+            Self::new(config, &tx_circuit.common, on_chain_operations_limit);
 
-        let (block, current_tx, state_metadata) = circuit.handle_cyclic_and_block_proofs(
+        let (block, current_tx) = circuit.handle_cyclic_and_block_proofs(
             on_chain_operations_limit,
             common_data,
-            block_tx_circuit,
+            tx_circuit,
         );
 
-        let state_metadata_hash = state_metadata.hash(&mut circuit.builder);
-        circuit.perform_sanity_checks(&block, &current_tx, state_metadata_hash);
+        circuit.perform_sanity_checks(&block);
 
-        // Calculate new validium and state root
-        let system_config_hash = current_tx.new_system_config.hash(&mut circuit.builder);
-        let register_stack_hash = current_tx.register_stack_after.hash(&mut circuit.builder);
-        let all_assets_hash = all_assets_hash(&mut circuit.builder, &current_tx.all_assets_after);
-        let all_margined_assets_hash =
-            all_margined_assets_hash(&mut circuit.builder, &current_tx.all_margined_assets_after);
-        let all_market_details_hash =
-            all_market_details_hash(&mut circuit.builder, &current_tx.all_market_details_after);
-        let all_public_market_details_hash = all_public_market_details_hash(
+        let is_first_recursion = circuit.builder.is_zero(circuit.target.recursion_step);
+        block.jump.conditional_assert_initial(
             &mut circuit.builder,
-            &current_tx.all_market_details_after,
+            is_first_recursion,
+            block.new_state_root,
+            block.new_account_delta_tree_root,
         );
+        for i in 0..4 {
+            circuit.builder.conditional_assert_eq(
+                is_first_recursion,
+                block.initial_state_root.elements[i],
+                block.new_state_root.elements[i],
+            );
+            circuit.builder.conditional_assert_eq(
+                is_first_recursion,
+                block.initial_account_delta_tree_root.elements[i],
+                block.new_account_delta_tree_root.elements[i],
+            );
+        }
 
-        let validium_root = circuit.builder.hash_n_to_one(&[
-            register_stack_hash,
-            current_tx.new_account_tree_root,
-            current_tx.new_market_tree_root,
-            all_assets_hash,
-            all_margined_assets_hash,
-            all_market_details_hash,
-            state_metadata_hash,
-            system_config_hash,
-        ]);
+        JumpStateTarget::connect(&mut circuit.builder, &block.jump, &current_tx.old_jump);
 
-        let state_root = circuit.builder.hash_n_to_one(&[
-            current_tx.new_account_pub_data_tree_root,
-            all_public_market_details_hash,
-            validium_root,
-        ]);
+        // The recursion counter must increment by one over the previous proof's counter.
+        let not_first_recursion = circuit.builder.not(is_first_recursion);
+        let prev_counter = circuit.target.cyclic_proof.public_inputs[circuit.block_tx_witness_size];
+        let prev_counter_plus_one = circuit.builder.add_one(prev_counter);
+        circuit.builder.conditional_assert_eq(
+            not_first_recursion,
+            circuit.target.recursion_step,
+            prev_counter_plus_one,
+        );
 
         // Treasury can't change pubkey via L2 transaction, so if account index is zero, then change_pub_key_message is empty
         let is_change_pub_key_message_exists = circuit
@@ -451,10 +374,9 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
         let calculated_new_block = BlockTxChainWitnessTarget {
             block_number: block.block_number,
             created_at: block.created_at,
-            old_state_root: block.old_state_root,
 
-            new_validium_root: validium_root,
-            new_state_root: state_root,
+            new_validium_root: current_tx.new_validium_root,
+            new_state_root: current_tx.new_state_root,
             new_account_delta_tree_root: current_tx.new_account_delta_tree_root,
 
             change_pub_key_message,
@@ -473,19 +395,12 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
             ),
             priority_operations_pub_data: new_priority_operations_pub_data,
 
-            new_public_market_details: current_tx
-                .all_market_details_after
-                .iter()
-                .map(|market| PublicMarketDetailsTarget {
-                    funding_rate_prefix_sum: circuit
-                        .builder
-                        .bigint_u16_to_bigint(&market.funding_rate_prefix_sum),
-                    mark_price: market.mark_price,
-                    quote_multiplier: market.quote_multiplier,
-                })
-                .collect::<Vec<_>>()
-                .try_into()
-                .unwrap(),
+            jump: current_tx.new_jump,
+
+            initial_state_root: block.initial_state_root,
+            initial_account_delta_tree_root: block.initial_account_delta_tree_root,
+
+            new_public_market_details_hash: current_tx.public_market_details_hash_after,
         };
 
         circuit
@@ -493,13 +408,14 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
             .new_block
             .connect_block_witness(&mut circuit.builder, &calculated_new_block);
 
-        connect_state_metadata_target(
-            &mut circuit.builder,
-            &state_metadata,
-            &circuit.target.state_metadata_target,
-        );
-
         circuit.builder.perform_registered_range_checks();
+
+        while circuit.builder.builder.num_gates() < (1 << CHAIN_LOG_GATES) - PADDING_HEADROOM {
+            circuit
+                .builder
+                .builder
+                .add_gate(plonky2::gates::noop::NoopGate, vec![]);
+        }
 
         circuit
     }
@@ -507,7 +423,7 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
     fn generate_witness(
         target: &BlockTxChainTarget,
         circuit_data: &CircuitData<F, C, D>,
-        tx_index: u64,
+        recursion_step: u64,
         cyclic_proof: &ProofWithPublicInputs<F, C, D>,
         dummy_proof_cyclic: &ProofWithPublicInputs<F, C, D>,
         current_block_tx_proof: &ProofWithPublicInputs<F, C, D>,
@@ -517,9 +433,9 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
         pw.set_proof_with_pis_target(&target.cyclic_proof, cyclic_proof)?;
         pw.set_verifier_data_target(&target.self_verifier_data, &circuit_data.verifier_only)?;
 
-        pw.set_proof_with_pis_target(&target.current_block_tx_proof, current_block_tx_proof)?;
+        pw.set_proof_with_pis_target(&target.tx_proof, current_block_tx_proof)?;
 
-        pw.set_target(target.tx_index, F::from_canonical_u64(tx_index))?;
+        pw.set_target(target.recursion_step, F::from_canonical_u64(recursion_step))?;
 
         // This will take place of `DummyProofGenerator`
         pw.set_proof_with_pis_target(
@@ -533,7 +449,7 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
     fn prove(
         target: &BlockTxChainTarget,
         circuit_data: &CircuitData<F, C, D>,
-        tx_index: u64,
+        recursion_step: u64,
         cyclic_proof: &ProofWithPublicInputs<F, C, D>,
         dummy_proof_cyclic: &ProofWithPublicInputs<F, C, D>,
         current_block_tx_proof: &ProofWithPublicInputs<F, C, D>,
@@ -544,7 +460,7 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
             Self::generate_witness(
                 target,
                 circuit_data,
-                tx_index,
+                recursion_step,
                 cyclic_proof,
                 dummy_proof_cyclic,
                 current_block_tx_proof,
@@ -565,25 +481,16 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
         dummy_circuit: &CircuitData<F, C, D>,
         block_number: u64,
         created_at: i64,
-        old_state_root: HashOut<F>,
         new_state_root: HashOut<F>,
         new_validium_root: HashOut<F>,
         old_account_delta_tree_root: HashOut<F>,
-        block_tx_witness_size: usize,
-        state_metadata: &StateMetadata,
     ) -> ProofWithPublicInputs<F, C, D> {
-        assert_eq!(
-            old_state_root, new_state_root,
-            "old state root should be equal to new state root at base proof"
-        );
-
         let mut nonzero_public_inputs = HashMap::new();
 
         nonzero_public_inputs.insert(0, F::from_canonical_u64(block_number));
         nonzero_public_inputs.insert(1, F::from_canonical_u64(created_at as u64));
 
         for (i, elem) in [
-            old_state_root,
             new_validium_root,
             new_state_root,
             old_account_delta_tree_root,
@@ -595,10 +502,29 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
             nonzero_public_inputs.insert(2 + i, elem);
         }
 
-        let public_inputs = state_metadata.to_public_inputs();
-        (block_tx_witness_size..block_tx_witness_size + STATE_METADATA_SIZE).for_each(|i| {
-            nonzero_public_inputs.insert(i, public_inputs[i - block_tx_witness_size]);
-        });
+        let jump_index = 14
+            + 4 // new_public_market_details_hash
+            + CHANGE_PK_PUBLIC_INPUTS_LEN
+            + TRANSFER_PUBLIC_INPUTS_LEN
+            + APPROVE_INTEGRATOR_PUBLIC_INPUTS_LEN
+            + 1
+            + ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE
+            + 1
+            + MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX;
+        let initial_jump = JumpState::initial(new_state_root, old_account_delta_tree_root).to_vec();
+        for (i, elem) in initial_jump.iter().enumerate() {
+            nonzero_public_inputs.insert(jump_index + i, *elem);
+        }
+
+        let initial_state_root_index = jump_index + JUMP_STATE_SIZE;
+        for (i, elem) in new_state_root
+            .elements
+            .iter()
+            .chain(old_account_delta_tree_root.elements.iter())
+            .enumerate()
+        {
+            nonzero_public_inputs.insert(initial_state_root_index + i, *elem);
+        }
 
         cyclic_base_proof(
             &circuit_data.common,
@@ -661,9 +587,15 @@ fn common_data_for_recursion(log_gates: usize) -> CommonCircuitData<F, D> {
     );
     builder.add_gate(ConstantGate::new(2), vec![]);
 
-    while builder.num_gates() < 1 << log_gates {
+    while builder.num_gates() < (1 << log_gates) - PADDING_HEADROOM {
         builder.add_gate(plonky2::gates::noop::NoopGate, vec![]);
     }
 
-    builder.build::<C>().common
+    let common = builder.build::<C>().common;
+    assert_eq!(
+        common.degree_bits(),
+        log_gates,
+        "common_data_for_recursion built at an unexpected degree"
+    );
+    common
 }

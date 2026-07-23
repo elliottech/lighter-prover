@@ -33,6 +33,7 @@ pub const ROUTE_TYPE_SPOT: u64 = 1;
 pub const PRODUCT_TYPE_PERPS: u64 = 0;
 pub const PRODUCT_TYPE_SPOT: u64 = 1;
 
+pub const MARKET_DETAILS_TREE_HEIGHT: usize = 8;
 pub const MARKET_INDEX_BITS: usize = 12;
 
 pub const GLOBAL_SUPPLY_CAP_BITS: usize = 60;
@@ -436,6 +437,7 @@ pub const PENDING_BASE_REGISTER_SIZE: usize = 8;
 pub const REGISTER_STACK_SIZE: usize = PENDING_BASE_REGISTER_SIZE + 1;
 pub const NEW_INSTRUCTIONS_MAX_SIZE: usize = 8;
 
+pub const INSERT_MAX_ONE_REGISTER: usize = 1;
 pub const INSERT_MAX_THREE_REGISTERS: usize = 3;
 pub const INSERT_MAX_FIVE_REGISTERS: usize = 5;
 pub const INSERT_MAX_SIX_REGISTERS: usize = 6;
@@ -851,3 +853,6 @@ const fn const_hash_out(e: [u64; NUM_HASH_OUT_ELTS]) -> HashOut<F> {
         elements: [const_f(e[0]), const_f(e[1]), const_f(e[2]), const_f(e[3])],
     }
 }
+
+pub const TX_HEAVY: u8 = 0;
+pub const TX_LIGHT: u8 = 1;

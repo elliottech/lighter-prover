@@ -643,9 +643,13 @@ impl Verify for L2CreateGroupedOrdersTxTarget {
         self.verify_otoco(builder, otoco_flag, &order_types);
 
         let ob_active_status = builder.constant(F::from_canonical_u8(MARKET_STATUS_ACTIVE));
-        builder.conditional_assert_eq(is_enabled, tx_state.market_details.status, ob_active_status);
+        builder.conditional_assert_eq(
+            is_enabled,
+            tx_state.market_risk_details.status,
+            ob_active_status,
+        );
         builder.conditional_assert_not_zero(is_enabled, tx_state.market_details.index_price);
-        builder.conditional_assert_not_zero(is_enabled, tx_state.market_details.mark_price);
+        builder.conditional_assert_not_zero(is_enabled, tx_state.market_risk_details.mark_price);
 
         let perps_market_type = builder.constant_u64(MARKET_TYPE_PERPS);
         builder.conditional_assert_eq(is_enabled, tx_state.market.market_type, perps_market_type);
@@ -668,7 +672,7 @@ impl Verify for L2CreateGroupedOrdersTxTarget {
         let position_tied_order_base_amount = tx_state.positions[OWNER_ACCOUNT_ID]
             .calculate_position_tied_order_base_amount(
                 builder,
-                tx_state.market_details.quote_multiplier,
+                tx_state.market_risk_details.quote_multiplier,
                 self.orders[0].price,
                 tx_state.market.order_quote_limit,
             );

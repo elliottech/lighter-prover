@@ -555,12 +555,12 @@ impl AccountTarget {
         self.margined_assets[margin_index].balance.clone()
     }
 
-    pub fn get_margined_asset_balances(
+    pub fn get_margined_asset_balances<const NB_ACCOUNTS: usize>(
         builder: &mut Builder,
-        accounts: &[AccountTarget; NB_ACCOUNTS_PER_TX],
+        accounts: &[AccountTarget; NB_ACCOUNTS],
         assets: &[AssetTarget; NB_ASSETS_PER_TX],
         first_margin_index: Target,
-    ) -> [[AccountMarginedAssetTarget; NB_ASSETS_PER_TX]; NB_ACCOUNTS_PER_TX] {
+    ) -> [[AccountMarginedAssetTarget; NB_ASSETS_PER_TX]; NB_ACCOUNTS] {
         let second_margin_index = assets[1].margin_index(builder);
 
         array::from_fn(|i| {

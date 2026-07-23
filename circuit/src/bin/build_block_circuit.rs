@@ -12,6 +12,7 @@ use circuit::block_tx_constraints::{BlockTxCircuit, Circuit as _};
 use circuit::circuit_serializer::{BlockGateSerializer, BlockGeneratorSerializer};
 use circuit::ecdsa::curve::secp256k1::Secp256K1;
 use circuit::types::config::{C, CIRCUIT_CONFIG, D};
+use circuit::types::constants::{TX_HEAVY, TX_LIGHT};
 use clap::Parser;
 use env_logger::{DEFAULT_FILTER_ENV, Env, try_init_from_env};
 use log::info;
@@ -24,6 +25,9 @@ use plonky2::plonk::config::GenericHashOut;
 struct Args {
     #[arg(long)]
     tx_per_proof: usize,
+
+    #[arg(long)]
+    light_tx_per_proof: usize,
 
     #[arg(long)]
     on_chain_operations_limit: usize,
@@ -62,29 +66,42 @@ fn main() -> Result<()> {
         args.priority_operations_limit, 1,
         "only 1 priority operation is supported"
     );
+    info!("tx_per_proof 0: {}", args.tx_per_proof);
+    info!("chain_id 0: {}", args.chain_id);
+
+    info!("tx_per_proof 1: {}", args.tx_per_proof);
+    info!("chain_id 1: {}", args.chain_id);
 
     // Assume 1 tx per block tx segment. Also we are assuming one priority operation per block and one priority operation and on chain operation per tx segment.
-    let tx_circuit = BlockTxCircuit::define(CIRCUIT_CONFIG, args.tx_per_proof, args.chain_id);
-    let tx_data = tx_circuit.builder.build::<C>();
+    let heavy_tx_circuit =
+        BlockTxCircuit::define(CIRCUIT_CONFIG, args.tx_per_proof, args.chain_id, TX_HEAVY);
+    let heavy_data = heavy_tx_circuit.builder.build::<C>();
+    let light_tx_circuit = BlockTxCircuit::define(
+        CIRCUIT_CONFIG,
+        args.light_tx_per_proof,
+        args.chain_id,
+        TX_LIGHT,
+    );
+    let light_data = light_tx_circuit.builder.build::<C>();
     info!("BlockTxCircuit defined!");
 
     let pre_exec_circuit = BlockPreExecutionCircuit::define(CIRCUIT_CONFIG);
     let pre_exec_data = pre_exec_circuit.builder.build::<C>();
     info!("BlockPreExecutionCircuit defined!");
 
-    let chain_circuit = BlockTxChainCircuit::define(
-        CIRCUIT_CONFIG,
-        &tx_data,
-        args.tx_per_proof,
-        args.on_chain_operations_limit,
-    );
-    let chain_circuit_data = chain_circuit.builder.build::<C>();
+    let heavy_chain_circuit =
+        BlockTxChainCircuit::define(CIRCUIT_CONFIG, &heavy_data, args.on_chain_operations_limit);
+    let heavy_chain_circuit_data = heavy_chain_circuit.builder.build::<C>();
+    let light_chain_circuit =
+        BlockTxChainCircuit::define(CIRCUIT_CONFIG, &light_data, args.on_chain_operations_limit);
+    let light_chain_circuit_data = light_chain_circuit.builder.build::<C>();
     info!("BlockTxChainCircuit defined!");
 
     let circuit = BlockCircuit::define(
         CIRCUIT_CONFIG,
         &pre_exec_data,
-        &chain_circuit_data,
+        &light_chain_circuit_data,
+        &heavy_chain_circuit_data,
         args.on_chain_operations_limit,
     );
     let data = circuit.builder.build::<C>();
@@ -96,7 +113,7 @@ fn main() -> Result<()> {
 
     // Write tx circuit data
     {
-        let serialized_circuit = tx_data
+        let serialized_circuit = heavy_data
             .to_bytes(&gate_serializer, &generator_serializer)
             .map_err(|err| {
                 anyhow::Error::msg(format!(
@@ -109,7 +126,38 @@ fn main() -> Result<()> {
         let path_name = format!(
             "block-tx-circuit::t{}::{}",
             args.tx_per_proof,
-            hex::encode(tx_data.verifier_only.circuit_digest.to_bytes().clone())
+            hex::encode(heavy_data.verifier_only.circuit_digest.to_bytes().clone())
+        );
+
+        // If parent is given, append the file name
+        let parent = args.path.clone();
+        let mut path = parent.map_or_else(
+            || Path::new(&path_name.clone()).to_path_buf(), // default
+            |mut v| {
+                // if folder is given
+                v.push(path_name.clone());
+                v
+            },
+        );
+        path.set_extension("bin");
+        info!("{:?}", path);
+        fs::write(path.clone(), serialized_circuit)?;
+    }
+
+    {
+        let serialized_circuit = light_data
+            .to_bytes(&gate_serializer, &generator_serializer)
+            .map_err(|err| {
+                anyhow::Error::msg(format!(
+                    "Failed to convert light tx circuit data to bytes. {:?}",
+                    err
+                ))
+            })?;
+
+        let path_name = format!(
+            "block-tx-light-circuit::t{}::{}",
+            args.light_tx_per_proof,
+            hex::encode(light_data.verifier_only.circuit_digest.to_bytes().clone())
         );
 
         // If parent is given, append the file name
@@ -166,7 +214,10 @@ fn main() -> Result<()> {
     }
 
     // Write tx chain circuit data
-    {
+    for (chain_circuit_data, name) in [
+        (&heavy_chain_circuit_data, "block-tx-chain-circuit"),
+        (&light_chain_circuit_data, "block-tx-light-chain-circuit"),
+    ] {
         let serialized_circuit = chain_circuit_data
             .to_bytes(&gate_serializer, &generator_serializer)
             .map_err(|err| {
@@ -176,9 +227,10 @@ fn main() -> Result<()> {
                 ))
             })?;
 
-        // Format: block-tx-chain-circuit::o<on-chain-size>::p<priority-size>::<digest>
+        // Format: <name>::o<on-chain-size>::p<priority-size>::<digest>
         let path_name = format!(
-            "block-tx-chain-circuit::t{}-o{}-p{}::{}",
+            "{}::t{}-o{}-p{}::{}",
+            name,
             args.tx_per_proof,
             args.on_chain_operations_limit,
             args.priority_operations_limit,

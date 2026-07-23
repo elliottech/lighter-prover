@@ -18,7 +18,7 @@ use crate::types::config::{
 use crate::types::constants::*;
 use crate::types::margined_asset::MarginedAssetTarget;
 use crate::types::market::MarketTarget;
-use crate::types::market_details::MarketDetailsTarget;
+use crate::types::market_details::MarketRiskDetailsTarget;
 use crate::types::risk_info::RiskParametersTarget;
 use crate::uint::u32::gadgets::arithmetic_u32::CircuitBuilderU32;
 use crate::utils::CircuitBuilderUtils;
@@ -26,7 +26,7 @@ use crate::utils::CircuitBuilderUtils;
 pub fn get_funding_delta_for_position_and_market(
     builder: &mut Builder,
     position: &AccountPositionTarget,
-    market_details: &MarketDetailsTarget,
+    market_details: &MarketRiskDetailsTarget,
 ) -> BigIntTarget {
     let quote_multiplier_big =
         builder.target_to_biguint_single_limb_unsafe(market_details.quote_multiplier);
@@ -100,7 +100,7 @@ pub fn get_asset_zero_price(
 pub fn get_position_zero_price(
     builder: &mut Builder,
     position: &AccountPositionTarget,
-    market_details: &MarketDetailsTarget,
+    market_details: &MarketRiskDetailsTarget,
     risk_info: &RiskParametersTarget,
 ) -> BigUintTarget {
     let one = builder.one();
@@ -182,7 +182,7 @@ pub fn get_position_zero_price(
 pub fn get_position_zero_quote(
     builder: &mut Builder,
     position: &AccountPositionTarget,
-    market_details: &MarketDetailsTarget,
+    market_details: &MarketRiskDetailsTarget,
     risk_info: &RiskParametersTarget,
     trade_size: Target,
 ) -> BigIntTarget {

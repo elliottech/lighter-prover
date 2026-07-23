@@ -815,7 +815,8 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
     }
 
     let trade_base = optimistic_trade_amount;
-    let quote_multiplier = builder.select(is_perps, tx_state.market_details.quote_multiplier, one);
+    let quote_multiplier =
+        builder.select(is_perps, tx_state.market_risk_details.quote_multiplier, one);
     let trade_quote = SignedTarget::new_unsafe(builder.mul_many([
         trade_base,
         tx_state.order.price_index,
@@ -823,6 +824,7 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
     ])); // Already verified that multiplication can fit NORMALIZED_QUOTE_BITS bits and can't be negative
 
     let apply_trade_params = ApplyTradeParams {
+        market_risk_details: &tx_state.market_risk_details,
         market: &tx_state.market,
         market_details: &tx_state.market_details,
         is_taker_ask,
@@ -1625,7 +1627,7 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
 
         // Perps
         {
-            strategy_index = tx_state.market_details.strategy_index;
+            strategy_index = tx_state.market_risk_details.strategy_index;
             route_type = builder.constant_u64(ROUTE_TYPE_PERPS);
 
             let usdc_to_collateral_multiplier =
@@ -1633,7 +1635,8 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
             let usdc_to_collateral_multiplier =
                 builder.target_to_biguint_single_limb_unsafe(usdc_to_collateral_multiplier);
 
-            let trade_quote = builder.mul(trade_quote, tx_state.market_details.quote_multiplier);
+            let trade_quote =
+                builder.mul(trade_quote, tx_state.market_risk_details.quote_multiplier);
             let trade_quote_big = builder.target_to_biguint(trade_quote);
 
             let extended_taker_fee = builder.mul_biguint_non_carry(
@@ -1854,8 +1857,8 @@ fn is_valid_perps_trade(
         builder.or(is_new_taker_position_gte, taker_position_side_flipped);
 
     let open_interest_notional_mult = builder.mul(
-        tx_state.market_details.mark_price,
-        tx_state.market_details.quote_multiplier,
+        tx_state.market_risk_details.mark_price,
+        tx_state.market_risk_details.quote_multiplier,
     );
     let old_open_interest_notional = builder.mul(
         tx_state.market_details.open_interest,
@@ -2075,8 +2078,6 @@ fn is_valid_spot_trade(
     let mut valid_maker_ask;
     let mut valid_maker_bid;
 
-    /************************************************************************************/
-    /************************************************************************************/
     // Apply the sells first so that we can perform auto supply operations when buying
     // Select sold assets for maker and taker and apply them first.
 
@@ -2191,8 +2192,6 @@ fn is_valid_spot_trade(
         &tx_state.account_margined_assets[MAKER_ACCOUNT_ID][QUOTE_ASSET_ID].balance,
     );
 
-    /************************************************************************************/
-    /************************************************************************************/
     // Apply ask and bid deltas
 
     let mut taker_strategy = tx_state.strategies[TAKER_ACCOUNT_ID].clone();
@@ -2372,8 +2371,6 @@ fn is_valid_spot_trade(
         }
     }
 
-    /************************************************************************************/
-    /************************************************************************************/
     // Put mutated ask/bid parameters back as base/quote
 
     // Account margined assets - Only modified field is TSA
@@ -2423,8 +2420,6 @@ fn is_valid_spot_trade(
     let mut valid_maker_base = builder.select_bool(is_taker_ask, valid_maker_bid, valid_maker_ask);
     let mut valid_maker_quote = builder.select_bool(is_taker_ask, valid_maker_ask, valid_maker_bid);
 
-    /************************************************************************************/
-    /************************************************************************************/
     // Update risks if any asset is used as margin.
     // Insurance fund spot trades skip risk updates: non-USDC deltas go to
     // MarginBalance but are not perps margin, and USDC deltas go to strategy-1
@@ -2508,8 +2503,6 @@ fn is_valid_spot_trade(
         }
     };
 
-    /************************************************************************************/
-    /************************************************************************************/
     // Perform validity checks and cancel taker/maker if necessary
 
     // Taker
@@ -3330,4 +3323,213 @@ fn get_impact_price(
     let impact_price = builder.select(is_bid, impact_price_div, impact_price_ceil_div);
 
     builder.select(enough_liquidity, impact_price, zero)
+}
+
+pub fn execute_matching_light(builder: &mut Builder, tx_state: &mut TxState) {
+    let one = builder.one();
+    let _false = builder._false();
+
+    let is_perps = builder.is_equal_constant(tx_state.market.market_type, MARKET_TYPE_PERPS);
+    let is_spot = builder.not(is_perps);
+
+    let is_taker_ask = tx_state.register_stack[0].pending_is_ask;
+
+    let limit_order_type = builder.constant_from_u8(LIMIT_ORDER);
+    let is_limit_order =
+        builder.is_equal(tx_state.register_stack[0].pending_type, limit_order_type);
+
+    let trigger_status_na = builder.constant_from_u8(TRIGGER_STATUS_NA);
+    let is_pending_trigger_status_na = builder.is_equal(
+        tx_state.register_stack[0].pending_trigger_status,
+        trigger_status_na,
+    );
+
+    // Initialize time in force flags
+    let ioc = builder.constant_from_u8(IOC);
+    let is_ioc = builder.is_equal(tx_state.register_stack[0].pending_time_in_force, ioc);
+
+    let total_opposite_side_order_size = builder.select(
+        is_taker_ask,
+        tx_state.order_book_tree_path[ORDER_BOOK_MERKLE_LEVELS - 1].bid_base_sum,
+        tx_state.order_book_tree_path[ORDER_BOOK_MERKLE_LEVELS - 1].ask_base_sum,
+    );
+    let is_opposite_side_empty = builder.is_zero(total_opposite_side_order_size);
+
+    let mut update_status_flags = tx_state.matching_engine_flag;
+    let mut cancel_taker_order = builder._false();
+    let mut insert_taker_order = builder._false();
+
+    builder.conditional_assert_true(update_status_flags, is_limit_order);
+    builder.conditional_assert_true(update_status_flags, is_pending_trigger_status_na);
+
+    // 0. Handle the taker order invalid reduce only case
+    let taker_reduce_only = builder.is_equal(tx_state.register_stack[0].pending_reduce_only, one);
+    {
+        let is_not_valid_reduce_only_direction = is_not_valid_reduce_only_direction(
+            builder,
+            tx_state.positions[TAKER_ACCOUNT_ID].position.sign,
+            is_taker_ask,
+        );
+        let flag = builder.multi_and(&[
+            update_status_flags,
+            is_perps,
+            is_not_valid_reduce_only_direction,
+            taker_reduce_only,
+        ]);
+        cancel_taker_order = builder.select_bool(flag, update_status_flags, cancel_taker_order);
+        update_status_flags = builder.select_bool(flag, _false, update_status_flags);
+    }
+
+    let order_leaf_is_empty = tx_state.order.is_empty(builder);
+
+    // If order leaf is empty, it should belong to the taker order
+    {
+        let flag = builder.and(update_status_flags, order_leaf_is_empty);
+        builder.conditional_assert_eq(
+            flag,
+            tx_state.order.price_index,
+            tx_state.register_stack[0].pending_price,
+        );
+        builder.conditional_assert_eq(
+            flag,
+            tx_state.order.nonce_index,
+            tx_state.register_stack[0].pending_nonce,
+        );
+        builder.conditional_assert_eq(
+            flag,
+            tx_state.account_order.owner_account_index,
+            tx_state.register_stack[0].account_index,
+        );
+        builder.conditional_assert_eq(
+            flag,
+            tx_state.account_order.index_0,
+            tx_state.register_stack[0].pending_order_index,
+        );
+        builder.conditional_assert_eq(
+            flag,
+            tx_state.account_order.index_1,
+            tx_state.register_stack[0].pending_client_order_index,
+        );
+    }
+
+    // Empty order book side for ioc order - cancel the taker order
+    {
+        let flag = builder.multi_and(&[update_status_flags, is_ioc, is_opposite_side_empty]);
+
+        cancel_taker_order = builder.select_bool(flag, update_status_flags, cancel_taker_order);
+        update_status_flags = builder.select_bool(flag, _false, update_status_flags);
+    }
+
+    // Assert that we have the best possible order from orderbook
+    let (opposite_base_sum, _) = get_quote(
+        builder,
+        is_taker_ask,
+        &tx_state.order,
+        &tx_state.order_book_tree_path,
+        &tx_state.order_path_helper,
+    );
+    let opposite_base_is_zero = builder.is_zero(opposite_base_sum);
+    builder.conditional_assert_true(update_status_flags, opposite_base_is_zero);
+
+    // Non crossing ioc - cancel the taker order
+    {
+        let flag = builder.multi_and(&[update_status_flags, is_ioc, order_leaf_is_empty]);
+
+        cancel_taker_order = builder.select_bool(flag, update_status_flags, cancel_taker_order);
+        update_status_flags = builder.select_bool(flag, _false, update_status_flags);
+    }
+
+    // Non crossing non ioc limit - put order to orderbook
+    {
+        let flag = builder.multi_and(&[update_status_flags, order_leaf_is_empty]);
+
+        insert_taker_order = builder.select_bool(flag, update_status_flags, insert_taker_order);
+        update_status_flags = builder.select_bool(flag, _false, update_status_flags);
+    }
+
+    // No trade must have happened.
+    builder.assert_false(update_status_flags);
+
+    let market_index = tx_state.register_stack[0].market_index;
+    let taker_account_index = tx_state.register_stack[0].account_index;
+
+    let pop_register = builder.or(cancel_taker_order, insert_taker_order);
+    let register_order = get_order_from_register(builder, &tx_state.register_stack[0]);
+    let register_account_order =
+        get_account_order_from_register(builder, &tx_state.register_stack[0]);
+    tx_state.register_stack.pop_front(builder, pop_register);
+
+    // Cancel taker order if needed
+    let taker_child_order_index_0 = register_account_order.to_trigger_order_index0;
+    let taker_child_order_index_1 = register_account_order.to_trigger_order_index1;
+    let taker_filled_size = builder.sub(
+        register_account_order.initial_base_amount,
+        register_account_order.remaining_base_amount,
+    );
+    let is_taker_filled_size_zero = builder.is_zero(taker_filled_size);
+    let trigger_taker_child_orders_flag =
+        builder.and_not(cancel_taker_order, is_taker_filled_size_zero);
+    let cancel_taker_child_orders_flag = builder.and(is_taker_filled_size_zero, cancel_taker_order);
+    cancel_child_orders(
+        builder,
+        cancel_taker_child_orders_flag,
+        tx_state,
+        market_index,
+        taker_account_index,
+        taker_child_order_index_0,
+        taker_child_order_index_1,
+        5,
+    );
+    trigger_child_orders(
+        builder,
+        trigger_taker_child_orders_flag,
+        tx_state,
+        market_index,
+        taker_account_index,
+        taker_child_order_index_0,
+        taker_child_order_index_1,
+        taker_filled_size,
+        5,
+    );
+
+    let insert_taker_to_order_book = insert_taker_order;
+    tx_state.order = select_order_target(
+        builder,
+        insert_taker_to_order_book,
+        &register_order,
+        &tx_state.order,
+    );
+    tx_state.account_order = select_account_order_target(
+        builder,
+        insert_taker_order,
+        &register_account_order,
+        &tx_state.account_order,
+    );
+    increment_order_count_in_place(
+        builder,
+        tx_state,
+        insert_taker_order,
+        register_account_order.trigger_status,
+        register_account_order.reduce_only,
+    );
+
+    // Skip locked balance for the insurance fund — it relies on
+    // strategy-1 non-negative checks instead of per-asset locked balance.
+    let is_taker_insurance_fund = builder.is_equal_constant(
+        tx_state.accounts[TAKER_ACCOUNT_ID].account_type,
+        INSURANCE_FUND_ACCOUNT_TYPE as u64,
+    );
+    let not_taker_insurance_fund_for_lock = builder.not(is_taker_insurance_fund);
+    let increment_locked_balance_flag = builder.multi_and(&[
+        insert_taker_to_order_book,
+        is_spot,
+        not_taker_insurance_fund_for_lock,
+    ]);
+    increment_locked_balance_for_order(
+        builder,
+        increment_locked_balance_flag,
+        &tx_state.account_order,
+        &tx_state.market,
+        &mut tx_state.account_assets[TAKER_ACCOUNT_ID],
+    );
 }

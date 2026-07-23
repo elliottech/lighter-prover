@@ -27,7 +27,7 @@ use crate::types::constants::{
 };
 use crate::types::margined_asset::MarginedAssetTarget;
 use crate::types::market::MarketTarget;
-use crate::types::market_details::MarketDetailsTarget;
+use crate::types::market_details::{MarketDetailsTarget, MarketRiskDetailsTarget};
 use crate::types::order::OrderTarget;
 use crate::types::order_book_node::OrderBookNodeTarget;
 use crate::types::public_pool::PublicPoolShareTarget;
@@ -52,6 +52,7 @@ pub struct TxState {
     pub accounts_delta: [AccountDeltaTarget; NB_ACCOUNTS_PER_TX],
     pub market: MarketTarget,
     pub market_details: MarketDetailsTarget,
+    pub market_risk_details: MarketRiskDetailsTarget,
     pub order: OrderTarget,
     pub order_book_tree_path: [OrderBookNodeTarget; ORDER_BOOK_MERKLE_LEVELS],
     pub assets: [AssetTarget; NB_ASSETS_PER_TX], // First slot is mutable, second and third slot is immutable and read-only
@@ -112,6 +113,7 @@ impl Default for TxState {
             asset_indices: core::array::from_fn(|_| Target::default()),
             market: MarketTarget::default(),
             market_details: MarketDetailsTarget::default(), // Only relevant for perps
+            market_risk_details: MarketRiskDetailsTarget::default(), // Only relevant for perps
             order: OrderTarget::default(),
             order_book_tree_path: core::array::from_fn(|_| OrderBookNodeTarget::default()),
             is_new_account: core::array::from_fn(|_| BoolTarget::default()),

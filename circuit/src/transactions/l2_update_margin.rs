@@ -144,7 +144,7 @@ impl Verify for L2UpdateMarginTxTarget {
         let active_market_status = builder.constant_from_u8(MARKET_STATUS_ACTIVE);
         builder.conditional_assert_eq(
             is_enabled,
-            tx_state.market_details.status,
+            tx_state.market_risk_details.status,
             active_market_status,
         );
 

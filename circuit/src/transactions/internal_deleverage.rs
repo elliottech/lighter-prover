@@ -129,7 +129,7 @@ impl Verify for InternalDeleverageTxTarget {
         let active_market_status = builder.constant_from_u8(MARKET_STATUS_ACTIVE);
         builder.conditional_assert_eq(
             is_enabled,
-            tx_state.market_details.status,
+            tx_state.market_risk_details.status,
             active_market_status,
         );
         builder.conditional_assert_eq_constant(
@@ -229,7 +229,7 @@ impl Verify for InternalDeleverageTxTarget {
         let big_deleverage_quote = get_position_zero_quote(
             builder,
             &bankrupt_position,
-            &tx_state.market_details,
+            &tx_state.market_risk_details,
             &bankrupt_risk_info.current_risk_parameters,
             self.size,
         );
@@ -277,6 +277,7 @@ impl Apply for InternalDeleverageTxTarget {
         let is_bankrupt_long = builder.is_sign_positive(bankrupt_position.sign);
 
         let apply_trade_params = ApplyTradeParams {
+            market_risk_details: &tx_state.market_risk_details,
             market: &tx_state.market,
             market_details: &tx_state.market_details.clone(),
             is_taker_ask: is_bankrupt_long,

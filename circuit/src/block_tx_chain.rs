@@ -1,17 +1,14 @@
 // Copyright (c) Elliot Technologies, Inc.
 // SPDX-License-Identifier: BUSL-1.1
 
-use std::collections::HashMap;
 use std::fmt;
 
-use num::BigInt;
 use plonky2::field::extension::Extendable;
 use plonky2::field::types::Field;
 use plonky2::hash::hash_types::{HashOut, HashOutTarget, RichField};
 use plonky2::iop::target::Target;
 
-use crate::bigint::bigint::{BigIntTarget, SignTarget};
-use crate::bigint::biguint::BigUintTarget;
+use crate::block_tx::{JUMP_STATE_SIZE, JumpState, JumpStateTarget};
 use crate::types::approve_integrator::{
     APPROVE_INTEGRATOR_PUBLIC_INPUTS_LEN, ApproveIntegratorMessage, ApproveIntegratorMessageTarget,
 };
@@ -21,14 +18,9 @@ use crate::types::change_pub_key::{
 use crate::types::config::Builder;
 use crate::types::constants::{
     MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX, ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE,
-    POSITION_LIST_SIZE,
-};
-use crate::types::market_details::{
-    PublicMarketDetails, PublicMarketDetailsTarget, connect_public_market_details,
 };
 use crate::types::transfer::{TRANSFER_PUBLIC_INPUTS_LEN, TransferMessage, TransferMessageTarget};
 use crate::uint::u8::{CircuitBuilderU8, U8Target};
-use crate::uint::u32::gadgets::arithmetic_u32::U32Target;
 
 #[derive(Clone)]
 pub struct BlockTxChainWitness<F>
@@ -38,7 +30,6 @@ where
     pub block_number: u64,
     pub created_at: i64,
 
-    pub old_state_root: HashOut<F>,
     pub new_validium_root: HashOut<F>,
     pub new_state_root: HashOut<F>,
     pub new_account_delta_tree_root: HashOut<F>,
@@ -53,7 +44,12 @@ where
     pub priority_operations_count: u64,
     pub priority_operations_pub_data: [u8; MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX],
 
-    pub new_public_market_details: [PublicMarketDetails; POSITION_LIST_SIZE],
+    pub new_public_market_details_hash: HashOut<F>,
+
+    pub jump: JumpState<F>,
+
+    pub initial_state_root: HashOut<F>,
+    pub initial_account_delta_tree_root: HashOut<F>,
 }
 
 impl<F> fmt::Debug for BlockTxChainWitness<F>
@@ -71,21 +67,9 @@ where
 
         let priority_operations_pub_data = hex::encode(self.priority_operations_pub_data);
 
-        let mut new_market_details = HashMap::<usize, PublicMarketDetails>::new();
-        self.new_public_market_details
-            .iter()
-            .filter(|market_detail| !market_detail.is_empty())
-            .enumerate()
-            .for_each(|(index, market_details)| {
-                new_market_details.insert(index, market_details.clone());
-            });
-
-        let new_public_market_details = serde_json::to_string(&new_market_details).unwrap();
-
         fmt.debug_struct("BlockTxChainWitness<F>")
             .field("block_number", &self.block_number)
             .field("created_at", &self.created_at)
-            .field("old_state_root", &self.old_state_root)
             .field("new_validium_root", &self.new_validium_root)
             .field("new_state_root", &self.new_state_root)
             .field(
@@ -99,7 +83,10 @@ where
                 "priority_operations_pub_data",
                 &priority_operations_pub_data,
             )
-            .field("new_public_market_details", &new_public_market_details)
+            .field(
+                "new_public_market_details_hash",
+                &self.new_public_market_details_hash,
+            )
             .finish()
     }
 }
@@ -110,9 +97,9 @@ where
 {
     /// Parse public inputs from proof into BlockTxChainWitness
     pub fn from_public_inputs(public_inputs: &[F], _: usize, _: usize) -> Self {
-        let new_public_market_details_index = 18;
+        let new_public_market_details_hash_index = 14;
 
-        let change_pub_key_message_index = new_public_market_details_index + POSITION_LIST_SIZE * 5;
+        let change_pub_key_message_index = new_public_market_details_hash_index + 4;
         let transfer_message_index = change_pub_key_message_index + CHANGE_PK_PUBLIC_INPUTS_LEN;
         let approve_integrator_message_index = transfer_message_index + TRANSFER_PUBLIC_INPUTS_LEN;
 
@@ -124,53 +111,39 @@ where
             on_chain_operations_pub_data_index + ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE;
         let priority_operations_pub_data = priority_operations_count_index + 1;
 
+        let jump_index =
+            priority_operations_pub_data + MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX;
+        let jump_end_index = jump_index + JUMP_STATE_SIZE;
+        let initial_state_root_index = jump_end_index;
+        let initial_delta_root_index = initial_state_root_index + 4;
+
         Self {
             block_number: public_inputs[0].to_canonical_u64(),
             created_at: public_inputs[1].to_canonical_u64() as i64,
 
-            old_state_root: HashOut::<F>::from([
+            new_validium_root: HashOut::<F>::from([
                 public_inputs[2],
                 public_inputs[3],
                 public_inputs[4],
                 public_inputs[5],
             ]),
-            new_validium_root: HashOut::<F>::from([
+            new_state_root: HashOut::<F>::from([
                 public_inputs[6],
                 public_inputs[7],
                 public_inputs[8],
                 public_inputs[9],
             ]),
-            new_state_root: HashOut::<F>::from([
+            new_account_delta_tree_root: HashOut::<F>::from([
                 public_inputs[10],
                 public_inputs[11],
                 public_inputs[12],
                 public_inputs[13],
             ]),
-            new_account_delta_tree_root: HashOut::<F>::from([
-                public_inputs[14],
-                public_inputs[15],
-                public_inputs[16],
-                public_inputs[17],
-            ]),
 
-            new_public_market_details: public_inputs
-                [new_public_market_details_index..change_pub_key_message_index]
-                .chunks(5)
-                .map(|chunk| {
-                    let mut funding_rate_prefix_sum_abs =
-                        (chunk[1].to_canonical_u64() + (chunk[2].to_canonical_u64() << 32)) as i64;
-                    if !chunk[0].is_one() && !chunk[0].is_zero() {
-                        funding_rate_prefix_sum_abs *= -1;
-                    }
-                    PublicMarketDetails {
-                        funding_rate_prefix_sum: BigInt::from(funding_rate_prefix_sum_abs),
-                        mark_price: chunk[3].to_canonical_u64() as u32,
-                        quote_multiplier: chunk[4].to_canonical_u64() as u32,
-                    }
-                })
-                .collect::<Vec<_>>()
-                .try_into()
-                .unwrap(),
+            new_public_market_details_hash: HashOut::<F>::from_vec(
+                public_inputs[new_public_market_details_hash_index..change_pub_key_message_index]
+                    .to_vec(),
+            ),
 
             change_pub_key_message: ChangePubKeyMessage::from_public_inputs(
                 &public_inputs[change_pub_key_message_index..transfer_message_index],
@@ -199,6 +172,21 @@ where
             priority_operations_pub_data: core::array::from_fn(|index| {
                 public_inputs[priority_operations_pub_data + index].to_canonical_u64() as u8
             }),
+
+            jump: JumpState::from_public_inputs(&public_inputs[jump_index..jump_end_index]),
+
+            initial_state_root: HashOut::<F>::from([
+                public_inputs[initial_state_root_index],
+                public_inputs[initial_state_root_index + 1],
+                public_inputs[initial_state_root_index + 2],
+                public_inputs[initial_state_root_index + 3],
+            ]),
+            initial_account_delta_tree_root: HashOut::<F>::from([
+                public_inputs[initial_delta_root_index],
+                public_inputs[initial_delta_root_index + 1],
+                public_inputs[initial_delta_root_index + 2],
+                public_inputs[initial_delta_root_index + 3],
+            ]),
         }
     }
 }
@@ -209,7 +197,6 @@ pub struct BlockTxChainWitnessTarget {
     pub block_number: Target,
     pub created_at: Target, // 48 bits
 
-    pub old_state_root: HashOutTarget,
     pub new_validium_root: HashOutTarget,
     pub new_state_root: HashOutTarget,
 
@@ -227,7 +214,12 @@ pub struct BlockTxChainWitnessTarget {
     pub priority_operations_count: Target,
     pub priority_operations_pub_data: [U8Target; MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX],
 
-    pub new_public_market_details: [PublicMarketDetailsTarget; POSITION_LIST_SIZE],
+    pub new_public_market_details_hash: HashOutTarget,
+
+    pub jump: JumpStateTarget,
+
+    pub initial_state_root: HashOutTarget,
+    pub initial_account_delta_tree_root: HashOutTarget,
 }
 
 impl BlockTxChainWitnessTarget {
@@ -235,13 +227,10 @@ impl BlockTxChainWitnessTarget {
         Self {
             block_number: builder.add_virtual_public_input(),
             created_at: builder.add_virtual_public_input(),
-            old_state_root: builder.add_virtual_hash_public_input(),
             new_validium_root: builder.add_virtual_hash_public_input(),
             new_state_root: builder.add_virtual_hash_public_input(),
             new_account_delta_tree_root: builder.add_virtual_hash_public_input(),
-            new_public_market_details: core::array::from_fn(|_| {
-                PublicMarketDetailsTarget::new_public(builder)
-            }),
+            new_public_market_details_hash: builder.add_virtual_hash_public_input(),
             change_pub_key_message: ChangePubKeyMessageTarget::new_public(builder),
             transfer_message: TransferMessageTarget::new_public(builder),
             approve_integrator_message: ApproveIntegratorMessageTarget::new_public(builder),
@@ -261,6 +250,9 @@ impl BlockTxChainWitnessTarget {
                 .add_virtual_public_u8_targets_unsafe(MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX)
                 .try_into()
                 .unwrap(), // safe because it is connected to public witness from tx circuit which range-checked its output
+            jump: JumpStateTarget::new_public(builder),
+            initial_state_root: builder.add_virtual_hash_public_input(),
+            initial_account_delta_tree_root: builder.add_virtual_hash_public_input(),
         }
     }
 
@@ -272,9 +264,9 @@ impl BlockTxChainWitnessTarget {
         _on_chain_operations_limit: usize,
         _priority_ops_limit: usize,
     ) -> (Self, usize) {
-        let new_public_market_details_index = 18;
+        let new_public_market_details_hash_index = 14;
 
-        let change_pub_key_message_index = new_public_market_details_index + POSITION_LIST_SIZE * 5;
+        let change_pub_key_message_index = new_public_market_details_hash_index + 4;
         let transfer_message_index = change_pub_key_message_index + CHANGE_PK_PUBLIC_INPUTS_LEN;
         let approve_integrator_message_index = transfer_message_index + TRANSFER_PUBLIC_INPUTS_LEN;
 
@@ -286,8 +278,13 @@ impl BlockTxChainWitnessTarget {
             on_chain_operations_pub_data_index + ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE;
         let priority_operations_pub_data = priority_operations_count_index + 1;
 
-        let total_pis_size =
+        let jump_index =
             priority_operations_pub_data + MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX;
+        let jump_end_index = jump_index + JUMP_STATE_SIZE;
+        let initial_state_root_index = jump_end_index;
+        let initial_delta_root_index = initial_state_root_index + 4;
+
+        let total_pis_size = initial_delta_root_index + 4;
 
         assert!(
             pis.len() >= total_pis_size,
@@ -301,36 +298,21 @@ impl BlockTxChainWitnessTarget {
             Self {
                 block_number: pis[0],
                 created_at: pis[1],
-                old_state_root: HashOutTarget {
+                new_validium_root: HashOutTarget {
                     elements: [pis[2], pis[3], pis[4], pis[5]],
                 },
-                new_validium_root: HashOutTarget {
-                    elements: [pis[6], pis[7], pis[8], pis[9]],
-                },
                 new_state_root: HashOutTarget {
-                    elements: [pis[10], pis[11], pis[12], pis[13]],
+                    elements: [pis[6], pis[7], pis[8], pis[9]],
                 },
 
                 new_account_delta_tree_root: HashOutTarget {
-                    elements: [pis[14], pis[15], pis[16], pis[17]],
+                    elements: [pis[10], pis[11], pis[12], pis[13]],
                 },
 
-                new_public_market_details: pis
-                    [new_public_market_details_index..change_pub_key_message_index]
-                    .chunks(5)
-                    .map(|chunk| PublicMarketDetailsTarget {
-                        funding_rate_prefix_sum: BigIntTarget {
-                            sign: SignTarget::new_unsafe(chunk[0]),
-                            abs: BigUintTarget {
-                                limbs: vec![U32Target(chunk[1]), U32Target(chunk[2])],
-                            },
-                        },
-                        mark_price: chunk[3],
-                        quote_multiplier: chunk[4],
-                    })
-                    .collect::<Vec<_>>()
-                    .try_into()
-                    .unwrap(),
+                new_public_market_details_hash: HashOutTarget::from_vec(
+                    pis[new_public_market_details_hash_index..change_pub_key_message_index]
+                        .to_vec(),
+                ),
 
                 change_pub_key_message: ChangePubKeyMessageTarget::from_public_inputs(
                     &pis[change_pub_key_message_index..transfer_message_index],
@@ -355,6 +337,25 @@ impl BlockTxChainWitnessTarget {
                 priority_operations_pub_data: core::array::from_fn(|i| {
                     U8Target(pis[priority_operations_pub_data + i])
                 }),
+
+                jump: JumpStateTarget::from_public_inputs(&pis[jump_index..jump_end_index]),
+
+                initial_state_root: HashOutTarget {
+                    elements: [
+                        pis[initial_state_root_index],
+                        pis[initial_state_root_index + 1],
+                        pis[initial_state_root_index + 2],
+                        pis[initial_state_root_index + 3],
+                    ],
+                },
+                initial_account_delta_tree_root: HashOutTarget {
+                    elements: [
+                        pis[initial_delta_root_index],
+                        pis[initial_delta_root_index + 1],
+                        pis[initial_delta_root_index + 2],
+                        pis[initial_delta_root_index + 3],
+                    ],
+                },
             },
             total_pis_size,
         )
@@ -364,7 +365,6 @@ impl BlockTxChainWitnessTarget {
         builder.connect(self.block_number, other.block_number);
         builder.connect(self.created_at, other.created_at);
 
-        builder.connect_hashes(self.old_state_root, other.old_state_root);
         builder.connect_hashes(self.new_validium_root, other.new_validium_root);
         builder.connect_hashes(self.new_state_root, other.new_state_root);
         builder.connect_hashes(
@@ -402,10 +402,17 @@ impl BlockTxChainWitnessTarget {
             builder.connect_u8(*byte, other.priority_operations_pub_data[i]);
         }
 
-        connect_public_market_details(
-            builder,
-            &self.new_public_market_details,
-            &other.new_public_market_details,
+        builder.connect_hashes(
+            self.new_public_market_details_hash,
+            other.new_public_market_details_hash,
+        );
+
+        JumpStateTarget::connect(builder, &self.jump, &other.jump);
+
+        builder.connect_hashes(self.initial_state_root, other.initial_state_root);
+        builder.connect_hashes(
+            self.initial_account_delta_tree_root,
+            other.initial_account_delta_tree_root,
         );
     }
 }

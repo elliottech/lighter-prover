@@ -28,7 +28,7 @@ use crate::types::constants::{
     MAX_ORDER_BASE_AMOUNT, ORDER_PRICE_BITS, POSITION_SIZE_BITS, PUBLIC_POOL_ACCOUNT_TYPE,
     QUOTE_MULTIPLIER_BITS, USDC_TO_COLLATERAL_MULTIPLIER,
 };
-use crate::types::market_details::MarketDetailsTarget;
+use crate::types::market_details::MarketRiskDetailsTarget;
 use crate::utils::CircuitBuilderUtils;
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -458,7 +458,7 @@ pub fn random_access_account_position(
 
 pub fn get_position_unrealized_pnl(
     builder: &mut Builder,
-    market_details: &MarketDetailsTarget,
+    market_details: &MarketRiskDetailsTarget,
     position_abs: Target,
     position_sign: SignTarget,
     entry_quote: Target,

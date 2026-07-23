@@ -24,6 +24,7 @@ use crate::comparison::CircuitBuilderSubtractiveComparison;
 use crate::hash_utils::CircuitBuilderHashUtils;
 use crate::hints::CircuitBuilderHints;
 use crate::signed::signed_target::{CircuitBuilderSigned, SignedTarget};
+use crate::tx_constraints::compute_validium_and_state_root;
 use crate::types::asset::{AssetTarget, AssetTargetWitness, all_assets_hash};
 use crate::types::config::{BIGU16_U64_LIMBS, Builder, C, D, F};
 use crate::types::constants::*;
@@ -32,8 +33,8 @@ use crate::types::margined_asset::{
     connect_margined_assets,
 };
 use crate::types::market_details::{
-    MarketDetailsTarget, MarketDetailsWitness, all_market_details_hash,
-    all_public_market_details_hash, connect_market_details,
+    MarketDetailsTarget, MarketDetailsWitness, MarketRiskDetailsTarget, MarketRiskDetailsWitness,
+    all_market_details_hashes, connect_market_risk_details, get_market_details_tree_root,
 };
 use crate::types::price_updates::{PriceUpdatesTarget, PriceUpdatesWitness};
 use crate::types::register::{RegisterInfoTargetWitness, RegisterStackTarget};
@@ -91,6 +92,7 @@ pub struct BlockPreExecutionTarget {
     pub all_assets_before: [AssetTarget; ASSET_LIST_SIZE],
     pub all_margined_assets_before: [MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
     pub all_market_details_before: [MarketDetailsTarget; POSITION_LIST_SIZE],
+    pub all_market_risk_details_before: [MarketRiskDetailsTarget; POSITION_LIST_SIZE],
     pub state_metadata_target: StateMetadataTarget,
 
     /***************************/
@@ -109,11 +111,11 @@ pub struct BlockPreExecutionTarget {
     pub old_market_tree_root: HashOutTarget,
     pub old_state_root: HashOutTarget,
 
-    pub all_market_details_after: [MarketDetailsTarget; POSITION_LIST_SIZE], // Public
-    pub all_margined_assets_after: [MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE], // Public
-    pub new_state_metadata_target: StateMetadataTarget,                      // Public
-    pub new_state_root: HashOutTarget,                                       // Public
-    pub new_validium_root: HashOutTarget,                                    // Public
+    pub all_market_risk_details_after: [MarketRiskDetailsTarget; POSITION_LIST_SIZE], // Public
+    pub all_margined_assets_after: [MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],   // Public
+    pub new_state_metadata_target: StateMetadataTarget,                               // Public
+    pub new_state_root: HashOutTarget,                                                // Public
+    pub new_validium_root: HashOutTarget,                                             // Public
 
     // Helpers
     all_assets_hash: HashOutTarget,
@@ -127,11 +129,16 @@ impl Circuit<C, F, D> for BlockPreExecutionCircuit {
 
         circuit.define_block_state_data_checks();
 
-        let (all_market_details_after, all_margined_assets_after, new_state_metadata) =
-            circuit.define_block_pre_execution();
+        let (
+            all_market_details_after,
+            all_market_risk_details_after,
+            all_margined_assets_after,
+            new_state_metadata,
+        ) = circuit.define_block_pre_execution();
 
         circuit.define_post_block_pre_execution(
             &all_market_details_after,
+            &all_market_risk_details_after,
             &all_margined_assets_after,
             &new_state_metadata,
         );
@@ -191,6 +198,12 @@ impl Circuit<C, F, D> for BlockPreExecutionCircuit {
             .zip(block.all_market_details.iter())
             .try_for_each(|(t, mi)| pw.set_market_details_target(t, mi))?;
 
+        target
+            .all_market_risk_details_before
+            .iter()
+            .zip(block.all_market_risk_details.iter())
+            .try_for_each(|(t, mrd)| pw.set_market_risk_details_target(t, mrd))?;
+
         pw.set_price_updates_target(&target.price_updates, &block.price_updates)?;
         pw.set_bool_target(target.calculate_premium, block.calculate_premium)?;
         pw.set_bool_target(target.calculate_funding, block.calculate_funding)?;
@@ -240,6 +253,11 @@ impl BlockPreExecutionCircuit {
                     .collect::<Vec<_>>()
                     .try_into()
                     .unwrap(),
+                all_market_risk_details_before: (0..POSITION_LIST_SIZE)
+                    .map(|_| MarketRiskDetailsTarget::new(&mut builder))
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .unwrap(),
 
                 price_updates: PriceUpdatesTarget::new(&mut builder),
                 calculate_premium: builder.add_virtual_bool_target_safe(),
@@ -253,8 +271,8 @@ impl BlockPreExecutionCircuit {
 
                 state_metadata_target: StateMetadataTarget::new(&mut builder),
 
-                all_market_details_after: (0..POSITION_LIST_SIZE)
-                    .map(|_| MarketDetailsTarget::new(&mut builder))
+                all_market_risk_details_after: (0..POSITION_LIST_SIZE)
+                    .map(|_| MarketRiskDetailsTarget::new(&mut builder))
                     .collect::<Vec<_>>()
                     .try_into()
                     .unwrap(),
@@ -282,10 +300,10 @@ impl BlockPreExecutionCircuit {
 
         // Register market details
         self.target
-            .all_market_details_after
+            .all_market_risk_details_after
             .iter()
             .for_each(|market| {
-                market.register_public_input(&mut self.builder);
+                market.partial_register_public_input(&mut self.builder);
             });
 
         // Register margined assets
@@ -317,28 +335,30 @@ impl BlockPreExecutionCircuit {
             all_assets_hash(&mut self.builder, &self.target.all_assets_before);
         let all_margined_assets_hash =
             all_margined_assets_hash(&mut self.builder, &self.target.all_margined_assets_before);
-
-        let old_all_market_details_hash =
-            all_market_details_hash(&mut self.builder, &current_all_market_details);
         let old_state_metadata_hash = self.target.state_metadata_target.hash(&mut self.builder);
-        let old_public_market_details_hash =
-            all_public_market_details_hash(&mut self.builder, &current_all_market_details);
-        let old_validium_root = self.builder.hash_n_to_one(&[
-            old_register_stack_hash,
-            self.target.old_account_tree_root,
-            self.target.old_market_tree_root,
+
+        let (old_all_market_risk_details_hash, old_public_market_details_hash, _) =
+            all_market_details_hashes(
+                &mut self.builder,
+                &self.target.all_market_risk_details_before,
+            );
+        let old_market_details_tree_root =
+            get_market_details_tree_root(&mut self.builder, &current_all_market_details);
+
+        let (_, old_state_root) = compute_validium_and_state_root(
+            &mut self.builder,
+            old_system_config_hash,
             self.target.all_assets_hash,
             all_margined_assets_hash,
-            old_all_market_details_hash,
-            old_state_metadata_hash,
-            old_system_config_hash,
-        ]);
-
-        let old_state_root = self.builder.hash_n_to_one(&[
-            self.target.old_account_pub_data_tree_root,
+            old_all_market_risk_details_hash,
             old_public_market_details_hash,
-            old_validium_root,
-        ]);
+            old_register_stack_hash,
+            self.target.old_account_tree_root,
+            self.target.old_account_pub_data_tree_root,
+            old_market_details_tree_root,
+            self.target.old_market_tree_root,
+            old_state_metadata_hash,
+        );
 
         self.builder
             .connect_hashes(old_state_root, self.target.old_state_root);
@@ -363,6 +383,7 @@ impl BlockPreExecutionCircuit {
         &mut self,
     ) -> (
         [MarketDetailsTarget; POSITION_LIST_SIZE],
+        [MarketRiskDetailsTarget; POSITION_LIST_SIZE],
         [MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
         StateMetadataTarget,
     ) {
@@ -427,11 +448,17 @@ impl BlockPreExecutionCircuit {
 
         let eight = builder.constant_usize(8);
         let funding_premium_multiplier_tick = builder.constant_u64(FUNDING_PREMIUM_MULTIPLIER_TICK);
-        let market_details_after = core::array::from_fn(|market_index| {
-            let mut market_details = self.target.all_market_details_before[market_index].clone();
+        let mut market_risk_details_after: [MarketRiskDetailsTarget; POSITION_LIST_SIZE] =
+            self.target.all_market_risk_details_before.clone();
+        let mut market_details_after: [MarketDetailsTarget; POSITION_LIST_SIZE] =
+            self.target.all_market_details_before.clone();
+        for market_index in 0..POSITION_LIST_SIZE {
+            let market_details = &mut market_details_after[market_index];
+            let market_risk_details = &mut market_risk_details_after[market_index];
 
             let active_market_status = builder.constant(F::from_canonical_u8(MARKET_STATUS_ACTIVE));
-            let is_market_active = builder.is_equal(market_details.status, active_market_status);
+            let is_market_active =
+                builder.is_equal(market_risk_details.status, active_market_status);
 
             /*********************/
             /*   Apply Funding   */
@@ -508,7 +535,7 @@ impl BlockPreExecutionCircuit {
             };
 
             let new_funding_rate_prefix_sum = builder.add_bigint_u16_non_carry(
-                &market_details.funding_rate_prefix_sum,
+                &market_risk_details.funding_rate_prefix_sum,
                 &funding_value,
                 BIGU16_U64_LIMBS,
             );
@@ -516,10 +543,10 @@ impl BlockPreExecutionCircuit {
                 &new_funding_rate_prefix_sum.abs,
                 FUNDING_RATE_PREFIX_SUM_BITS,
             );
-            market_details.funding_rate_prefix_sum = builder.select_bigint_u16(
+            market_risk_details.funding_rate_prefix_sum = builder.select_bigint_u16(
                 should_apply_funding,
                 &new_funding_rate_prefix_sum,
-                &market_details.funding_rate_prefix_sum,
+                &market_risk_details.funding_rate_prefix_sum,
             );
 
             // Reset premium sum at funding rounds
@@ -555,7 +582,7 @@ impl BlockPreExecutionCircuit {
             );
             let (max_open_interest_mark_price, _) = builder.div_rem(
                 max_open_interest_mark_price,
-                market_details.quote_multiplier,
+                market_risk_details.quote_multiplier,
                 QUOTE_MULTIPLIER_BITS,
             );
 
@@ -593,10 +620,10 @@ impl BlockPreExecutionCircuit {
                 self.target.price_updates.index_price[market_index],
                 market_details.index_price,
             );
-            market_details.mark_price = builder.select(
+            market_risk_details.mark_price = builder.select(
                 should_update_oracle_price,
                 self.target.price_updates.mark_price[market_index],
-                market_details.mark_price,
+                market_risk_details.mark_price,
             );
 
             /**************************/
@@ -665,9 +692,7 @@ impl BlockPreExecutionCircuit {
                 new_aggregate_premium_sum,
                 market_details.aggregate_premium_sum,
             );
-
-            market_details
-        });
+        }
 
         let margined_assets_after = core::array::from_fn(|asset_index| {
             builder.register_range_check(
@@ -713,6 +738,7 @@ impl BlockPreExecutionCircuit {
 
         (
             market_details_after,
+            market_risk_details_after,
             margined_assets_after,
             new_state_metadata,
         )
@@ -721,37 +747,38 @@ impl BlockPreExecutionCircuit {
     fn define_post_block_pre_execution(
         &mut self,
         all_market_details_after: &[MarketDetailsTarget; POSITION_LIST_SIZE],
+        all_market_risk_details_after: &[MarketRiskDetailsTarget; POSITION_LIST_SIZE],
         all_margined_assets_after: &[MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
         new_state_metadata: &StateMetadataTarget,
     ) {
         let old_system_config_hash = self.target.old_system_config.hash(&mut self.builder);
         let old_register_stack_hash = self.target.register_stack_before.hash(&mut self.builder);
-        let new_all_market_details_hash =
-            all_market_details_hash(&mut self.builder, all_market_details_after);
         let new_state_metadata_hash = new_state_metadata.hash(&mut self.builder);
-        let new_all_public_market_details_hash =
-            all_public_market_details_hash(&mut self.builder, all_market_details_after);
         let new_all_margined_assets_hash =
             all_margined_assets_hash(&mut self.builder, all_margined_assets_after);
-        let new_validium_root = self.builder.hash_n_to_one(&[
-            old_register_stack_hash,
-            self.target.old_account_tree_root,
-            self.target.old_market_tree_root,
+
+        let (new_all_market_risk_details_hash, new_all_public_market_details_hash, _) =
+            all_market_details_hashes(&mut self.builder, all_market_risk_details_after);
+        let new_market_details_tree_root =
+            get_market_details_tree_root(&mut self.builder, all_market_details_after);
+
+        let (new_validium_root, new_state_root) = compute_validium_and_state_root(
+            &mut self.builder,
+            old_system_config_hash,
             self.target.all_assets_hash,
             new_all_margined_assets_hash,
-            new_all_market_details_hash,
+            new_all_market_risk_details_hash,
+            new_all_public_market_details_hash,
+            old_register_stack_hash,
+            self.target.old_account_tree_root,
+            self.target.old_account_pub_data_tree_root,
+            new_market_details_tree_root,
+            self.target.old_market_tree_root,
             new_state_metadata_hash,
-            old_system_config_hash,
-        ]);
+        );
 
         self.builder
             .connect_hashes(new_validium_root, self.target.new_validium_root);
-
-        let new_state_root = self.builder.hash_n_to_one(&[
-            self.target.old_account_pub_data_tree_root,
-            new_all_public_market_details_hash,
-            new_validium_root,
-        ]);
 
         self.builder
             .connect_hashes(new_state_root, self.target.new_state_root);
@@ -763,11 +790,11 @@ impl BlockPreExecutionCircuit {
             &self.target.new_state_metadata_target,
         );
 
-        all_market_details_after
+        all_market_risk_details_after
             .iter()
-            .zip_eq(self.target.all_market_details_after.iter())
+            .zip_eq(self.target.all_market_risk_details_after.iter())
             .for_each(|(x, y)| {
-                connect_market_details(&mut self.builder, x, y);
+                connect_market_risk_details(&mut self.builder, x, y);
             });
 
         all_margined_assets_after

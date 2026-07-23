@@ -63,11 +63,16 @@ use crate::types::account_asset::AccountAsset;
 use crate::types::account_delta::AccountDelta;
 use crate::types::account_order::AccountOrder;
 use crate::types::api_key::ApiKey;
+use crate::types::asset::Asset;
 use crate::types::config::F;
 use crate::types::constants::*;
+use crate::types::margined_asset::MarginedAsset;
 use crate::types::market::Market;
+use crate::types::market_details::{MarketDetails, MarketRiskDetails};
 use crate::types::order::Order;
 use crate::types::order_book_node::OrderBookNode;
+use crate::types::register::RegisterStack;
+use crate::types::system_config::SystemConfig;
 
 #[serde_as]
 #[derive(Clone, Debug, Deserialize)]
@@ -78,6 +83,13 @@ where
 {
     #[serde(rename = "tx_type")]
     pub tx_type: u8,
+
+    #[serde(rename = "tct")]
+    #[serde(default)]
+    pub tx_circuit_type: u8,
+
+    #[serde(skip)]
+    pub tx_index: u64,
 
     #[serde(rename = "1d")]
     #[serde(default)]
@@ -311,6 +323,9 @@ where
     #[serde(rename = "mmb")]
     pub market_before: Market<F>,
 
+    #[serde(rename = "mdb")]
+    pub market_details_before: MarketDetails,
+
     #[serde(rename = "obinfob")]
     #[serde(default)]
     pub order_before: Order,
@@ -323,6 +338,53 @@ where
     #[serde(rename = "ai")]
     #[serde(default)]
     pub asset_indices: [i16; NB_ASSETS_PER_TX],
+
+    #[serde(rename = "osc", default)]
+    pub system_config_before: SystemConfig,
+
+    #[serde(rename = "rb", default)]
+    #[serde(deserialize_with = "deserializers::register_stack")]
+    pub register_stack_before: RegisterStack,
+
+    #[serde(rename = "aasb")]
+    #[serde_as(as = "[_; ASSET_LIST_SIZE]")]
+    pub all_assets_before: [Asset; ASSET_LIST_SIZE],
+
+    #[serde(rename = "amab")]
+    #[serde_as(as = "[_; MARGINED_ASSET_LIST_SIZE]")]
+    pub all_margined_assets_before: [MarginedAsset; MARGINED_ASSET_LIST_SIZE],
+
+    #[serde(rename = "amrdb")]
+    #[serde_as(as = "[_; POSITION_LIST_SIZE]")]
+    pub all_market_risk_details_before: [MarketRiskDetails; POSITION_LIST_SIZE],
+
+    #[serde(rename = "oatr")]
+    #[serde(deserialize_with = "deserializers::hash_out")]
+    pub old_account_tree_root: HashOut<F>,
+
+    #[serde(rename = "oapt")]
+    #[serde(deserialize_with = "deserializers::hash_out")]
+    pub old_account_pub_data_tree_root: HashOut<F>,
+
+    #[serde(rename = "oapdtr")]
+    #[serde(deserialize_with = "deserializers::hash_out")]
+    pub old_account_delta_tree_root: HashOut<F>,
+
+    #[serde(rename = "omdtr")]
+    #[serde(deserialize_with = "deserializers::hash_out")]
+    pub old_market_details_tree_root: HashOut<F>,
+
+    #[serde(rename = "omtr")]
+    #[serde(deserialize_with = "deserializers::hash_out")]
+    pub old_market_tree_root: HashOut<F>,
+
+    #[serde(rename = "ovr")]
+    #[serde(deserialize_with = "deserializers::hash_out")]
+    pub old_validium_root: HashOut<F>,
+
+    #[serde(rename = "osr")]
+    #[serde(deserialize_with = "deserializers::hash_out")]
+    pub old_state_root: HashOut<F>,
 
     /*****************************/
     /*  STATE TREE MERKLE PROOFS */
@@ -370,6 +432,10 @@ where
     #[serde(rename = "mpmmb")]
     #[serde(deserialize_with = "deserializers::market_tree_merkle_proof")]
     pub market_tree_merkle_proof: [HashOut<F>; MARKET_MERKLE_LEVELS],
+
+    #[serde(rename = "mpmdb")]
+    #[serde(deserialize_with = "deserializers::market_details_tree_merkle_proof")]
+    pub market_details_tree_merkle_proof: [HashOut<F>; MARKET_DETAILS_TREE_HEIGHT],
 
     #[serde(rename = "obpb")]
     #[serde_as(as = "[_; ORDER_BOOK_MERKLE_LEVELS]")]

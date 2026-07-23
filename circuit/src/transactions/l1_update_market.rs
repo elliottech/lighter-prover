@@ -15,7 +15,9 @@ use crate::tx_interface::{Apply, PriorityOperationsPubData, Verify};
 use crate::types::config::{Builder, F};
 use crate::types::constants::*;
 use crate::types::market::{MarketTarget, ensure_spot_market_index, select_market};
-use crate::types::market_details::{MarketDetailsTarget, select_market_details};
+use crate::types::market_details::{
+    MarketDetailsTarget, MarketRiskDetailsTarget, select_market_details, select_market_risk_details,
+};
 use crate::types::target_pub_data_helper::*;
 use crate::types::tx_state::TxState;
 use crate::types::tx_type::TxTypeTargets;
@@ -287,32 +289,35 @@ impl Apply for L1UpdateMarketTxTarget {
 
         let is_perps_market_type = builder.is_equal_constant(self.market_type, MARKET_TYPE_PERPS);
         let update_market_details_flag = builder.and(self.success, is_perps_market_type);
-        tx_state.market_details = MarketDetailsTarget {
+        tx_state.market_risk_details = MarketRiskDetailsTarget {
             status: builder.select(
                 update_market_details_flag,
                 self.status,
-                tx_state.market_details.status,
+                tx_state.market_risk_details.status,
             ),
             min_initial_margin_fraction: builder.select(
                 update_market_details_flag,
                 self.min_initial_margin_fraction,
-                tx_state.market_details.min_initial_margin_fraction,
+                tx_state.market_risk_details.min_initial_margin_fraction,
             ),
             default_initial_margin_fraction: builder.select(
                 update_market_details_flag,
                 self.default_initial_margin_fraction,
-                tx_state.market_details.default_initial_margin_fraction,
+                tx_state.market_risk_details.default_initial_margin_fraction,
             ),
             maintenance_margin_fraction: builder.select(
                 update_market_details_flag,
                 self.maintenance_margin_fraction,
-                tx_state.market_details.maintenance_margin_fraction,
+                tx_state.market_risk_details.maintenance_margin_fraction,
             ),
             close_out_margin_fraction: builder.select(
                 update_market_details_flag,
                 self.close_out_margin_fraction,
-                tx_state.market_details.close_out_margin_fraction,
+                tx_state.market_risk_details.close_out_margin_fraction,
             ),
+            ..tx_state.market_risk_details.clone()
+        };
+        tx_state.market_details = MarketDetailsTarget {
             interest_rate: builder.select(
                 update_market_details_flag,
                 self.interest_rate,
@@ -380,6 +385,14 @@ impl Apply for L1UpdateMarketTxTarget {
             clear_market_details_flag,
             &empty_market_detail,
             &tx_state.market_details,
+        );
+
+        let empty_market_risk_detail = MarketRiskDetailsTarget::empty(builder);
+        tx_state.market_risk_details = select_market_risk_details(
+            builder,
+            clear_market_details_flag,
+            &empty_market_risk_detail,
+            &tx_state.market_risk_details,
         );
 
         self.success

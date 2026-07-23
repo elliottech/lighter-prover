@@ -134,7 +134,7 @@ impl Verify for L2UpdateMarketConfigTxTarget {
         // Make sure market is active
         builder.conditional_assert_eq_constant(
             is_enabled,
-            tx_state.market_details.status,
+            tx_state.market_risk_details.status,
             MARKET_STATUS_ACTIVE as u64,
         );
 
@@ -182,10 +182,10 @@ impl Verify for L2UpdateMarketConfigTxTarget {
 
 impl Apply for L2UpdateMarketConfigTxTarget {
     fn apply(&mut self, builder: &mut Builder, tx_state: &mut TxState) -> BoolTarget {
-        tx_state.market_details.strategy_index = builder.select(
+        tx_state.market_risk_details.strategy_index = builder.select(
             self.success,
             self.strategy_index,
-            tx_state.market_details.strategy_index,
+            tx_state.market_risk_details.strategy_index,
         );
         tx_state.market_details.market_flags = builder.select(
             self.success,

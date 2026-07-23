@@ -167,24 +167,31 @@ use crate::types::account_position::{
     AccountPositionTarget, PositionWithDelta, random_access_account_position,
 };
 use crate::types::api_key::{ApiKeyTarget, ApiKeyTargetWitness};
-use crate::types::asset::{AssetTarget, apply_diff_assets, diff_assets, random_access_assets};
-use crate::types::config::{BIG_U96_LIMBS, Builder, F};
+use crate::types::asset::{
+    AssetTarget, AssetTargetWitness, all_assets_hash, apply_diff_assets, diff_assets,
+    random_access_assets,
+};
+use crate::types::config::{BIG_U96_LIMBS, Builder};
 use crate::types::constants::*;
 use crate::types::margined_asset::{
-    MarginedAssetTarget, apply_diff_margined_assets, diff_margined_assets,
-    random_access_margined_assets,
+    MarginedAssetTarget, MarginedAssetTargetWitness, all_margined_assets_hash,
+    apply_diff_margined_assets, diff_margined_assets, random_access_margined_assets,
 };
 use crate::types::market::{MarketTarget, MarketTargetWitness};
 use crate::types::market_details::{
-    MarketDetailsTarget, apply_diff_market_details, diff_market_details,
-    random_access_market_details, select_market_details,
+    MarketDetailsTarget, MarketDetailsWitness, MarketRiskDetailsTarget, MarketRiskDetailsWitness,
+    all_market_details_hashes, apply_diff_market_risk_details, diff_market_risk_details,
+    market_details_hashes_from_bucket_hashes, market_risk_details_bucket_hash,
+    random_access_market_risk_details,
 };
 use crate::types::order::{OrderTarget, OrderTargetWitness};
 use crate::types::order_book_node::{OrderBookNodeTarget, OrderBookNodeTargetWitness};
 use crate::types::public_pool::{PublicPoolInfoTarget, PublicPoolShareTarget};
-use crate::types::register::{BaseRegisterInfoTarget, RegisterStackTarget};
+use crate::types::register::{
+    BaseRegisterInfoTarget, RegisterInfoTargetWitness, RegisterStackTarget,
+};
 use crate::types::risk_info::RiskInfoTarget;
-use crate::types::system_config::SystemConfigTarget;
+use crate::types::system_config::{SystemConfigTarget, SystemConfigTargetWitness};
 use crate::types::tx_state::TxState;
 use crate::types::tx_type::{TxTypeTargets, TxTypeVerifyTargets};
 use crate::uint::u8::{CircuitBuilderU8, U8Target};
@@ -193,6 +200,7 @@ use crate::utils::CircuitBuilderUtils;
 #[derive(Debug)]
 pub struct TxTarget {
     pub tx_type: Target,
+    pub tx_index: Target,
 
     /***********************/
     /*   L1 Transactions   */
@@ -275,6 +283,7 @@ pub struct TxTarget {
     pub api_key_before: ApiKeyTarget,
     pub account_order_before: AccountOrderTarget,
     pub market_before: MarketTarget,
+    pub market_details_before: MarketDetailsTarget,
     pub order_before: OrderTarget,
     pub asset_indices: [Target; NB_ASSETS_PER_TX],
 
@@ -299,7 +308,25 @@ pub struct TxTarget {
     pub account_orders_tree_merkle_proof:
         [[HashOutTarget; ACCOUNT_ORDERS_MERKLE_LEVELS]; NB_ACCOUNT_ORDERS_PATHS_PER_TX],
     pub market_tree_merkle_proof: [HashOutTarget; MARKET_MERKLE_LEVELS],
+    pub market_details_tree_merkle_proof: [HashOutTarget; MARKET_DETAILS_TREE_HEIGHT],
     pub order_book_tree_path: [OrderBookNodeTarget; ORDER_BOOK_MERKLE_LEVELS],
+
+    pub system_config_before: SystemConfigTarget,
+    pub register_stack_before: RegisterStackTarget,
+    pub all_assets_before: [AssetTarget; ASSET_LIST_SIZE],
+    pub all_margined_assets_before: [MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
+    pub all_market_risk_details_before: [MarketRiskDetailsTarget; POSITION_LIST_SIZE],
+
+    pub old_account_tree_root: HashOutTarget,
+    pub old_account_pub_data_tree_root: HashOutTarget,
+    pub old_account_delta_tree_root: HashOutTarget,
+    pub old_market_details_tree_root: HashOutTarget,
+    pub old_market_tree_root: HashOutTarget,
+
+    pub old_validium_root: HashOutTarget,
+    pub old_state_root: HashOutTarget,
+    pub new_validium_root: HashOutTarget,
+    pub new_state_root: HashOutTarget,
 
     /*************************/
     /*  Impact Price Helpers */
@@ -320,6 +347,7 @@ impl TxTarget {
     pub fn new(builder: &mut Builder) -> Self {
         Self {
             tx_type: builder.add_virtual_target(),
+            tx_index: builder.add_virtual_target(),
 
             /***********************/
             /*   L1 Transactions   */
@@ -476,6 +504,7 @@ impl TxTarget {
             api_key_before: ApiKeyTarget::new(builder),
             account_order_before: AccountOrderTarget::new(builder),
             market_before: MarketTarget::new(builder),
+            market_details_before: MarketDetailsTarget::new(builder),
             order_before: OrderTarget::new(builder),
             asset_indices: core::array::from_fn(|_| builder.add_virtual_target()),
 
@@ -499,7 +528,28 @@ impl TxTarget {
                 array::from_fn(|_| builder.add_virtual_hash())
             }),
             market_tree_merkle_proof: array::from_fn(|_| builder.add_virtual_hash()),
+            market_details_tree_merkle_proof: array::from_fn(|_| builder.add_virtual_hash()),
             order_book_tree_path: array::from_fn(|_| OrderBookNodeTarget::new(builder)),
+
+            system_config_before: SystemConfigTarget::new(builder),
+            register_stack_before: RegisterStackTarget::new(builder),
+            all_assets_before: array::from_fn(|_| AssetTarget::new(builder)),
+            all_margined_assets_before: array::from_fn(|_| MarginedAssetTarget::new(builder)),
+            all_market_risk_details_before: array::from_fn(|_| {
+                MarketRiskDetailsTarget::new(builder)
+            }),
+
+            old_account_tree_root: builder.add_virtual_hash(),
+            old_account_pub_data_tree_root: builder.add_virtual_hash(),
+            old_account_delta_tree_root: builder.add_virtual_hash(),
+            old_market_details_tree_root: builder.add_virtual_hash(),
+            old_market_tree_root: builder.add_virtual_hash(),
+
+            old_validium_root: builder.add_virtual_hash(),
+            old_state_root: builder.add_virtual_hash(),
+            new_validium_root: builder.add_virtual_hash(),
+            new_state_root: builder.add_virtual_hash(),
+
             asset_tree_merkle_proofs: array::from_fn(|_| {
                 array::from_fn(|_| array::from_fn(|_| builder.add_virtual_hash()))
             }),
@@ -531,29 +581,14 @@ impl TxTarget {
         chain_id: u32,
         builder: &mut Builder,
         block_created_at: Target,
-        system_config_before: &SystemConfigTarget,
-        register_stack_before: &RegisterStackTarget,
-        all_assets_before: &[AssetTarget; ASSET_LIST_SIZE],
-        all_margined_assets_before: &[MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
-        all_market_details_before: &[MarketDetailsTarget; POSITION_LIST_SIZE],
-        account_tree_root_before: HashOutTarget,
-        account_pub_data_tree_root_before: HashOutTarget,
-        account_delta_tree_root_before: HashOutTarget,
-        market_tree_root_before: HashOutTarget,
+        state_metadata_hash: HashOutTarget,
     ) -> (
         [U8Target; MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX], // priority operation's public data
         BoolTarget,                                                // is there a priority operation
         [U8Target; ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE], // on chain operation's public data
         BoolTarget,                                          // is there a on chain operation
-        SystemConfigTarget,                                  // system config after
-        RegisterStackTarget,                                 // register stack after
-        [AssetTarget; ASSET_LIST_SIZE],                      // all assets after
-        [MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],     // all margined assets after
-        [MarketDetailsTarget; POSITION_LIST_SIZE],           // all market details after
-        HashOutTarget,                                       // account tree root after
-        HashOutTarget, // account public data delta tree root after
-        HashOutTarget, // account public data tree root after
-        HashOutTarget, // market tree root after
+        HashOutTarget,                                       // public market details hash
+        HashOutTarget,                                       // account delta tree root
     ) {
         let tx_type = TxTypeTargets::new(builder, self.tx_type);
         let tx_hash = self.select_tx_hash(builder, &tx_type, chain_id);
@@ -571,7 +606,7 @@ impl TxTarget {
                 signature: self.signature.clone(),
                 account_pk,
                 tx_hash,
-                instruction_type: register_stack_before[0].instruction_type,
+                instruction_type: self.register_stack_before[0].instruction_type,
                 tx_sender_account_partial: partial_main_account,
                 sub_account_index: self.accounts_before[SUB_ACCOUNT_ID].account_index,
                 skip_tx_nonce: self.attributes.get(ATTR_SKIP_TX_NONCE),
@@ -582,11 +617,14 @@ impl TxTarget {
         /*  Initialize Helper State Data  */
         /**********************************/
         let assets_before: [AssetTarget; NB_ASSETS_PER_TX] = core::array::from_fn(|i| {
-            random_access_assets(builder, self.asset_indices[i], all_assets_before.to_vec())
+            random_access_assets(
+                builder,
+                self.asset_indices[i],
+                self.all_assets_before.to_vec(),
+            )
         });
         // Load the margin asset belongs to first asset loaded. For L1 register/update asset, load the target margin index
-        let next_margin_asset_index =
-            self.get_next_margin_asset_index(builder, all_margined_assets_before);
+        let next_margin_asset_index = self.get_next_margin_asset_index(builder);
         let mut first_asset_margin_index = assets_before[0].margin_index(builder);
         first_asset_margin_index = builder.select(
             tx_type.is_l1_register_asset,
@@ -598,16 +636,14 @@ impl TxTarget {
             random_access_margined_assets(
                 builder,
                 first_asset_margin_index,
-                all_margined_assets_before,
+                &self.all_margined_assets_before,
             ),
             random_access_margined_assets(
                 builder,
                 second_asset_margin_index,
-                all_margined_assets_before,
+                &self.all_margined_assets_before,
             ),
         ];
-        let market_details_before =
-            self.get_market_details_with_random_access(builder, all_market_details_before);
         let positions_with_pub_data_before: [PositionWithDelta; NB_ACCOUNTS_PER_TX - 1] =
             PositionWithDelta::new_positions_with_pub_data_from_accounts(
                 builder,
@@ -641,16 +677,19 @@ impl TxTarget {
                     .unwrap()
             });
 
+        let market_risk_details_before =
+            self.get_market_risk_details_before(builder, &self.all_market_risk_details_before);
+
         let risk_infos_before = self.get_risk_infos_before(
             builder,
             &tx_type,
             &positions_with_pub_data_before,
-            &market_details_before,
-            all_market_details_before,
-            all_margined_assets_before,
+            &market_risk_details_before,
+            &self.all_market_risk_details_before,
+            &self.all_margined_assets_before,
         );
         let (strategy_indexes, strategies_before) =
-            self.get_strategies_before(builder, &tx_type, &market_details_before);
+            self.get_strategies_before(builder, &tx_type, &market_risk_details_before);
         let order_path_helper = order_indexes_to_merkle_path(
             builder,
             self.order_before.price_index,
@@ -669,7 +708,7 @@ impl TxTarget {
             builder,
             &self.accounts_before[OWNER_ACCOUNT_ID],
             &self.market_before,
-            system_config_before,
+            &self.system_config_before,
             block_created_at,
         );
 
@@ -681,13 +720,14 @@ impl TxTarget {
             next_margin_asset_index,
             new_instructions: [BaseRegisterInfoTarget::empty(builder); NEW_INSTRUCTIONS_MAX_SIZE],
             new_instructions_count: builder.zero(),
-            register_stack: *register_stack_before,
-            system_config: *system_config_before,
+            register_stack: self.register_stack_before,
+            system_config: self.system_config_before,
             accounts: self.accounts_before.clone(),
             accounts_delta: self.accounts_delta_before.clone(),
             is_new_account: old_account_empty_infos,
             market: self.market_before.clone(),
-            market_details: market_details_before.clone(),
+            market_details: self.market_details_before.clone(),
+            market_risk_details: market_risk_details_before.clone(),
             order: self.order_before.clone(),
             order_book_tree_path: self.order_book_tree_path.clone(),
             positions: core::array::from_fn(|i| positions_with_pub_data_before[i].position.clone()),
@@ -774,21 +814,19 @@ impl TxTarget {
 
         self.apply_account_deltas(builder, tx_state, &position_usdc_deltas);
 
-        self.update_impact_prices(builder, tx_state, &market_details_before);
+        self.update_impact_prices(builder, tx_state, &market_risk_details_before);
 
-        let current_all_market_details = self.update_market_details(
+        let market_risk_details_diff = diff_market_risk_details(
             builder,
-            all_market_details_before,
-            &market_details_before,
-            &tx_state.market_details,
+            &tx_state.market_risk_details,
+            &market_risk_details_before,
         );
-
         let (current_all_assets, current_all_margined_assets) = self.update_assets(
             builder,
-            all_assets_before,
+            &self.all_assets_before,
             &assets_before,
             &tx_state.assets,
-            all_margined_assets_before,
+            &self.all_margined_assets_before,
             &[tx_state.first_asset_margin_index, second_asset_margin_index],
             &margined_asset_before
                 .iter()
@@ -810,6 +848,9 @@ impl TxTarget {
         /*************************/
         /*  VERIFY STATE LEAVES  */
         /*************************/
+        let (_, _, _, _, _, old_market_risk_details_bucket_hashes) =
+            self.verify_old_state_root(builder, state_metadata_hash);
+
         self.verify_position_delta_merkle_proofs(builder, tx_state, &old_position_delta_hashes);
 
         self.verify_api_key_merkle_proof(builder, tx_state, &tx_type);
@@ -825,59 +866,119 @@ impl TxTarget {
         ) = self.verify_account_and_pub_data_merkle_proofs(
             builder,
             tx_state,
-            account_tree_root_before,
-            account_pub_data_tree_root_before,
-            account_delta_tree_root_before,
+            self.old_account_tree_root,
+            self.old_account_pub_data_tree_root,
+            self.old_account_delta_tree_root,
             &old_account_hashes,
             &position_bucket_hashes,
         );
 
         let current_market_tree_root =
-            self.verify_market_and_order_book_proofs(builder, tx_state, market_tree_root_before);
+            self.verify_market_and_order_book_proofs(builder, tx_state, self.old_market_tree_root);
+
+        let current_market_details_tree_root = self.verify_market_details_merkle_proof(
+            builder,
+            tx_state,
+            self.old_market_details_tree_root,
+        );
+
+        let current_system_config_hash = tx_state.system_config.hash(builder);
+        let current_assets_hash = all_assets_hash(builder, &current_all_assets);
+        let current_margined_assets_hash =
+            all_margined_assets_hash(builder, &current_all_margined_assets);
+        let (current_market_risk_details_hash, current_public_market_details_hash) = self
+            .update_market_details_hashes(
+                builder,
+                tx_state,
+                &self.all_market_risk_details_before,
+                &market_risk_details_diff,
+                &old_market_risk_details_bucket_hashes,
+            );
+        let current_register_stack_hash = tx_state.register_stack.hash(builder);
+
+        let (new_validium_root, new_state_root) = compute_validium_and_state_root(
+            builder,
+            current_system_config_hash,
+            current_assets_hash,
+            current_margined_assets_hash,
+            current_market_risk_details_hash,
+            current_public_market_details_hash,
+            current_register_stack_hash,
+            current_account_tree_root,
+            current_account_pub_data_tree_root,
+            current_market_details_tree_root,
+            current_market_tree_root,
+            state_metadata_hash,
+        );
+        builder.connect_hashes(self.new_validium_root, new_validium_root);
+        builder.connect_hashes(self.new_state_root, new_state_root);
 
         (
             priority_operations_pub_data,
             priority_operations_pub_data_exists,
             on_chain_operations_pub_data,
             on_chain_pub_data_exists,
-            tx_state.system_config,
-            tx_state.register_stack,
-            current_all_assets,
-            current_all_margined_assets,
-            current_all_market_details,
-            current_account_tree_root,
-            current_account_pub_data_tree_root,
+            current_public_market_details_hash,
             current_account_delta_tree_root,
-            current_market_tree_root,
         )
-
-        // (
-        //     [builder.zero_u8(); MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX],
-        //     builder._false(),
-        //     [builder.zero_u8(); ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE],
-        //     builder._false(),
-        //     SystemConfigTarget::empty(builder),
-        //     RegisterStackTarget::empty(builder),
-        //     all_assets_before.clone(),
-        //     all_margined_assets_before.clone(),
-        //     all_market_details_before.clone(),
-        //     builder.zero_hash_out(),
-        //     builder.zero_hash_out(),
-        //     builder.zero_hash_out(),
-        //     builder.zero_hash_out(),
-        // )
     }
 
-    fn get_next_margin_asset_index(
+    pub fn verify_old_state_root(
         &self,
         builder: &mut Builder,
-        all_margined_assets_before: &[MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
-    ) -> Target {
+        state_metadata_hash: HashOutTarget,
+    ) -> (
+        HashOutTarget,
+        HashOutTarget,
+        HashOutTarget,
+        HashOutTarget,
+        HashOutTarget,
+        [[HashOutTarget; POSITION_HASH_BUCKET_COUNT]; 2],
+    ) {
+        let (
+            market_risk_details_hash,
+            public_market_details_hash,
+            market_risk_details_bucket_hashes,
+        ) = all_market_details_hashes(builder, &self.all_market_risk_details_before);
+        let system_config_hash = self.system_config_before.hash(builder);
+        let assets_hash = all_assets_hash(builder, &self.all_assets_before);
+        let margined_assets_hash =
+            all_margined_assets_hash(builder, &self.all_margined_assets_before);
+        let register_stack_hash_before = self.register_stack_before.hash(builder);
+
+        let (old_validium_root, old_state_root) = compute_validium_and_state_root(
+            builder,
+            system_config_hash,
+            assets_hash,
+            margined_assets_hash,
+            market_risk_details_hash,
+            public_market_details_hash,
+            register_stack_hash_before,
+            self.old_account_tree_root,
+            self.old_account_pub_data_tree_root,
+            self.old_market_details_tree_root,
+            self.old_market_tree_root,
+            state_metadata_hash,
+        );
+        builder.connect_hashes(self.old_validium_root, old_validium_root);
+        builder.connect_hashes(self.old_state_root, old_state_root);
+
+        (
+            system_config_hash,
+            assets_hash,
+            margined_assets_hash,
+            market_risk_details_hash,
+            public_market_details_hash,
+            market_risk_details_bucket_hashes,
+        )
+    }
+
+    fn get_next_margin_asset_index(&self, builder: &mut Builder) -> Target {
         let mut margin_index = builder.constant_u64(NIL_MARGIN_ASSET_INDEX);
         let mut applied = builder._false();
         for i in 0..MARGINED_ASSET_LIST_SIZE {
             let i_target = builder.constant_usize(i);
-            let is_empty = builder.is_zero(all_margined_assets_before[i].asset_index);
+            let is_empty = builder.is_zero(self.all_margined_assets_before[i].asset_index);
             let flag = builder.and_not(is_empty, applied);
             margin_index = builder.select(flag, i_target, margin_index);
             applied = builder.or(applied, flag);
@@ -911,8 +1012,8 @@ impl TxTarget {
         builder: &mut Builder,
         tx_type: &TxTypeTargets,
         positions_with_pub_data_before: &[PositionWithDelta; NB_ACCOUNTS_PER_TX - 1],
-        current_market_details_before: &MarketDetailsTarget,
-        all_market_details_before: &[MarketDetailsTarget; POSITION_LIST_SIZE],
+        current_market_details_before: &MarketRiskDetailsTarget,
+        all_market_risk_details_before: &[MarketRiskDetailsTarget; POSITION_LIST_SIZE],
         all_margined_assets_before: &[MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
     ) -> [RiskInfoTarget; NB_ACCOUNTS_PER_TX - 1] {
         let default_strategy_index = builder.constant_usize(DEFAULT_STRATEGY_INDEX);
@@ -1013,9 +1114,9 @@ impl TxTarget {
 
             // Override strategy indices in market details with 0 for non-insurance fund accounts
             let all_market_details =
-                all_market_details_before
+                all_market_risk_details_before
                     .clone()
-                    .map(|md| MarketDetailsTarget {
+                    .map(|md| MarketRiskDetailsTarget {
                         strategy_index: builder.select(
                             use_strategy,
                             md.strategy_index,
@@ -1024,7 +1125,7 @@ impl TxTarget {
                         ..md
                     });
 
-            let current_market_details = MarketDetailsTarget {
+            let current_market_details = MarketRiskDetailsTarget {
                 strategy_index: builder.select(
                     use_strategy,
                     current_market_details_before.strategy_index,
@@ -1080,9 +1181,9 @@ impl TxTarget {
             };
 
             let all_market_details =
-                all_market_details_before
+                all_market_risk_details_before
                     .clone()
-                    .map(|md| MarketDetailsTarget {
+                    .map(|md| MarketRiskDetailsTarget {
                         strategy_index: builder.select(
                             use_strategy,
                             md.strategy_index,
@@ -1091,7 +1192,7 @@ impl TxTarget {
                         ..md
                     });
 
-            let current_market_details = MarketDetailsTarget {
+            let current_market_details = MarketRiskDetailsTarget {
                 strategy_index: builder.select(
                     use_strategy,
                     current_market_details_before.strategy_index,
@@ -1134,7 +1235,7 @@ impl TxTarget {
         &self,
         builder: &mut Builder,
         tx_type: &TxTypeTargets,
-        current_market_details: &MarketDetailsTarget,
+        current_market_details: &MarketRiskDetailsTarget,
     ) -> (
         [Target; NB_ACCOUNTS_PER_TX],
         [BigIntTarget; NB_ACCOUNTS_PER_TX],
@@ -2010,14 +2111,6 @@ impl TxTarget {
             }),
         ];
 
-        // builder.println_hash_out(&new_hashes[0][0][0], "0 0");
-        // builder.println_hash_out(&new_hashes[1][0][0], "0 1");
-        // builder.println_hash_out(&new_hashes[2][0][0], "0 2");
-
-        // builder.println_hash_out(&new_hashes[0][0][1], "1 0");
-        // builder.println_hash_out(&new_hashes[1][0][1], "1 1");
-        // builder.println_hash_out(&new_hashes[2][0][1], "1 2");
-
         let mut roots: [[HashOutTarget; NB_ACCOUNTS_PER_TX]; 3] = [
             core::array::from_fn(|j| tx_state.accounts[j].asset_root),
             core::array::from_fn(|j| tx_state.accounts[j].aggregated_balances_root),
@@ -2187,7 +2280,60 @@ impl TxTarget {
         );
     }
 
-    fn verify_market_and_order_book_proofs(
+    pub(crate) fn get_market_risk_details_before(
+        &self,
+        builder: &mut Builder,
+        all_market_risk_details_before: &[MarketRiskDetailsTarget; POSITION_LIST_SIZE],
+    ) -> MarketRiskDetailsTarget {
+        let bucket_count = builder.constant_usize(POSITION_HASH_BUCKET_COUNT);
+        let (bucket_index, index_in_bucket) =
+            builder.div_rem(self.market_before.perps_market_index, bucket_count, 5);
+        let empty_market_risk_details = MarketRiskDetailsTarget::empty(builder);
+        let bucket: Vec<MarketRiskDetailsTarget> = (0..POSITION_HASH_BUCKET_SIZE)
+            .map(|j| {
+                let candidates = (0..POSITION_HASH_BUCKET_COUNT)
+                    .map(|b| {
+                        let market_index = b * POSITION_HASH_BUCKET_SIZE + j;
+                        if market_index < all_market_risk_details_before.len() {
+                            all_market_risk_details_before[market_index].clone()
+                        } else {
+                            empty_market_risk_details.clone()
+                        }
+                    })
+                    .collect();
+                random_access_market_risk_details(builder, bucket_index, candidates)
+            })
+            .collect();
+        random_access_market_risk_details(builder, index_in_bucket, bucket)
+    }
+
+    pub(crate) fn verify_market_details_merkle_proof(
+        &self,
+        builder: &mut Builder,
+        tx_state: &mut TxState,
+        market_tree_root_before: HashOutTarget,
+    ) -> HashOutTarget {
+        let market_details_hash = self.market_details_before.hash(builder);
+        let market_details_merkle_path =
+            perps_market_index_to_merkle_path(builder, self.market_before.perps_market_index);
+        verify_merkle_proof(
+            builder,
+            &market_tree_root_before,
+            market_details_hash,
+            self.market_details_tree_merkle_proof,
+            market_details_merkle_path,
+        );
+
+        let new_market_details_hash = tx_state.market_details.hash(builder);
+        recalculate_root(
+            builder,
+            new_market_details_hash,
+            self.market_details_tree_merkle_proof,
+            market_details_merkle_path,
+        )
+    }
+
+    pub(crate) fn verify_market_and_order_book_proofs(
         &self,
         builder: &mut Builder,
         tx_state: &mut TxState,
@@ -2981,46 +3127,6 @@ impl TxTarget {
             builder.select(tx_type.is_layer2, next_nonce, tx_state.api_key.nonce);
     }
 
-    fn get_market_details_with_random_access(
-        &self,
-        builder: &mut Builder,
-        all_market_details: &[MarketDetailsTarget; POSITION_LIST_SIZE],
-    ) -> MarketDetailsTarget {
-        let mut as_vec = all_market_details.to_vec();
-        // Pad the vector to a multiple of 64
-        as_vec.push(MarketDetailsTarget::empty(builder));
-        assert!(as_vec.len() % 64 == 0);
-
-        let access_index = self.market_before.perps_market_index;
-        builder.register_range_check(access_index, POSITION_LIST_SIZE_BITS);
-
-        let zero = builder.zero();
-        let mut result = MarketDetailsTarget::empty(builder);
-        let mut is_result_set = builder._false();
-        for i in 0..(as_vec.len() / 64) {
-            let start_index = builder.constant_i64((i as i64) * 64);
-            let end_index = builder.constant_i64(((i + 1) as i64) * 64 - 1);
-            let chunk_access_index = builder.sub(access_index, start_index);
-            let contains = builder.is_lte(access_index, end_index, POSITION_LIST_SIZE_BITS);
-            let contains = builder.and_not(contains, is_result_set);
-            let chunk_access_index = builder.select(contains, chunk_access_index, zero);
-            let result_check = random_access_market_details(
-                builder,
-                chunk_access_index,
-                as_vec
-                    .iter()
-                    .skip(i * 64)
-                    .take(64)
-                    .cloned()
-                    .collect::<Vec<_>>(),
-            );
-            result = select_market_details(builder, contains, &result_check, &result);
-            is_result_set = builder.or(contains, is_result_set);
-        }
-
-        result
-    }
-
     fn update_assets(
         &self,
         builder: &mut Builder,
@@ -3098,39 +3204,71 @@ impl TxTarget {
         (new_all_assets, new_all_margined_assets)
     }
 
-    fn update_market_details(
-        &self,
-        builder: &mut Builder,
-        all_market_details: &[MarketDetailsTarget; POSITION_LIST_SIZE],
-        old_market_detail: &MarketDetailsTarget,
-        new_market_detail: &MarketDetailsTarget,
-    ) -> [MarketDetailsTarget; POSITION_LIST_SIZE] {
-        let current_market_index = self.market_before.perps_market_index;
-        let diff = diff_market_details(builder, new_market_detail, old_market_detail);
-        (0..POSITION_LIST_SIZE)
-            .map(|market_index| {
-                let market_index_target = builder.constant(F::from_canonical_usize(market_index));
-                let is_current_market = builder.is_equal(current_market_index, market_index_target);
-                apply_diff_market_details(
-                    builder,
-                    is_current_market,
-                    &diff,
-                    &all_market_details[market_index],
-                )
-            })
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap()
-    }
-
-    fn update_impact_prices(
+    fn update_market_details_hashes(
         &self,
         builder: &mut Builder,
         tx_state: &mut TxState,
-        market_details_before: &MarketDetailsTarget,
+        all_market_details: &[MarketRiskDetailsTarget; POSITION_LIST_SIZE],
+        diff: &MarketRiskDetailsTarget,
+        old_bucket_hashes: &[[HashOutTarget; POSITION_HASH_BUCKET_COUNT]; 2],
+    ) -> (HashOutTarget, HashOutTarget) {
+        let bucket_count = builder.constant_usize(POSITION_HASH_BUCKET_COUNT);
+        let (current_bucket_index, index_in_bucket) =
+            builder.div_rem(tx_state.market.perps_market_index, bucket_count, 5);
+
+        let empty_market_risk_details = MarketRiskDetailsTarget::empty(builder);
+        let mut market_risk_details_bucket: [MarketRiskDetailsTarget; POSITION_HASH_BUCKET_SIZE] =
+            array::from_fn(|j| {
+                let candidates = (0..POSITION_HASH_BUCKET_COUNT)
+                    .map(|bucket_index| {
+                        let market_index = bucket_index * POSITION_HASH_BUCKET_SIZE + j;
+                        if market_index < all_market_details.len() {
+                            all_market_details[market_index].clone()
+                        } else {
+                            empty_market_risk_details.clone()
+                        }
+                    })
+                    .collect();
+                random_access_market_risk_details(builder, current_bucket_index, candidates)
+            });
+
+        for market_index_in_bucket in 0..POSITION_HASH_BUCKET_SIZE {
+            let t_market_index_in_bucket = builder.constant_usize(market_index_in_bucket);
+            let is_current_market = builder.is_equal(t_market_index_in_bucket, index_in_bucket);
+            market_risk_details_bucket[market_index_in_bucket] = apply_diff_market_risk_details(
+                builder,
+                is_current_market,
+                diff,
+                &market_risk_details_bucket[market_index_in_bucket],
+            );
+        }
+
+        let new_bucket_hash = market_risk_details_bucket_hash(builder, &market_risk_details_bucket);
+
+        let mut bucket_hashes = *old_bucket_hashes;
+        for bucket_index in 0..POSITION_HASH_BUCKET_COUNT {
+            let t_bucket_index = builder.constant_usize(bucket_index);
+            let is_current_bucket = builder.is_equal(t_bucket_index, current_bucket_index);
+            for j in 0..2 {
+                bucket_hashes[j][bucket_index] = builder.select_hash(
+                    is_current_bucket,
+                    &new_bucket_hash[j],
+                    &bucket_hashes[j][bucket_index],
+                );
+            }
+        }
+
+        market_details_hashes_from_bucket_hashes(builder, &bucket_hashes)
+    }
+
+    pub(crate) fn update_impact_prices(
+        &self,
+        builder: &mut Builder,
+        tx_state: &mut TxState,
+        market_risk_details_before: &MarketRiskDetailsTarget,
     ) {
         let active_status = builder.constant_u64(MARKET_STATUS_ACTIVE as u64);
-        let is_market_active = builder.is_equal(tx_state.market_details.status, active_status);
+        let is_market_active = builder.is_equal(tx_state.market_risk_details.status, active_status);
         let perps_type = builder.constant_u64(MARKET_TYPE_PERPS);
         let is_perps_market = builder.is_equal(tx_state.market.market_type, perps_type);
         let should_update_impact_prices = builder.multi_and(&[
@@ -3146,8 +3284,8 @@ impl TxTarget {
             &self.impact_ask_order,
             &self.impact_bid_order_book_tree_path,
             &self.impact_bid_order,
-            tx_state.market_details.min_initial_margin_fraction,
-            market_details_before.quote_multiplier,
+            tx_state.market_risk_details.min_initial_margin_fraction,
+            market_risk_details_before.quote_multiplier,
         );
 
         tx_state.market_details.impact_ask_price = builder.select(
@@ -3199,6 +3337,7 @@ impl<T: Witness<F> + PartialWitnessCurve<F>, F: PrimeField64 + Extendable<5> + R
 {
     fn set_tx_target(&mut self, a: &TxTarget, b: &Tx<F>) -> Result<()> {
         self.set_target(a.tx_type, F::from_canonical_u8(b.tx_type))?;
+        self.set_target(a.tx_index, F::from_canonical_u64(b.tx_index))?;
 
         /***********************/
         /*   L1 Transactions   */
@@ -3435,6 +3574,7 @@ impl<T: Witness<F> + PartialWitnessCurve<F>, F: PrimeField64 + Extendable<5> + R
         self.set_api_key_target(&a.api_key_before, &b.api_key_before)?;
         self.set_account_order_target(&a.account_order_before, &b.account_order_before)?;
         self.set_market_target(&a.market_before, &b.market_before)?;
+        self.set_market_details_target(&a.market_details_before, &b.market_details_before)?;
         self.set_order_target(&a.order_before, &b.order_before)?;
 
         /*****************************/
@@ -3507,6 +3647,12 @@ impl<T: Witness<F> + PartialWitnessCurve<F>, F: PrimeField64 + Extendable<5> + R
         for i in 0..MARKET_MERKLE_LEVELS {
             self.set_hash_target(a.market_tree_merkle_proof[i], b.market_tree_merkle_proof[i])?;
         }
+        for i in 0..MARKET_DETAILS_TREE_HEIGHT {
+            self.set_hash_target(
+                a.market_details_tree_merkle_proof[i],
+                b.market_details_tree_merkle_proof[i],
+            )?;
+        }
         for i in 0..ORDER_BOOK_MERKLE_LEVELS {
             self.set_order_book_node_target(
                 &a.order_book_tree_path[i],
@@ -3534,6 +3680,76 @@ impl<T: Witness<F> + PartialWitnessCurve<F>, F: PrimeField64 + Extendable<5> + R
 
         self.set_attributes_tx_target(&a.attributes, &b.attributes)?;
 
+        self.set_system_config_target(&a.system_config_before, &b.system_config_before)?;
+        self.set_register_info_target(&a.register_stack_before, &b.register_stack_before)?;
+        for (t, asset) in a.all_assets_before.iter().zip(b.all_assets_before.iter()) {
+            self.set_asset_target(t, asset)?;
+        }
+        for (t, margined_asset) in a
+            .all_margined_assets_before
+            .iter()
+            .zip(b.all_margined_assets_before.iter())
+        {
+            self.set_margined_asset_target(t, margined_asset)?;
+        }
+        for (t, market_risk_details) in a
+            .all_market_risk_details_before
+            .iter()
+            .zip(b.all_market_risk_details_before.iter())
+        {
+            self.set_market_risk_details_target(t, market_risk_details)?;
+        }
+
+        self.set_hash_target(a.old_account_tree_root, b.old_account_tree_root)?;
+        self.set_hash_target(
+            a.old_account_pub_data_tree_root,
+            b.old_account_pub_data_tree_root,
+        )?;
+        self.set_hash_target(a.old_account_delta_tree_root, b.old_account_delta_tree_root)?;
+        self.set_hash_target(
+            a.old_market_details_tree_root,
+            b.old_market_details_tree_root,
+        )?;
+        self.set_hash_target(a.old_market_tree_root, b.old_market_tree_root)?;
+        self.set_hash_target(a.old_validium_root, b.old_validium_root)?;
+        self.set_hash_target(a.old_state_root, b.old_state_root)?;
+
         Ok(())
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn compute_validium_and_state_root(
+    builder: &mut Builder,
+    system_config_hash: HashOutTarget,
+    assets_hash: HashOutTarget,
+    margined_assets_hash: HashOutTarget,
+    market_risk_details_hash: HashOutTarget,
+    public_market_details_hash: HashOutTarget,
+    register_stack_hash: HashOutTarget,
+    account_tree_root: HashOutTarget,
+    account_pub_data_tree_root: HashOutTarget,
+    market_details_tree_root: HashOutTarget,
+    market_tree_root: HashOutTarget,
+    state_metadata_hash: HashOutTarget,
+) -> (HashOutTarget, HashOutTarget) {
+    let validium_root = builder.hash_n_to_one(&[
+        register_stack_hash,
+        account_tree_root,
+        market_details_tree_root,
+        market_tree_root,
+        assets_hash,
+        margined_assets_hash,
+        market_risk_details_hash,
+        state_metadata_hash,
+        system_config_hash,
+    ]);
+
+    let state_root = builder.hash_n_to_one(&[
+        account_pub_data_tree_root,
+        public_market_details_hash,
+        validium_root,
+    ]);
+
+    (validium_root, state_root)
 }

@@ -51,6 +51,7 @@ pub mod eddsa;
 pub mod hash_utils;
 pub mod hints;
 pub mod keccak;
+pub mod light_tx_constraints;
 pub mod liquidation;
 pub mod matching_engine;
 pub mod merkle_helpers;

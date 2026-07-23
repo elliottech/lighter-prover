@@ -144,7 +144,7 @@ impl Verify for InternalLiquidatePositionTxTarget {
         let zero_price_big = get_position_zero_price(
             builder,
             &tx_state.positions[TAKER_ACCOUNT_ID],
-            &tx_state.market_details,
+            &tx_state.market_risk_details,
             &tx_state.risk_infos[TAKER_ACCOUNT_ID].current_risk_parameters,
         );
 

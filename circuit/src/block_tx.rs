@@ -4,23 +4,217 @@
 use plonky2::field::extension::Extendable;
 use plonky2::field::types::Field;
 use plonky2::hash::hash_types::{HashOut, HashOutTarget, RichField};
-use plonky2::iop::target::Target;
+use plonky2::iop::target::{BoolTarget, Target};
 
 use crate::tx::Tx;
 use crate::types::approve_integrator::{
     APPROVE_INTEGRATOR_PUBLIC_INPUTS_LEN, ApproveIntegratorMessage, ApproveIntegratorMessageTarget,
 };
-use crate::types::asset::{ASSET_SIZE, Asset, AssetTarget};
 use crate::types::change_pub_key::{
     CHANGE_PK_PUBLIC_INPUTS_LEN, ChangePubKeyMessage, ChangePubKeyMessageTarget,
 };
+use crate::types::config::Builder;
 use crate::types::constants::*;
-use crate::types::margined_asset::{MARGINED_ASSET_SIZE, MarginedAsset, MarginedAssetTarget};
-use crate::types::market_details::{MARKET_DETAIL_SIZE, MarketDetails, MarketDetailsTarget};
-use crate::types::register::{REGISTER_INFO_SIZE, RegisterStack, RegisterStackTarget};
-use crate::types::system_config::{SYSTEM_CONFIG_SIZE, SystemConfig, SystemConfigTarget};
 use crate::types::transfer::{TRANSFER_PUBLIC_INPUTS_LEN, TransferMessage, TransferMessageTarget};
 use crate::uint::u8::U8Target;
+use crate::utils::CircuitBuilderUtils;
+
+pub const JUMP_STATE_SIZE: usize = 27;
+
+#[derive(Debug, Clone, Copy)]
+pub struct JumpState<F>
+where
+    F: Field + Extendable<5> + RichField,
+{
+    pub last_active_tx_index: F,
+    pub prev_new_state_root: HashOut<F>,
+    pub prev_new_delta_root: HashOut<F>,
+    pub run_start_prev_index: F,
+    pub run_start_old_state_root: HashOut<F>,
+    pub run_start_old_delta_root: HashOut<F>,
+    pub coverage_hash: HashOut<F>,
+    pub claims_hash: HashOut<F>,
+    pub tx_count: F,
+}
+
+impl<F> JumpState<F>
+where
+    F: Field + Extendable<5> + RichField,
+{
+    pub fn initial(state_root: HashOut<F>, delta_root: HashOut<F>) -> Self {
+        Self {
+            last_active_tx_index: F::NEG_ONE,
+            prev_new_state_root: state_root,
+            prev_new_delta_root: delta_root,
+            run_start_prev_index: F::NEG_ONE,
+            run_start_old_state_root: state_root,
+            run_start_old_delta_root: delta_root,
+            coverage_hash: HashOut::ZERO,
+            claims_hash: HashOut::ZERO,
+            tx_count: F::ZERO,
+        }
+    }
+
+    pub fn from_public_inputs(pis: &[F]) -> Self {
+        assert_eq!(pis.len(), JUMP_STATE_SIZE);
+        Self {
+            last_active_tx_index: pis[0],
+            prev_new_state_root: HashOut::from_vec(pis[1..5].to_vec()),
+            prev_new_delta_root: HashOut::from_vec(pis[5..9].to_vec()),
+            run_start_prev_index: pis[9],
+            run_start_old_state_root: HashOut::from_vec(pis[10..14].to_vec()),
+            run_start_old_delta_root: HashOut::from_vec(pis[14..18].to_vec()),
+            coverage_hash: HashOut::from_vec(pis[18..22].to_vec()),
+            claims_hash: HashOut::from_vec(pis[22..26].to_vec()),
+            tx_count: pis[26],
+        }
+    }
+
+    pub fn to_vec(&self) -> Vec<F> {
+        let mut v = vec![self.last_active_tx_index];
+        v.extend(self.prev_new_state_root.elements);
+        v.extend(self.prev_new_delta_root.elements);
+        v.push(self.run_start_prev_index);
+        v.extend(self.run_start_old_state_root.elements);
+        v.extend(self.run_start_old_delta_root.elements);
+        v.extend(self.coverage_hash.elements);
+        v.extend(self.claims_hash.elements);
+        v.push(self.tx_count);
+        v
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct JumpStateTarget {
+    pub last_active_tx_index: Target,
+    pub prev_new_state_root: HashOutTarget,
+    pub prev_new_delta_root: HashOutTarget,
+    pub run_start_prev_index: Target,
+    pub run_start_old_state_root: HashOutTarget,
+    pub run_start_old_delta_root: HashOutTarget,
+    pub coverage_hash: HashOutTarget,
+    pub claims_hash: HashOutTarget,
+    pub tx_count: Target,
+}
+
+impl Default for JumpStateTarget {
+    fn default() -> Self {
+        let default_hash = || HashOutTarget {
+            elements: core::array::from_fn(|_| Target::default()),
+        };
+        Self {
+            last_active_tx_index: Target::default(),
+            prev_new_state_root: default_hash(),
+            prev_new_delta_root: default_hash(),
+            run_start_prev_index: Target::default(),
+            run_start_old_state_root: default_hash(),
+            run_start_old_delta_root: default_hash(),
+            coverage_hash: default_hash(),
+            claims_hash: default_hash(),
+            tx_count: Target::default(),
+        }
+    }
+}
+
+impl JumpStateTarget {
+    pub fn new(builder: &mut Builder) -> Self {
+        Self {
+            last_active_tx_index: builder.add_virtual_target(),
+            prev_new_state_root: builder.add_virtual_hash(),
+            prev_new_delta_root: builder.add_virtual_hash(),
+            run_start_prev_index: builder.add_virtual_target(),
+            run_start_old_state_root: builder.add_virtual_hash(),
+            run_start_old_delta_root: builder.add_virtual_hash(),
+            coverage_hash: builder.add_virtual_hash(),
+            claims_hash: builder.add_virtual_hash(),
+            tx_count: builder.add_virtual_target(),
+        }
+    }
+
+    pub fn new_public(builder: &mut Builder) -> Self {
+        let state = Self::new(builder);
+        state.register_public_inputs(builder);
+        state
+    }
+
+    pub fn register_public_inputs(&self, builder: &mut Builder) {
+        builder.register_public_input(self.last_active_tx_index);
+        builder.register_public_hashout(self.prev_new_state_root);
+        builder.register_public_hashout(self.prev_new_delta_root);
+        builder.register_public_input(self.run_start_prev_index);
+        builder.register_public_hashout(self.run_start_old_state_root);
+        builder.register_public_hashout(self.run_start_old_delta_root);
+        builder.register_public_hashout(self.coverage_hash);
+        builder.register_public_hashout(self.claims_hash);
+        builder.register_public_input(self.tx_count);
+    }
+
+    pub fn from_public_inputs(pis: &[Target]) -> Self {
+        assert_eq!(pis.len(), JUMP_STATE_SIZE);
+        Self {
+            last_active_tx_index: pis[0],
+            prev_new_state_root: HashOutTarget::from_vec(pis[1..5].to_vec()),
+            prev_new_delta_root: HashOutTarget::from_vec(pis[5..9].to_vec()),
+            run_start_prev_index: pis[9],
+            run_start_old_state_root: HashOutTarget::from_vec(pis[10..14].to_vec()),
+            run_start_old_delta_root: HashOutTarget::from_vec(pis[14..18].to_vec()),
+            coverage_hash: HashOutTarget::from_vec(pis[18..22].to_vec()),
+            claims_hash: HashOutTarget::from_vec(pis[22..26].to_vec()),
+            tx_count: pis[26],
+        }
+    }
+
+    pub fn connect(builder: &mut Builder, a: &Self, b: &Self) {
+        builder.connect(a.last_active_tx_index, b.last_active_tx_index);
+        builder.connect_hashes(a.prev_new_state_root, b.prev_new_state_root);
+        builder.connect_hashes(a.prev_new_delta_root, b.prev_new_delta_root);
+        builder.connect(a.run_start_prev_index, b.run_start_prev_index);
+        builder.connect_hashes(a.run_start_old_state_root, b.run_start_old_state_root);
+        builder.connect_hashes(a.run_start_old_delta_root, b.run_start_old_delta_root);
+        builder.connect_hashes(a.coverage_hash, b.coverage_hash);
+        builder.connect_hashes(a.claims_hash, b.claims_hash);
+        builder.connect(a.tx_count, b.tx_count);
+    }
+
+    pub fn conditional_assert_initial(
+        &self,
+        builder: &mut Builder,
+        condition: BoolTarget,
+        state_root: HashOutTarget,
+        delta_root: HashOutTarget,
+    ) {
+        let one = builder.one();
+        let prev_plus_one = builder.add(self.last_active_tx_index, one);
+        builder.conditional_assert_zero(condition, prev_plus_one);
+        let run_start_plus_one = builder.add(self.run_start_prev_index, one);
+        builder.conditional_assert_zero(condition, run_start_plus_one);
+        for i in 0..4 {
+            builder.conditional_assert_eq(
+                condition,
+                self.prev_new_state_root.elements[i],
+                state_root.elements[i],
+            );
+            builder.conditional_assert_eq(
+                condition,
+                self.prev_new_delta_root.elements[i],
+                delta_root.elements[i],
+            );
+            builder.conditional_assert_eq(
+                condition,
+                self.run_start_old_state_root.elements[i],
+                state_root.elements[i],
+            );
+            builder.conditional_assert_eq(
+                condition,
+                self.run_start_old_delta_root.elements[i],
+                delta_root.elements[i],
+            );
+            builder.conditional_assert_zero(condition, self.coverage_hash.elements[i]);
+            builder.conditional_assert_zero(condition, self.claims_hash.elements[i]);
+        }
+        builder.conditional_assert_zero(condition, self.tx_count);
+    }
+}
 
 pub struct BlockTx<F>
 where
@@ -28,16 +222,8 @@ where
 {
     pub created_at: i64,
 
-    pub old_system_config: SystemConfig,
-    pub register_stack_before: RegisterStack,
-    pub all_assets_before: [Asset; ASSET_LIST_SIZE],
-    pub all_margined_assets_before: [MarginedAsset; MARGINED_ASSET_LIST_SIZE],
-    pub all_market_details_before: [MarketDetails; POSITION_LIST_SIZE],
-
-    pub old_account_tree_root: HashOut<F>,
-    pub old_account_pub_data_tree_root: HashOut<F>,
-    pub old_account_delta_tree_root: HashOut<F>,
-    pub old_market_tree_root: HashOut<F>,
+    pub state_metadata_hash: HashOut<F>,
+    pub old_jump: JumpState<F>,
 
     pub txs: Vec<Tx<F>>,
 }
@@ -48,27 +234,11 @@ pub struct BlockTxWitness<F>
 where
     F: Field + Extendable<5> + RichField,
 {
-    pub old_system_config: SystemConfig,
-    pub register_stack_before: RegisterStack,
-    pub all_assets_before: [Asset; ASSET_LIST_SIZE],
-    pub all_margined_assets_before: [MarginedAsset; MARGINED_ASSET_LIST_SIZE],
-    pub all_market_details_before: [MarketDetails; POSITION_LIST_SIZE],
+    pub public_market_details_hash_after: HashOut<F>,
 
-    pub old_account_tree_root: HashOut<F>,
-    pub old_account_pub_data_tree_root: HashOut<F>,
-    pub old_market_tree_root: HashOut<F>,
-    pub old_account_delta_tree_root: HashOut<F>,
-
-    pub new_system_config: SystemConfig,
-    pub register_stack_after: RegisterStack,
-    pub all_assets_after: [Asset; ASSET_LIST_SIZE],
-    pub all_margined_assets_after: [MarginedAsset; MARGINED_ASSET_LIST_SIZE],
-    pub all_market_details_after: [MarketDetails; POSITION_LIST_SIZE],
-
-    pub new_account_tree_root: HashOut<F>,
-    pub new_account_pub_data_tree_root: HashOut<F>,
     pub new_account_delta_tree_root: HashOut<F>,
-    pub new_market_tree_root: HashOut<F>,
+    pub new_validium_root: HashOut<F>,
+    pub new_state_root: HashOut<F>,
 
     pub change_pub_key_message: ChangePubKeyMessage<F>,
     pub transfer_message: TransferMessage,
@@ -79,6 +249,9 @@ where
 
     pub priority_operations_count: u64,
     pub priority_operations_pub_data: [u8; MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX],
+
+    pub old_jump: JumpState<F>,
+    pub new_jump: JumpState<F>,
 }
 
 impl<F> BlockTxWitness<F>
@@ -87,34 +260,10 @@ where
 {
     /// Parse public inputs from proof into BlockWitness
     pub fn from_public_inputs(public_inputs: &[F]) -> Self {
-        let old_assets_start = 16;
-        let old_assets_end = old_assets_start + ASSET_LIST_SIZE * ASSET_SIZE;
+        let public_market_details_hash_start = 12;
+        let public_market_details_hash_end = public_market_details_hash_start + 4;
 
-        let old_margined_assets_start = old_assets_end;
-        let old_margined_assets_end =
-            old_margined_assets_start + MARGINED_ASSET_LIST_SIZE * MARGINED_ASSET_SIZE;
-
-        let old_market_details_start = old_margined_assets_end;
-        let old_market_details_end =
-            old_market_details_start + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE;
-
-        let old_system_config_start = old_market_details_end;
-        let old_system_config_end = old_system_config_start + SYSTEM_CONFIG_SIZE;
-
-        let old_register_start = old_system_config_end;
-        let old_register_end = old_register_start + REGISTER_INFO_SIZE;
-
-        let assets_start = old_register_end + 16;
-        let assets_end = assets_start + ASSET_LIST_SIZE * ASSET_SIZE;
-
-        let margined_assets_start = assets_end;
-        let margined_assets_end =
-            margined_assets_start + MARGINED_ASSET_LIST_SIZE * MARGINED_ASSET_SIZE;
-
-        let market_details_start = margined_assets_end;
-        let market_details_end = market_details_start + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE;
-
-        let change_pub_key_message_start = market_details_end;
+        let change_pub_key_message_start = public_market_details_hash_end;
         let change_pub_key_message_end = change_pub_key_message_start + CHANGE_PK_PUBLIC_INPUTS_LEN;
 
         let transfer_message_start = change_pub_key_message_end;
@@ -134,117 +283,28 @@ where
         let priority_pub_data_end =
             priority_pub_data_start + MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX;
 
-        let system_config_start = priority_pub_data_end;
-        let system_config_end = system_config_start + SYSTEM_CONFIG_SIZE;
+        let old_jump_start = priority_pub_data_end;
+        let new_jump_start = old_jump_start + JUMP_STATE_SIZE;
+        let new_jump_end = new_jump_start + JUMP_STATE_SIZE;
+        let total_pis_size = new_jump_end;
 
-        let register_start = system_config_end;
-        let register_end = register_start + REGISTER_INFO_SIZE;
+        assert_eq!(
+            public_inputs.len(),
+            total_pis_size,
+            "Expected {} public inputs, but got {}",
+            total_pis_size,
+            public_inputs.len()
+        );
 
         Self {
-            old_account_pub_data_tree_root: HashOut::<F>::from_vec(vec![
-                public_inputs[0],
-                public_inputs[1],
-                public_inputs[2],
-                public_inputs[3],
-            ]),
-            old_account_tree_root: HashOut::<F>::from_vec(vec![
-                public_inputs[4],
-                public_inputs[5],
-                public_inputs[6],
-                public_inputs[7],
-            ]),
-            old_market_tree_root: HashOut::<F>::from_vec(vec![
-                public_inputs[8],
-                public_inputs[9],
-                public_inputs[10],
-                public_inputs[11],
-            ]),
-            old_account_delta_tree_root: HashOut::<F>::from_vec(vec![
-                public_inputs[12],
-                public_inputs[13],
-                public_inputs[14],
-                public_inputs[15],
-            ]),
+            new_account_delta_tree_root: HashOut::<F>::from_vec(public_inputs[0..4].to_vec()),
+            new_validium_root: HashOut::<F>::from_vec(public_inputs[4..8].to_vec()),
+            new_state_root: HashOut::<F>::from_vec(public_inputs[8..12].to_vec()),
 
-            all_assets_before: core::array::from_fn(|asset_index| {
-                Asset::from_public_inputs(
-                    asset_index as i16,
-                    &public_inputs[old_assets_start + asset_index * ASSET_SIZE
-                        ..old_assets_start + (asset_index + 1) * ASSET_SIZE],
-                )
-            }),
-            all_margined_assets_before: core::array::from_fn(|margined_asset_index| {
-                MarginedAsset::from_public_inputs(
-                    margined_asset_index as u8,
-                    &public_inputs[old_margined_assets_start
-                        + margined_asset_index * MARGINED_ASSET_SIZE
-                        ..old_margined_assets_start
-                            + (margined_asset_index + 1) * MARGINED_ASSET_SIZE],
-                )
-            }),
-
-            all_market_details_before: core::array::from_fn(|market_index| {
-                MarketDetails::from_public_inputs(
-                    market_index as u16,
-                    &public_inputs[old_market_details_start + market_index * MARKET_DETAIL_SIZE
-                        ..old_market_details_start + (market_index + 1) * MARKET_DETAIL_SIZE],
-                )
-            }),
-
-            old_system_config: SystemConfig::from_public_inputs(
-                &public_inputs[old_system_config_start..old_system_config_end],
+            public_market_details_hash_after: HashOut::<F>::from_vec(
+                public_inputs[public_market_details_hash_start..public_market_details_hash_end]
+                    .to_vec(),
             ),
-            register_stack_before: RegisterStack::from_public_inputs(
-                &public_inputs[old_register_start..old_register_end],
-            ),
-
-            new_account_pub_data_tree_root: HashOut::<F>::from_vec(vec![
-                public_inputs[old_register_end],
-                public_inputs[old_register_end + 1],
-                public_inputs[old_register_end + 2],
-                public_inputs[old_register_end + 3],
-            ]),
-            new_account_tree_root: HashOut::<F>::from_vec(vec![
-                public_inputs[old_register_end + 4],
-                public_inputs[old_register_end + 5],
-                public_inputs[old_register_end + 6],
-                public_inputs[old_register_end + 7],
-            ]),
-            new_market_tree_root: HashOut::<F>::from_vec(vec![
-                public_inputs[old_register_end + 8],
-                public_inputs[old_register_end + 9],
-                public_inputs[old_register_end + 10],
-                public_inputs[old_register_end + 11],
-            ]),
-            new_account_delta_tree_root: HashOut::<F>::from_vec(vec![
-                public_inputs[old_register_end + 12],
-                public_inputs[old_register_end + 13],
-                public_inputs[old_register_end + 14],
-                public_inputs[old_register_end + 15],
-            ]),
-
-            all_assets_after: core::array::from_fn(|asset_index| {
-                Asset::from_public_inputs(
-                    asset_index as i16,
-                    &public_inputs[assets_start + asset_index * ASSET_SIZE
-                        ..assets_start + (asset_index + 1) * ASSET_SIZE],
-                )
-            }),
-            all_margined_assets_after: core::array::from_fn(|margined_asset_index| {
-                MarginedAsset::from_public_inputs(
-                    margined_asset_index as u8,
-                    &public_inputs[margined_assets_start
-                        + margined_asset_index * MARGINED_ASSET_SIZE
-                        ..margined_assets_start + (margined_asset_index + 1) * MARGINED_ASSET_SIZE],
-                )
-            }),
-            all_market_details_after: core::array::from_fn(|market_index| {
-                MarketDetails::from_public_inputs(
-                    market_index as u16,
-                    &public_inputs[market_details_start + market_index * MARKET_DETAIL_SIZE
-                        ..market_details_start + (market_index + 1) * MARKET_DETAIL_SIZE],
-                )
-            }),
 
             change_pub_key_message: ChangePubKeyMessage::from_public_inputs(
                 &public_inputs[change_pub_key_message_start..change_pub_key_message_end],
@@ -267,12 +327,8 @@ where
                 public_inputs[priority_pub_data_start + index].to_canonical_u64() as u8
             }),
 
-            new_system_config: SystemConfig::from_public_inputs(
-                &public_inputs[system_config_start..system_config_end],
-            ),
-            register_stack_after: RegisterStack::from_public_inputs(
-                &public_inputs[register_start..register_end],
-            ),
+            old_jump: JumpState::from_public_inputs(&public_inputs[old_jump_start..new_jump_start]),
+            new_jump: JumpState::from_public_inputs(&public_inputs[new_jump_start..new_jump_end]),
         }
     }
 }
@@ -280,27 +336,11 @@ where
 #[derive(Debug)]
 /// In circuit represantion of [`crate::block::BlockTxWitness`]
 pub struct BlockTxWitnessTarget {
-    pub old_system_config: SystemConfigTarget,
-    pub register_stack_before: RegisterStackTarget,
-    pub all_assets_before: [AssetTarget; ASSET_LIST_SIZE],
-    pub all_margined_assets_before: [MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
-    pub all_market_details_before: [MarketDetailsTarget; POSITION_LIST_SIZE],
+    pub public_market_details_hash_after: HashOutTarget,
 
-    pub old_account_tree_root: HashOutTarget,
-    pub old_account_pub_data_tree_root: HashOutTarget,
-    pub old_account_delta_tree_root: HashOutTarget,
-    pub old_market_tree_root: HashOutTarget,
-
-    pub new_system_config: SystemConfigTarget,
-    pub register_stack_after: RegisterStackTarget,
-    pub all_assets_after: [AssetTarget; ASSET_LIST_SIZE],
-    pub all_margined_assets_after: [MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
-    pub all_market_details_after: [MarketDetailsTarget; POSITION_LIST_SIZE],
-
-    pub new_account_tree_root: HashOutTarget,
-    pub new_account_pub_data_tree_root: HashOutTarget,
     pub new_account_delta_tree_root: HashOutTarget,
-    pub new_market_tree_root: HashOutTarget,
+    pub new_validium_root: HashOutTarget,
+    pub new_state_root: HashOutTarget,
 
     pub change_pub_key_message: ChangePubKeyMessageTarget,
     pub transfer_message: TransferMessageTarget,
@@ -311,40 +351,19 @@ pub struct BlockTxWitnessTarget {
 
     pub priority_operations_count: Target,
     pub priority_operations_pub_data: [U8Target; MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX],
+
+    pub old_jump: JumpStateTarget,
+    pub new_jump: JumpStateTarget,
 }
 
 impl BlockTxWitnessTarget {
     /// Similar to [`BlockTxWitness::from_public_inputs`], parses proof target.
     /// Follows the same order as [`crate::block_tx_constraints::BlockCircuit::register_public_inputs`]
     pub fn from_public_inputs(pis: &[Target]) -> Self {
-        let old_assets_start = 16;
-        let old_assets_end = old_assets_start + ASSET_LIST_SIZE * ASSET_SIZE;
+        let public_market_details_hash_start = 12;
+        let public_market_details_hash_end = public_market_details_hash_start + 4;
 
-        let old_margined_assets_start = old_assets_end;
-        let old_margined_assets_end =
-            old_margined_assets_start + MARGINED_ASSET_LIST_SIZE * MARGINED_ASSET_SIZE;
-
-        let old_market_details_start = old_margined_assets_end;
-        let old_market_details_end =
-            old_market_details_start + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE;
-
-        let old_system_config_start = old_market_details_end;
-        let old_system_config_end = old_system_config_start + SYSTEM_CONFIG_SIZE;
-
-        let old_register_start = old_system_config_end;
-        let old_register_end = old_register_start + REGISTER_INFO_SIZE;
-
-        let assets_start = old_register_end + 16;
-        let assets_end = assets_start + ASSET_LIST_SIZE * ASSET_SIZE;
-
-        let margined_assets_start = assets_end;
-        let margined_assets_end =
-            margined_assets_start + MARGINED_ASSET_LIST_SIZE * MARGINED_ASSET_SIZE;
-
-        let market_details_start = margined_assets_end;
-        let market_details_end = market_details_start + POSITION_LIST_SIZE * MARKET_DETAIL_SIZE;
-
-        let change_pub_key_message_start = market_details_end;
+        let change_pub_key_message_start = public_market_details_hash_end;
         let change_pub_key_message_end = change_pub_key_message_start + CHANGE_PK_PUBLIC_INPUTS_LEN;
 
         let transfer_message_start = change_pub_key_message_end;
@@ -362,86 +381,27 @@ impl BlockTxWitnessTarget {
         let priority_pub_data_end =
             priority_pub_data_start + MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX;
 
-        let system_config_start = priority_pub_data_end;
-        let system_config_end = system_config_start + SYSTEM_CONFIG_SIZE;
-
-        let register_start = system_config_end;
-        let register_end = register_start + REGISTER_INFO_SIZE;
+        let old_jump_start = priority_pub_data_end;
+        let new_jump_start = old_jump_start + JUMP_STATE_SIZE;
+        let new_jump_end = new_jump_start + JUMP_STATE_SIZE;
+        let total_pis_size = new_jump_end;
 
         assert_eq!(
             pis.len(),
-            register_end,
+            total_pis_size,
             "Expected {} public inputs, but got {}",
-            register_end,
+            total_pis_size,
             pis.len()
         );
 
         Self {
-            old_account_pub_data_tree_root: HashOutTarget::from_vec(pis[0..4].to_vec()),
-            old_account_tree_root: HashOutTarget::from_vec(pis[4..8].to_vec()),
-            old_market_tree_root: HashOutTarget::from_vec(pis[8..12].to_vec()),
-            old_account_delta_tree_root: HashOutTarget::from_vec(pis[12..16].to_vec()),
+            new_account_delta_tree_root: HashOutTarget::from_vec(pis[0..4].to_vec()),
+            new_validium_root: HashOutTarget::from_vec(pis[4..8].to_vec()),
+            new_state_root: HashOutTarget::from_vec(pis[8..12].to_vec()),
 
-            all_assets_before: core::array::from_fn(|asset_index| {
-                AssetTarget::from_public_inputs(
-                    &pis[old_assets_start + asset_index * ASSET_SIZE
-                        ..old_assets_start + (asset_index + 1) * ASSET_SIZE],
-                )
-            }),
-            all_margined_assets_before: core::array::from_fn(|margined_asset_index| {
-                MarginedAssetTarget::from_public_inputs(
-                    &pis[old_margined_assets_start + margined_asset_index * MARGINED_ASSET_SIZE
-                        ..old_margined_assets_start
-                            + (margined_asset_index + 1) * MARGINED_ASSET_SIZE],
-                )
-            }),
-            all_market_details_before: core::array::from_fn(|market_index| {
-                MarketDetailsTarget::from_public_inputs(
-                    pis[old_market_details_start + market_index * MARKET_DETAIL_SIZE
-                        ..old_market_details_start + (market_index + 1) * MARKET_DETAIL_SIZE]
-                        .to_vec(),
-                )
-            }),
-
-            old_system_config: SystemConfigTarget::from_public_inputs(
-                &pis[old_system_config_start..old_system_config_end],
+            public_market_details_hash_after: HashOutTarget::from_vec(
+                pis[public_market_details_hash_start..public_market_details_hash_end].to_vec(),
             ),
-            register_stack_before: RegisterStackTarget::from_public_inputs(
-                &pis[old_register_start..old_register_end],
-            ),
-
-            new_account_pub_data_tree_root: HashOutTarget::from_vec(
-                pis[old_register_end..old_register_end + 4].to_vec(),
-            ),
-            new_account_tree_root: HashOutTarget::from_vec(
-                pis[old_register_end + 4..old_register_end + 8].to_vec(),
-            ),
-            new_market_tree_root: HashOutTarget::from_vec(
-                pis[old_register_end + 8..old_register_end + 12].to_vec(),
-            ),
-            new_account_delta_tree_root: HashOutTarget::from_vec(
-                pis[old_register_end + 12..old_register_end + 16].to_vec(),
-            ),
-
-            all_assets_after: core::array::from_fn(|asset_index| {
-                AssetTarget::from_public_inputs(
-                    &pis[assets_start + asset_index * ASSET_SIZE
-                        ..assets_start + (asset_index + 1) * ASSET_SIZE],
-                )
-            }),
-            all_margined_assets_after: core::array::from_fn(|margined_asset_index| {
-                MarginedAssetTarget::from_public_inputs(
-                    &pis[margined_assets_start + margined_asset_index * MARGINED_ASSET_SIZE
-                        ..margined_assets_start + (margined_asset_index + 1) * MARGINED_ASSET_SIZE],
-                )
-            }),
-            all_market_details_after: core::array::from_fn(|market_index| {
-                MarketDetailsTarget::from_public_inputs(
-                    pis[market_details_start + market_index * MARKET_DETAIL_SIZE
-                        ..market_details_start + (market_index + 1) * MARKET_DETAIL_SIZE]
-                        .to_vec(),
-                )
-            }),
 
             change_pub_key_message: ChangePubKeyMessageTarget::from_public_inputs(
                 &pis[change_pub_key_message_start..change_pub_key_message_end],
@@ -469,12 +429,8 @@ impl BlockTxWitnessTarget {
                 .try_into()
                 .unwrap(),
 
-            new_system_config: SystemConfigTarget::from_public_inputs(
-                &pis[system_config_start..system_config_end],
-            ),
-            register_stack_after: RegisterStackTarget::from_public_inputs(
-                &pis[register_start..register_end],
-            ),
+            old_jump: JumpStateTarget::from_public_inputs(&pis[old_jump_start..new_jump_start]),
+            new_jump: JumpStateTarget::from_public_inputs(&pis[new_jump_start..new_jump_end]),
         }
     }
 }

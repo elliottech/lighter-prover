@@ -628,6 +628,24 @@ where
             .verify_proof::<C>(proof_with_pis, inner_verifier_data, inner_common_data);
     }
 
+    pub fn conditionally_verify_proof_or_dummy<C: GenericConfig<D, F = F> + 'static>(
+        &mut self,
+        condition: BoolTarget,
+        proof_with_pis: &ProofWithPublicInputsTarget<D>,
+        inner_verifier_data: &VerifierCircuitTarget,
+        inner_common_data: &CommonCircuitData<F, D>,
+    ) -> anyhow::Result<()>
+    where
+        C::Hasher: AlgebraicHasher<F>,
+    {
+        self.builder.conditionally_verify_proof_or_dummy::<C>(
+            condition,
+            proof_with_pis,
+            inner_verifier_data,
+            inner_common_data,
+        )
+    }
+
     pub fn conditionally_verify_proof<C: GenericConfig<D, F = F>>(
         &mut self,
         condition: BoolTarget,

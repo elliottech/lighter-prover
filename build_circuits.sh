@@ -18,7 +18,8 @@ ls | grep "final::.*.vk" | xargs rm -f
 ls | grep "final::.*.sol" | xargs rm -f
 ls | grep "final::.*.r1cs" | xargs rm -f
 
-TX_PER_PROOF=4
+TX_PER_PROOF=${TX_PER_PROOF:-4}
+LIGHT_TX_PER_PROOF=${LIGHT_TX_PER_PROOF:-10}
 ON_CHAIN_OPERATIONS_LIMIT=1
 PRIORITY_OPERATIONS_LIMIT=1
 CHAIN_ID=${CHAIN_ID:-304} # Default to mainnet if not set
@@ -28,6 +29,7 @@ PUBDATA_MODE=${PUBDATA_MODE:-"blob"}
 
 echo "Using:"
 echo "TX_PER_PROOF: $TX_PER_PROOF"
+echo "LIGHT_TX_PER_PROOF: $LIGHT_TX_PER_PROOF"
 echo "ON_CHAIN_OPERATIONS_LIMIT: $ON_CHAIN_OPERATIONS_LIMIT"
 echo "PRIORITY_OPERATIONS_LIMIT: $PRIORITY_OPERATIONS_LIMIT"
 echo "CHAIN_ID: $CHAIN_ID"
@@ -52,7 +54,7 @@ cargo build --release --bin build_delta_circuit;
 cargo build --release --bin build_delta_recursion_circuit;
 
 echo "Running block circuit builder"
-./target/release/build_block_circuit --chain-id $CHAIN_ID --tx-per-proof $TX_PER_PROOF --on-chain-operations-limit $ON_CHAIN_OPERATIONS_LIMIT --priority-operations-limit $PRIORITY_OPERATIONS_LIMIT
+./target/release/build_block_circuit --chain-id $CHAIN_ID --tx-per-proof $TX_PER_PROOF --light-tx-per-proof $LIGHT_TX_PER_PROOF --on-chain-operations-limit $ON_CHAIN_OPERATIONS_LIMIT --priority-operations-limit $PRIORITY_OPERATIONS_LIMIT
 export block_circuit=$(ls -t block-circuit*.bin | head -n 1)
 export block_tx_circuit=$(ls -t block-tx-circuit*.bin | head -n 1)
 export block_pre_exec_circuit=$(ls -t block-pre-exec-circuit*.bin | head -n 1)

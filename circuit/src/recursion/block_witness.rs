@@ -39,7 +39,11 @@ pub struct BlockWitnessTarget {
 }
 
 impl BlockWitnessTarget {
-    pub fn new_public(builder: &mut Builder, on_chain_operations_limit: usize) -> Self {
+    pub fn new_public(
+        builder: &mut Builder,
+        on_chain_operations_limit: usize,
+        new_public_market_details: [PublicMarketDetailsTarget; POSITION_LIST_SIZE],
+    ) -> Self {
         Self {
             block_number: builder.add_virtual_public_input(),
             created_at: builder.add_virtual_public_input(),
@@ -48,9 +52,12 @@ impl BlockWitnessTarget {
             new_state_root: builder.add_virtual_hash_public_input(),
             old_account_delta_tree_root: builder.add_virtual_hash_public_input(),
             new_account_delta_tree_root: builder.add_virtual_hash_public_input(),
-            new_public_market_details: core::array::from_fn(|_| {
-                PublicMarketDetailsTarget::new_public(builder)
-            }),
+            new_public_market_details: {
+                for market_details in new_public_market_details.iter() {
+                    market_details.register_public_input(builder);
+                }
+                new_public_market_details
+            },
             on_chain_operations_count: builder.add_virtual_public_input(),
             on_chain_operations_pub_data: (0..on_chain_operations_limit)
                 .map(|_| {

@@ -17,7 +17,7 @@ use crate::types::asset::Asset;
 use crate::types::config::F;
 use crate::types::constants::*;
 use crate::types::margined_asset::MarginedAsset;
-use crate::types::market_details::{MarketDetails, PublicMarketDetails};
+use crate::types::market_details::{MarketDetails, MarketRiskDetails, PublicMarketDetails};
 use crate::types::price_updates::PriceUpdates;
 use crate::types::register::RegisterStack;
 use crate::types::state_metadata::StateMetadata;
@@ -46,6 +46,10 @@ where
     #[serde(rename = "mib")]
     #[serde_as(as = "[_; POSITION_LIST_SIZE]")]
     pub all_market_details: [MarketDetails; POSITION_LIST_SIZE],
+
+    #[serde(rename = "amrdb")]
+    #[serde_as(as = "[_; POSITION_LIST_SIZE]")]
+    pub all_market_risk_details: [MarketRiskDetails; POSITION_LIST_SIZE],
 
     #[serde(rename = "aab")]
     #[serde_as(as = "[_; ASSET_LIST_SIZE]")]
@@ -123,7 +127,117 @@ where
     pub new_prefix_priority_operation_hash: [u8; KECCAK_HASH_OUT_BYTE_SIZE],
 
     #[serde(rename = "txs")]
-    pub txs: Vec<Tx<F>>,
+    txs: Vec<Tx<F>>,
+    #[serde(skip)]
+    pub tx_chunks: Vec<Vec<Tx<F>>>,
+}
+
+impl<F> Block<F>
+where
+    F: Field + Extendable<5> + RichField,
+{
+    pub fn from_json(
+        data: &[u8],
+        tx_per_proof: usize,
+        light_tx_per_proof: usize,
+    ) -> serde_json::Result<Self> {
+        let mut block: Self = serde_json::from_slice(data)?;
+        let mut txs = std::mem::take(&mut block.txs);
+        // The block's witness ends with a single empty tx (older witnesses may carry one
+        // per circuit type), kept aside as the template for all padding.
+        let mut empty_template: Option<Tx<F>> = None;
+        while txs.last().is_some_and(|tx| tx.tx_type == TX_TYPE_EMPTY) {
+            empty_template = txs.pop();
+        }
+        assert!(
+            empty_template.is_some(),
+            "block witness must end with an empty padding tx"
+        );
+        assert!(
+            txs.iter().all(|tx| tx.tx_type != TX_TYPE_EMPTY),
+            "empty padding txs must only appear at the end of the block witness"
+        );
+        // Empty padding txs repeat the index of the last active tx of their own circuit
+        // type, so each chain treats them as padding relative to its own jump state.
+        let mut last_heavy_index = F::NEG_ONE.to_canonical_u64();
+        let mut last_light_index = F::NEG_ONE.to_canonical_u64();
+        for (next_index, tx) in (0_u64..).zip(txs.iter_mut()) {
+            tx.tx_index = next_index;
+            if tx.tx_circuit_type == TX_LIGHT {
+                last_light_index = next_index;
+            } else {
+                last_heavy_index = next_index;
+            }
+        }
+        block.tx_chunks = Self::chunk_txs(
+            txs,
+            empty_template,
+            last_heavy_index,
+            last_light_index,
+            tx_per_proof,
+            light_tx_per_proof,
+        );
+        Ok(block)
+    }
+
+    fn chunk_txs(
+        txs: Vec<Tx<F>>,
+        empty_template: Option<Tx<F>>,
+        last_heavy_index: u64,
+        last_light_index: u64,
+        tx_per_proof: usize,
+        light_tx_per_proof: usize,
+    ) -> Vec<Vec<Tx<F>>> {
+        let per_proof = |circuit_type: u8| {
+            if circuit_type == TX_LIGHT {
+                light_tx_per_proof
+            } else {
+                tx_per_proof
+            }
+        };
+        // Txs of each circuit type are grouped together across type jumps, keeping their
+        // relative execution order. A group is emitted as soon as it is full.
+        let mut chunks: Vec<Vec<Tx<F>>> = Vec::new();
+        let mut heavy_buf: Vec<Tx<F>> = Vec::new();
+        let mut light_buf: Vec<Tx<F>> = Vec::new();
+        let mut has_heavy = false;
+        let mut has_light = false;
+        for t in txs {
+            let buf = if t.tx_circuit_type == TX_LIGHT {
+                has_light = true;
+                &mut light_buf
+            } else {
+                has_heavy = true;
+                &mut heavy_buf
+            };
+            let size = per_proof(t.tx_circuit_type);
+            buf.push(t);
+            if buf.len() == size {
+                chunks.push(std::mem::take(buf));
+            }
+        }
+        // Each circuit type must contribute at least one group, so both chains perform at
+        // least one recursion to carry their jump state. Incomplete or missing groups are
+        // padded by replaying the block's trailing empty tx with the matching circuit type.
+        for (buf, circuit_type, has_txs, last_index) in [
+            (&mut heavy_buf, TX_HEAVY, has_heavy, last_heavy_index),
+            (&mut light_buf, TX_LIGHT, has_light, last_light_index),
+        ] {
+            if buf.is_empty() && has_txs {
+                continue;
+            }
+            let mut pad = empty_template
+                .clone()
+                .expect("block witness must end with an empty padding tx");
+            pad.tx_circuit_type = circuit_type;
+            pad.tx_index = last_index;
+            while buf.len() < per_proof(circuit_type) {
+                buf.push(pad.clone());
+            }
+            chunks.push(std::mem::take(buf));
+        }
+        chunks
+    }
 }
 
 #[serde_as]

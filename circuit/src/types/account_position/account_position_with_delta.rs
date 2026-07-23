@@ -11,7 +11,7 @@ use crate::types::account::AccountTarget;
 use crate::types::account_delta::{AccountDeltaTarget, PositionDeltaTarget};
 use crate::types::account_position::{AccountPositionTarget, random_access_account_position};
 use crate::types::config::{BIG_U96_LIMBS, BIGU16_U64_LIMBS, Builder};
-use crate::types::constants::{NB_ACCOUNTS_PER_TX, POSITION_LIST_SIZE_BITS};
+use crate::types::constants::POSITION_LIST_SIZE_BITS;
 
 #[derive(Debug, Clone, Default)]
 pub struct PositionWithDelta {
@@ -27,26 +27,26 @@ impl PositionWithDelta {
         }
     }
 
-    pub fn new_positions_with_pub_data_from_accounts(
+    pub fn new_positions_with_pub_data_from_accounts<const NB_ACCOUNTS: usize>(
         builder: &mut Builder,
         access_index: Target,
         accounts: &[AccountTarget],
         accounts_delta: &[AccountDeltaTarget],
-    ) -> [PositionWithDelta; NB_ACCOUNTS_PER_TX - 1] {
+    ) -> [PositionWithDelta; NB_ACCOUNTS] {
         builder.register_range_check(access_index, POSITION_LIST_SIZE_BITS);
 
-        let mut account_vecs: [Vec<AccountPositionTarget>; NB_ACCOUNTS_PER_TX - 1] =
+        let mut account_vecs: [Vec<AccountPositionTarget>; NB_ACCOUNTS] =
             core::array::from_fn(|i| accounts[i].positions.to_vec());
 
         // Pad all vectors to a multiple of 64
-        for i in 0..(NB_ACCOUNTS_PER_TX - 1) {
+        for i in 0..NB_ACCOUNTS {
             account_vecs[i].push(AccountPositionTarget::empty(builder));
         }
         assert!(account_vecs[0].len() % 64 == 0);
 
         let zero = builder.zero();
         let mut is_position_before_set = builder._false();
-        let mut res: [PositionWithDelta; NB_ACCOUNTS_PER_TX - 1] =
+        let mut res: [PositionWithDelta; NB_ACCOUNTS] =
             core::array::from_fn(|_| PositionWithDelta::empty(builder));
         for i in 0..(account_vecs[0].len() / 64) {
             let start_index = builder.constant_i64((i as i64) * 64);
@@ -55,7 +55,7 @@ impl PositionWithDelta {
             let contains = builder.is_lte(access_index, end_index, POSITION_LIST_SIZE_BITS);
             let contains = builder.and_not(contains, is_position_before_set);
             let chunk_access_index = builder.select(contains, chunk_access_index, zero);
-            for j in 0..(NB_ACCOUNTS_PER_TX - 1) {
+            for j in 0..NB_ACCOUNTS {
                 let position_check = random_access_account_position(
                     builder,
                     chunk_access_index,

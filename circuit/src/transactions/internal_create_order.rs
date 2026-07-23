@@ -140,7 +140,7 @@ impl InternalCreateOrderTxTarget {
         let position_tied_order_base_amount = tx_state.positions[TAKER_ACCOUNT_ID]
             .calculate_position_tied_order_base_amount(
                 builder,
-                tx_state.market_details.quote_multiplier,
+                tx_state.market_risk_details.quote_multiplier,
                 self.price,
                 tx_state.market.order_quote_limit,
             );
@@ -204,7 +204,7 @@ impl InternalCreateOrderTxTarget {
         let is_ask_take_profit_variation = builder.and(is_ask, is_take_profit_variation);
         let is_bid_take_profit_variation = builder.and_not(is_take_profit_variation, is_ask);
         let mark_cmp_trigger_price = builder.cmp(
-            tx_state.market_details.mark_price,
+            tx_state.market_risk_details.mark_price,
             tx_state.account_order.trigger_price,
             ORDER_PRICE_BITS,
         );

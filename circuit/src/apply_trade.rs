@@ -21,12 +21,13 @@ use crate::types::config::{
 };
 use crate::types::constants::*;
 use crate::types::market::MarketTarget;
-use crate::types::market_details::{MarketDetailsTarget, MarketFlags};
+use crate::types::market_details::{MarketDetailsTarget, MarketFlags, MarketRiskDetailsTarget};
 use crate::types::risk_info::{RiskInfoTarget, RiskParametersTarget};
 use crate::utils::CircuitBuilderUtils;
 
 pub struct ApplyTradeParams<'a> {
     pub market_details: &'a MarketDetailsTarget,
+    pub market_risk_details: &'a MarketRiskDetailsTarget,
     pub market: &'a MarketTarget,
     pub is_taker_ask: BoolTarget,
     pub trade_base: Target,
@@ -250,7 +251,7 @@ pub fn apply_perps_trade(
     let taker_funding_delta = get_funding_delta_for_position_and_market(
         builder,
         &old_taker_position,
-        input.market_details,
+        input.market_risk_details,
     );
 
     let taker_funding_cross_delta =
@@ -290,7 +291,7 @@ pub fn apply_perps_trade(
     let maker_funding_delta = get_funding_delta_for_position_and_market(
         builder,
         &old_maker_position,
-        input.market_details,
+        input.market_risk_details,
     );
 
     let maker_funding_cross_delta =
@@ -333,7 +334,7 @@ pub fn apply_perps_trade(
     );
     old_taker_position.last_funding_rate_prefix_sum = builder.select_bigint_u16(
         is_enabled,
-        &input.market_details.funding_rate_prefix_sum,
+        &input.market_risk_details.funding_rate_prefix_sum,
         &old_taker_position.last_funding_rate_prefix_sum,
     );
 
@@ -354,7 +355,7 @@ pub fn apply_perps_trade(
             is_enabled,
             &old_taker_position,
             taker_position_delta,
-            input.market_details,
+            input.market_risk_details,
             input.trade_quote,
             input.trade_base,
         );
@@ -380,7 +381,7 @@ pub fn apply_perps_trade(
     );
     old_maker_position.last_funding_rate_prefix_sum = builder.select_bigint_u16(
         is_enabled,
-        &input.market_details.funding_rate_prefix_sum,
+        &input.market_risk_details.funding_rate_prefix_sum,
         &old_maker_position.last_funding_rate_prefix_sum,
     );
 
@@ -391,7 +392,7 @@ pub fn apply_perps_trade(
             is_enabled,
             &old_maker_position,
             maker_position_delta,
-            input.market_details,
+            input.market_risk_details,
             input.trade_quote,
             input.trade_base,
         );
@@ -539,7 +540,7 @@ pub fn apply_perps_trade(
                 &taker_collateral_delta,
                 &old_taker_position,
                 &taker_new_position,
-                input.market_details,
+                input.market_risk_details,
                 is_enabled,
             ),
         // If cross_risk_parameters and current_risk_parameters are the same, then margin delta will be zero
@@ -592,7 +593,7 @@ pub fn apply_perps_trade(
                 &maker_collateral_delta,
                 &old_maker_position,
                 &maker_new_position,
-                input.market_details,
+                input.market_risk_details,
                 is_enabled,
             ),
         // If cross_risk_parameters and current_risk_parameters are the same, then margin delta will be zero
@@ -665,7 +666,7 @@ pub fn calculate_position_change(
     is_enabled: BoolTarget,
     position: &AccountPositionTarget,
     position_delta: SignedTarget,
-    market_details: &MarketDetailsTarget,
+    market_details: &MarketRiskDetailsTarget,
     trade_quote: SignedTarget,
     trade_base: Target,
 ) -> (AccountPositionTarget, BigIntTarget, SignedTarget) {
@@ -810,17 +811,17 @@ pub fn calculate_isolated_margin_change(
 
     let margin_fraction_multiplier = builder.constant_u64(MARGIN_FRACTION_MULTIPLIER as u64);
     let normalized_position_notional_multiplier = builder.mul_many([
-        input.market_details.mark_price,       // 32 bits
-        input.market_details.quote_multiplier, // 20 bits
-        margin_fraction_multiplier,            // 7 bits
+        input.market_risk_details.mark_price,       // 32 bits
+        input.market_risk_details.quote_multiplier, // 20 bits
+        margin_fraction_multiplier,                 // 7 bits
     ]);
     let normalized_position_notional_multiplier =
         builder.target_to_biguint(normalized_position_notional_multiplier); // 59 bits
 
     let position_initial_margin_fraction = position.get_initial_margin_fraction(
         builder,
-        input.market_details.default_initial_margin_fraction,
-        input.market_details.min_initial_margin_fraction,
+        input.market_risk_details.default_initial_margin_fraction,
+        input.market_risk_details.min_initial_margin_fraction,
     ); // 16 bits
     let position_initial_margin_fraction_big =
         builder.target_to_biguint_single_limb_unsafe(position_initial_margin_fraction);
@@ -869,7 +870,7 @@ pub fn calculate_isolated_margin_change(
 
     let old_position_unrealized_usdc_pnl = get_position_unrealized_pnl(
         builder,
-        input.market_details,
+        input.market_risk_details,
         old_position_abs_target,
         old_position.position.sign,
         old_position.entry_quote,
@@ -884,7 +885,7 @@ pub fn calculate_isolated_margin_change(
 
     let unrealized_usdc_pnl = get_position_unrealized_pnl(
         builder,
-        input.market_details,
+        input.market_risk_details,
         position_abs_target,
         position.position.sign,
         position.entry_quote,

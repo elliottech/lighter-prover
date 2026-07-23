@@ -148,7 +148,7 @@ impl Verify for L2UpdateLeverageTxTarget {
         let active_market_status = builder.constant_from_u8(MARKET_STATUS_ACTIVE);
         builder.conditional_assert_eq(
             is_enabled,
-            tx_state.market_details.status,
+            tx_state.market_risk_details.status,
             active_market_status,
         );
         builder.conditional_assert_eq_constant(
@@ -160,7 +160,7 @@ impl Verify for L2UpdateLeverageTxTarget {
         // Check if the initial margin fraction is within the allowed range
         builder.register_range_check(self.initial_margin_fraction, MARGIN_FRACTION_BITS);
         let is_initial_margin_fraction_valid = builder.is_lte(
-            tx_state.market_details.min_initial_margin_fraction,
+            tx_state.market_risk_details.min_initial_margin_fraction,
             self.initial_margin_fraction,
             MARGIN_FRACTION_BITS,
         );
@@ -224,9 +224,9 @@ impl Apply for L2UpdateLeverageTxTarget {
 
         let margin_fraction_multiplier = builder.constant_u64(MARGIN_FRACTION_MULTIPLIER as u64);
         let normalized_position_notional_multiplier = builder.mul_many([
-            tx_state.market_details.mark_price,       // 32 bits
-            tx_state.market_details.quote_multiplier, // 14 bits
-            margin_fraction_multiplier,               // 7 bits
+            tx_state.market_risk_details.mark_price,       // 32 bits
+            tx_state.market_risk_details.quote_multiplier, // 14 bits
+            margin_fraction_multiplier,                    // 7 bits
         ]);
         let normalized_position_notional_multiplier =
             builder.target_to_biguint(normalized_position_notional_multiplier); // 59 bits
@@ -234,8 +234,8 @@ impl Apply for L2UpdateLeverageTxTarget {
         let position_initial_margin_fraction = tx_state.positions[OWNER_ACCOUNT_ID]
             .get_initial_margin_fraction(
                 builder,
-                tx_state.market_details.default_initial_margin_fraction,
-                tx_state.market_details.min_initial_margin_fraction,
+                tx_state.market_risk_details.default_initial_margin_fraction,
+                tx_state.market_risk_details.min_initial_margin_fraction,
             ); // 16 bits
         let position_initial_margin_fraction_big =
             builder.target_to_biguint_single_limb_unsafe(position_initial_margin_fraction);

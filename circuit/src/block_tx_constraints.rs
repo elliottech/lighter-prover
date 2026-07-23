@@ -6,7 +6,7 @@ use itertools::Itertools;
 use log::Level;
 use plonky2::field::extension::Extendable;
 use plonky2::field::types::{Field, Field64};
-use plonky2::hash::hash_types::{HashOutTarget, RichField};
+use plonky2::hash::hash_types::{HashOutTarget, NUM_HASH_OUT_ELTS, RichField};
 use plonky2::iop::target::Target;
 use plonky2::iop::witness::{PartialWitness, WitnessWrite};
 use plonky2::plonk::circuit_data::{CircuitConfig, CircuitData};
@@ -16,22 +16,15 @@ use plonky2::plonk::prover::prove;
 use plonky2::timed;
 use plonky2::util::timing::TimingTree;
 
-use crate::block_tx::BlockTx;
+use crate::block_tx::{BlockTx, JumpStateTarget};
 use crate::bool_utils::CircuitBuilderBoolUtils;
+use crate::hash_utils::CircuitBuilderHashUtils;
+use crate::poseidon2::Poseidon2Hash;
 use crate::tx_constraints::{TxTarget, TxTargetWitness};
 use crate::types::approve_integrator::ApproveIntegratorMessageTarget;
-use crate::types::asset::{AssetTarget, AssetTargetWitness, connect_assets};
 use crate::types::change_pub_key::ChangePubKeyMessageTarget;
 use crate::types::config::{Builder, C, D, F};
 use crate::types::constants::*;
-use crate::types::margined_asset::{
-    MarginedAssetTarget, MarginedAssetTargetWitness, connect_margined_assets,
-};
-use crate::types::market_details::{
-    MarketDetailsTarget, MarketDetailsWitness, connect_market_details,
-};
-use crate::types::register::{RegisterInfoTargetWitness, RegisterStackTarget};
-use crate::types::system_config::{SystemConfigTarget, SystemConfigTargetWitness};
 use crate::types::transfer::TransferMessageTarget;
 use crate::uint::u8::{CircuitBuilderU8, U8Target};
 use crate::utils::CircuitBuilderUtils;
@@ -47,7 +40,7 @@ pub trait Circuit<
     /// `builder` can be used to build circuit via calling [`Builder::build()`]
     ///
     /// `target` can be used to assign partial witness in [`BlockTxCircuit::prove()`] function
-    fn define(config: CircuitConfig, tx_limit: usize, chain_id: u32) -> Self;
+    fn define(config: CircuitConfig, tx_limit: usize, chain_id: u32, mode: u8) -> Self;
     /// Fills partial witness for block target with given block data
     fn generate_witness(block: &BlockTx<F>, target: &BlockTxTarget) -> Result<PartialWitness<F>>;
     /// Takes `circuit`, block witness and `target` defined in [`BlockTxCircuit::define()`] function
@@ -69,37 +62,19 @@ pub struct BlockTxCircuit {
 pub struct BlockTxTarget {
     pub created_at: Target, // 48 bits
 
-    /***********************/
-    /*  COMMON STATE DATA  */
-    /***********************/
-    pub old_system_config: SystemConfigTarget,
-    pub register_stack_before: RegisterStackTarget,
-    pub all_assets_before: [AssetTarget; ASSET_LIST_SIZE],
-    pub all_margined_assets_before: [MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
-    pub all_market_details_before: [MarketDetailsTarget; POSITION_LIST_SIZE],
-
-    /**************************/
-    /*  OLD STATE TREE ROOTS  */
-    /**************************/
-    pub old_account_tree_root: HashOutTarget,
-    pub old_account_pub_data_tree_root: HashOutTarget,
-    pub old_market_tree_root: HashOutTarget,
-
     /***************************/
     /*  NEW COMMON STATE DATA  */
     /***************************/
-    pub new_system_config: SystemConfigTarget,
-    pub register_stack_after: RegisterStackTarget,
-    pub all_assets_after: [AssetTarget; ASSET_LIST_SIZE],
-    pub all_margined_assets_after: [MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
-    pub all_market_details_after: [MarketDetailsTarget; POSITION_LIST_SIZE],
+    // Hash of the public (pubdata) part of all market details after the batch.
+    // Committed to the state root inside each tx; the block circuit opens it.
+    pub public_market_details_hash_after: HashOutTarget,
 
     /**************************/
     /*  NEW STATE TREE ROOTS  */
     /**************************/
-    pub new_account_tree_root: HashOutTarget,
-    pub new_account_pub_data_tree_root: HashOutTarget,
-    pub new_market_tree_root: HashOutTarget,
+    pub state_metadata_hash: HashOutTarget,
+    pub new_validium_root: HashOutTarget,
+    pub new_state_root: HashOutTarget,
 
     /*******************************/
     /*  ECDSA SIGNED MESSAGE DATA  */
@@ -111,7 +86,6 @@ pub struct BlockTxTarget {
     // /*************************/
     // /*       PUB DATA        */
     // /*************************/
-    pub old_account_delta_tree_root: HashOutTarget,
     pub new_account_delta_tree_root: HashOutTarget,
     pub priority_operations_count: Target,
     pub priority_operations_pub_data: [U8Target; MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX],
@@ -122,6 +96,9 @@ pub struct BlockTxTarget {
     /*  TRANSACTIONS  */
     /******************/
     pub txs: Vec<TxTarget>,
+
+    pub old_jump: JumpStateTarget,
+    pub new_jump: JumpStateTarget,
 }
 
 impl Default for BlockTxTarget {
@@ -129,35 +106,18 @@ impl Default for BlockTxTarget {
         Self {
             created_at: Target::default(),
 
-            old_system_config: SystemConfigTarget::default(),
-            register_stack_before: RegisterStackTarget::default(),
-            all_assets_before: core::array::from_fn(|_| AssetTarget::default()),
-            all_margined_assets_before: core::array::from_fn(|_| MarginedAssetTarget::default()),
-            all_market_details_before: core::array::from_fn(|_| MarketDetailsTarget::default()),
-
-            old_account_tree_root: HashOutTarget {
-                elements: core::array::from_fn(|_| Target::default()),
-            },
-            old_account_pub_data_tree_root: HashOutTarget {
-                elements: core::array::from_fn(|_| Target::default()),
-            },
-            old_market_tree_root: HashOutTarget {
+            state_metadata_hash: HashOutTarget {
                 elements: core::array::from_fn(|_| Target::default()),
             },
 
-            new_system_config: SystemConfigTarget::default(),
-            register_stack_after: RegisterStackTarget::default(),
-            all_assets_after: core::array::from_fn(|_| AssetTarget::default()),
-            all_margined_assets_after: core::array::from_fn(|_| MarginedAssetTarget::default()),
-            all_market_details_after: core::array::from_fn(|_| MarketDetailsTarget::default()),
+            public_market_details_hash_after: HashOutTarget {
+                elements: core::array::from_fn(|_| Target::default()),
+            },
 
-            new_account_tree_root: HashOutTarget {
+            new_validium_root: HashOutTarget {
                 elements: core::array::from_fn(|_| Target::default()),
             },
-            new_account_pub_data_tree_root: HashOutTarget {
-                elements: core::array::from_fn(|_| Target::default()),
-            },
-            new_market_tree_root: HashOutTarget {
+            new_state_root: HashOutTarget {
                 elements: core::array::from_fn(|_| Target::default()),
             },
 
@@ -165,9 +125,6 @@ impl Default for BlockTxTarget {
             transfer_message: TransferMessageTarget::default(),
             approve_integrator_message: ApproveIntegratorMessageTarget::default(),
 
-            old_account_delta_tree_root: HashOutTarget {
-                elements: core::array::from_fn(|_| Target::default()),
-            },
             new_account_delta_tree_root: HashOutTarget {
                 elements: core::array::from_fn(|_| Target::default()),
             },
@@ -177,12 +134,15 @@ impl Default for BlockTxTarget {
             on_chain_operations_pub_data: core::array::from_fn(|_| U8Target::default()),
 
             txs: vec![],
+
+            old_jump: JumpStateTarget::default(),
+            new_jump: JumpStateTarget::default(),
         }
     }
 }
 
 impl Circuit<C, F, D> for BlockTxCircuit {
-    fn define(config: CircuitConfig, tx_limit: usize, chain_id: u32) -> Self {
+    fn define(config: CircuitConfig, tx_limit: usize, chain_id: u32, mode: u8) -> Self {
         let mut circuit = Self::new(config, tx_limit);
 
         circuit.register_public_inputs();
@@ -192,32 +152,19 @@ impl Circuit<C, F, D> for BlockTxCircuit {
             on_chain_operations_pub_data,
             priority_operations_count,
             priority_operations_pub_data,
-            new_system_config,
-            register_stack_after,
-            all_assets_after,
-            all_margined_assets_after,
-            all_market_details_after,
-            account_tree_root_after,
-            account_pub_data_tree_root_after,
+            public_market_details_hash_after,
             account_delta_tree_root_after,
-            market_tree_root_after,
-        ) = circuit.define_tx_loop(tx_limit, chain_id);
+        ) = circuit.define_tx_loop(tx_limit, chain_id, mode);
 
-        circuit.define_post_block(
+        circuit.define_post_tx_batch(
             chain_id,
-            account_tree_root_after,
-            account_pub_data_tree_root_after,
             account_delta_tree_root_after,
-            market_tree_root_after,
-            &new_system_config,
-            &register_stack_after,
-            &all_assets_after,
-            &all_margined_assets_after,
-            &all_market_details_after,
+            public_market_details_hash_after,
             on_chain_operations_count,
             &on_chain_operations_pub_data,
             priority_operations_count,
             &priority_operations_pub_data,
+            mode,
         );
 
         circuit.builder.perform_registered_range_checks();
@@ -247,35 +194,35 @@ impl Circuit<C, F, D> for BlockTxCircuit {
         let mut pw = PartialWitness::new();
 
         pw.set_target(target.created_at, F::from_canonical_i64(block.created_at))?;
+        pw.set_hash_target(target.state_metadata_hash, block.state_metadata_hash)?;
 
-        pw.set_system_config_target(&target.old_system_config, &block.old_system_config)?;
-        pw.set_register_info_target(&target.register_stack_before, &block.register_stack_before)?;
-        target
-            .all_assets_before
-            .iter()
-            .zip_eq(block.all_assets_before.iter())
-            .try_for_each(|(t, ai)| pw.set_asset_target(t, ai))?;
-        target
-            .all_margined_assets_before
-            .iter()
-            .zip_eq(block.all_margined_assets_before.iter())
-            .try_for_each(|(t, mai)| pw.set_margined_asset_target(t, mai))?;
-        target
-            .all_market_details_before
-            .iter()
-            .zip_eq(block.all_market_details_before.iter())
-            .try_for_each(|(t, mi)| pw.set_market_details_target(t, mi))?;
-
-        pw.set_hash_target(target.old_account_tree_root, block.old_account_tree_root)?;
-        pw.set_hash_target(
-            target.old_account_pub_data_tree_root,
-            block.old_account_pub_data_tree_root,
+        pw.set_target(
+            target.old_jump.last_active_tx_index,
+            block.old_jump.last_active_tx_index,
         )?;
-        pw.set_hash_target(target.old_market_tree_root, block.old_market_tree_root)?;
         pw.set_hash_target(
-            target.old_account_delta_tree_root,
-            block.old_account_delta_tree_root,
+            target.old_jump.prev_new_state_root,
+            block.old_jump.prev_new_state_root,
         )?;
+        pw.set_hash_target(
+            target.old_jump.prev_new_delta_root,
+            block.old_jump.prev_new_delta_root,
+        )?;
+        pw.set_target(
+            target.old_jump.run_start_prev_index,
+            block.old_jump.run_start_prev_index,
+        )?;
+        pw.set_hash_target(
+            target.old_jump.run_start_old_state_root,
+            block.old_jump.run_start_old_state_root,
+        )?;
+        pw.set_hash_target(
+            target.old_jump.run_start_old_delta_root,
+            block.old_jump.run_start_old_delta_root,
+        )?;
+        pw.set_hash_target(target.old_jump.coverage_hash, block.old_jump.coverage_hash)?;
+        pw.set_hash_target(target.old_jump.claims_hash, block.old_jump.claims_hash)?;
+        pw.set_target(target.old_jump.tx_count, block.old_jump.tx_count)?;
 
         target
             .txs
@@ -295,55 +242,18 @@ impl BlockTxCircuit {
         Self {
             target: BlockTxTarget {
                 created_at: builder.add_virtual_target(),
-                old_system_config: SystemConfigTarget::new(&mut builder),
-                register_stack_before: RegisterStackTarget::new(&mut builder),
-                all_assets_before: (0..ASSET_LIST_SIZE)
-                    .map(|_| AssetTarget::new(&mut builder))
-                    .collect::<Vec<_>>()
-                    .try_into()
-                    .unwrap(),
-                all_margined_assets_before: (0..MARGINED_ASSET_LIST_SIZE)
-                    .map(|_| MarginedAssetTarget::new(&mut builder))
-                    .collect::<Vec<_>>()
-                    .try_into()
-                    .unwrap(),
-                all_market_details_before: (0..POSITION_LIST_SIZE)
-                    .map(|_| MarketDetailsTarget::new(&mut builder))
-                    .collect::<Vec<_>>()
-                    .try_into()
-                    .unwrap(),
-
-                old_account_tree_root: builder.add_virtual_hash(),
-                old_account_pub_data_tree_root: builder.add_virtual_hash(),
-                old_market_tree_root: builder.add_virtual_hash(),
-                old_account_delta_tree_root: builder.add_virtual_hash(),
+                state_metadata_hash: builder.add_virtual_hash(),
 
                 txs: (0..tx_limit).map(|_| TxTarget::new(&mut builder)).collect(),
 
                 // ..Default::default() //
                 // Comment out the following to avoid "generators weren't run"
-                new_system_config: SystemConfigTarget::new(&mut builder),
-                register_stack_after: RegisterStackTarget::new(&mut builder),
-                all_assets_after: (0..ASSET_LIST_SIZE)
-                    .map(|_| AssetTarget::new(&mut builder))
-                    .collect::<Vec<_>>()
-                    .try_into()
-                    .unwrap(),
-                all_margined_assets_after: (0..MARGINED_ASSET_LIST_SIZE)
-                    .map(|_| MarginedAssetTarget::new(&mut builder))
-                    .collect::<Vec<_>>()
-                    .try_into()
-                    .unwrap(),
-                all_market_details_after: (0..POSITION_LIST_SIZE)
-                    .map(|_| MarketDetailsTarget::new(&mut builder))
-                    .collect::<Vec<_>>()
-                    .try_into()
-                    .unwrap(),
+                public_market_details_hash_after: builder.add_virtual_hash(),
 
-                new_account_tree_root: builder.add_virtual_hash(),
-                new_account_pub_data_tree_root: builder.add_virtual_hash(),
                 new_account_delta_tree_root: builder.add_virtual_hash(),
-                new_market_tree_root: builder.add_virtual_hash(),
+
+                new_validium_root: builder.add_virtual_hash(),
+                new_state_root: builder.add_virtual_hash(),
 
                 change_pub_key_message: ChangePubKeyMessageTarget::new(&mut builder),
                 transfer_message: TransferMessageTarget::new(&mut builder),
@@ -360,6 +270,9 @@ impl BlockTxCircuit {
                     .add_virtual_u8_targets_unsafe(ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE)
                     .try_into()
                     .unwrap(), // safe because it is connected to output of split_bytes which are range-checked
+
+                old_jump: JumpStateTarget::new(&mut builder),
+                new_jump: JumpStateTarget::new(&mut builder),
             },
 
             builder,
@@ -367,67 +280,16 @@ impl BlockTxCircuit {
     }
 
     fn register_public_inputs(&mut self) {
-        // Old state tree roots
-        self.builder
-            .register_public_hashout(self.target.old_account_pub_data_tree_root);
-        self.builder
-            .register_public_hashout(self.target.old_account_tree_root);
-        self.builder
-            .register_public_hashout(self.target.old_market_tree_root);
-        self.builder
-            .register_public_hashout(self.target.old_account_delta_tree_root);
-
-        self.target.all_assets_before.iter().for_each(|asset| {
-            asset.register_public_input(&mut self.builder);
-        });
-        self.target
-            .all_margined_assets_before
-            .iter()
-            .for_each(|margined_asset| {
-                margined_asset.register_public_input(&mut self.builder);
-            });
-        self.target
-            .all_market_details_before
-            .iter()
-            .for_each(|market| {
-                market.register_public_input(&mut self.builder);
-            });
-
-        // Old system config
-        self.target
-            .old_system_config
-            .register_public_input(&mut self.builder);
-
-        // Old register stack
-        self.target
-            .register_stack_before
-            .register_public_input(&mut self.builder);
-
-        // New state tree roots
-        self.builder
-            .register_public_hashout(self.target.new_account_pub_data_tree_root);
-        self.builder
-            .register_public_hashout(self.target.new_account_tree_root);
-        self.builder
-            .register_public_hashout(self.target.new_market_tree_root);
         self.builder
             .register_public_hashout(self.target.new_account_delta_tree_root);
 
-        self.target.all_assets_after.iter().for_each(|asset| {
-            asset.register_public_input(&mut self.builder);
-        });
-        self.target
-            .all_margined_assets_after
-            .iter()
-            .for_each(|margined_asset| {
-                margined_asset.register_public_input(&mut self.builder);
-            });
-        self.target
-            .all_market_details_after
-            .iter()
-            .for_each(|market| {
-                market.register_public_input(&mut self.builder);
-            });
+        self.builder
+            .register_public_hashout(self.target.new_validium_root);
+        self.builder
+            .register_public_hashout(self.target.new_state_root);
+
+        self.builder
+            .register_public_hashout(self.target.public_market_details_hash_after);
 
         // Change pub key message
         self.target
@@ -462,35 +324,26 @@ impl BlockTxCircuit {
                 self.builder.register_public_u8_input(byte);
             });
 
-        // New system config
         self.target
-            .new_system_config
-            .register_public_input(&mut self.builder);
-
-        // New register stack
+            .old_jump
+            .register_public_inputs(&mut self.builder);
         self.target
-            .register_stack_after
-            .register_public_input(&mut self.builder);
+            .new_jump
+            .register_public_inputs(&mut self.builder);
     }
 
     fn define_tx_loop(
         &mut self,
         tx_limit: usize,
         chain_id: u32,
+        mode: u8,
     ) -> (
         Target,                                                    // on chain operations count
         [U8Target; ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE], // on chain operations public data
         Target,                                              // priority operations count
         [U8Target; MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX], // priority operations public data
-        SystemConfigTarget,                                        // new system config
-        RegisterStackTarget,                                       // new register stack
-        [AssetTarget; ASSET_LIST_SIZE],                            // new assets
-        [MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],           // new margined assets
-        [MarketDetailsTarget; POSITION_LIST_SIZE],                 // new market details
-        HashOutTarget,                                             // new account tree root
-        HashOutTarget,                                             // new account pub data tree root
+        HashOutTarget,                                             // new public market details hash
         HashOutTarget,                                             // new account delta tree root
-        HashOutTarget,                                             // new market tree root
     ) {
         assert_eq!(self.target.txs.len(), tx_limit, "txs count mismatch");
         assert!(
@@ -506,18 +359,13 @@ impl BlockTxCircuit {
         let mut priority_operations_pub_data =
             [self.builder.zero_u8(); MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX];
 
-        let mut current_system_config = self.target.old_system_config;
-        let mut current_register_stack = self.target.register_stack_before;
-        let mut current_all_assets = self.target.all_assets_before.clone();
-        let mut current_all_margined_assets = self.target.all_margined_assets_before.clone();
-        let mut current_all_market_details = self.target.all_market_details_before.clone();
-        let mut current_account_tree_root = self.target.old_account_tree_root;
-        let mut current_account_pub_data_tree_root = self.target.old_account_pub_data_tree_root;
-        let mut current_account_delta_tree_root = self.target.old_account_delta_tree_root;
-        let mut current_market_tree_root = self.target.old_market_tree_root;
-
         self.builder
             .register_range_check(self.target.created_at, TIMESTAMP_BITS);
+
+        let mut current_account_delta_tree_root = self.builder.zero_hash_out();
+        let mut public_market_details_hash_after = self.builder.zero_hash_out();
+
+        let mut jump = self.target.old_jump;
 
         for (index, tx) in self.target.txs.iter_mut().enumerate() {
             let (
@@ -525,147 +373,231 @@ impl BlockTxCircuit {
                 priority_operations_pub_data_exists,
                 tx_on_chain_operations_pub_data,
                 on_chain_pub_data_exists,
-                new_system_config,
-                register_stack_after,
-                all_assets_after,
-                all_margined_assets_after,
-                all_market_details_after,
-                account_tree_root_after,
-                account_pub_data_tree_root_after,
+                tx_public_market_details_hash_after,
                 account_delta_tree_root_after,
-                market_tree_root_after,
-            ) = tx.define(
-                index,
-                chain_id,
-                &mut self.builder,
-                self.target.created_at,
-                &current_system_config,
-                &current_register_stack,
-                &current_all_assets,
-                &current_all_margined_assets,
-                &current_all_market_details,
-                current_account_tree_root,
-                current_account_pub_data_tree_root,
-                current_account_delta_tree_root,
-                current_market_tree_root,
-            );
+            ) = match mode {
+                TX_HEAVY => tx.define(
+                    index,
+                    chain_id,
+                    &mut self.builder,
+                    self.target.created_at,
+                    self.target.state_metadata_hash,
+                ),
+                TX_LIGHT => tx.define_light(
+                    index,
+                    chain_id,
+                    &mut self.builder,
+                    self.target.created_at,
+                    self.target.state_metadata_hash,
+                ),
+                _ => panic!("unknown tx circuit mode: {mode}"),
+            };
 
-            current_system_config = new_system_config;
-            current_register_stack = register_stack_after;
-            current_all_assets = all_assets_after;
-            current_all_margined_assets = all_margined_assets_after;
-            current_all_market_details = all_market_details_after;
-            current_account_tree_root = account_tree_root_after;
-            current_account_pub_data_tree_root = account_pub_data_tree_root_after;
             current_account_delta_tree_root = account_delta_tree_root_after;
-            current_market_tree_root = market_tree_root_after;
+            public_market_details_hash_after = tx_public_market_details_hash_after;
 
-            on_chain_operations_count = self
-                .builder
-                .add(on_chain_operations_count, on_chain_pub_data_exists.target);
-            on_chain_operations_pub_data = self.builder.select_arr_u8(
-                on_chain_pub_data_exists,
-                &tx_on_chain_operations_pub_data,
-                &on_chain_operations_pub_data,
+            jump = Self::define_jump_step(
+                &mut self.builder,
+                jump,
+                tx.tx_index,
+                tx.tx_type,
+                tx.old_state_root,
+                tx.new_state_root,
+                tx.old_account_delta_tree_root,
+                account_delta_tree_root_after,
             );
 
-            priority_operations_count = self.builder.add(
-                priority_operations_count,
-                priority_operations_pub_data_exists.target,
-            );
-            priority_operations_pub_data = self.builder.select_arr_u8(
-                priority_operations_pub_data_exists,
-                &tx_priority_operations_pub_data,
-                &priority_operations_pub_data,
-            );
+            if mode == TX_HEAVY {
+                on_chain_operations_count = self
+                    .builder
+                    .add(on_chain_operations_count, on_chain_pub_data_exists.target);
+                on_chain_operations_pub_data = self.builder.select_arr_u8(
+                    on_chain_pub_data_exists,
+                    &tx_on_chain_operations_pub_data,
+                    &on_chain_operations_pub_data,
+                );
+                priority_operations_count = self.builder.add(
+                    priority_operations_count,
+                    priority_operations_pub_data_exists.target,
+                );
+                priority_operations_pub_data = self.builder.select_arr_u8(
+                    priority_operations_pub_data_exists,
+                    &tx_priority_operations_pub_data,
+                    &priority_operations_pub_data,
+                );
+            }
         }
+
+        JumpStateTarget::connect(&mut self.builder, &jump, &self.target.new_jump);
 
         (
             on_chain_operations_count,
             on_chain_operations_pub_data,
             priority_operations_count,
             priority_operations_pub_data,
-            current_system_config,
-            current_register_stack,
-            current_all_assets,
-            current_all_margined_assets,
-            current_all_market_details,
-            current_account_tree_root,
-            current_account_pub_data_tree_root,
+            public_market_details_hash_after,
             current_account_delta_tree_root,
-            current_market_tree_root,
         )
     }
 
-    fn define_post_block(
+    #[allow(clippy::too_many_arguments)]
+    fn define_jump_step(
+        builder: &mut Builder,
+        jump: JumpStateTarget,
+        tx_index: Target,
+        tx_type: Target,
+        tx_old_state_root: HashOutTarget,
+        tx_new_state_root: HashOutTarget,
+        tx_old_delta_root: HashOutTarget,
+        tx_new_delta_root: HashOutTarget,
+    ) -> JumpStateTarget {
+        let one = builder.one();
+
+        let is_padding = builder.is_equal(tx_index, jump.last_active_tx_index);
+        let is_active = builder.not(is_padding);
+        let is_empty = builder.is_zero(tx_type);
+        builder.connect(is_empty.target, is_padding.target);
+
+        let gap = builder.sub(tx_index, jump.last_active_tx_index);
+        let effective_gap = builder.select(is_padding, one, gap);
+        let gap_minus_one = builder.sub(effective_gap, one);
+        builder.register_range_check(gap_minus_one, 32);
+        let has_gap = builder.is_not_zero(gap_minus_one);
+        let jumped = builder.and(is_active, has_gap);
+
+        let continuous = builder.and_not(is_active, has_gap);
+        for i in 0..NUM_HASH_OUT_ELTS {
+            builder.conditional_assert_eq(
+                continuous,
+                tx_old_state_root.elements[i],
+                jump.prev_new_state_root.elements[i],
+            );
+            builder.conditional_assert_eq(
+                continuous,
+                tx_old_delta_root.elements[i],
+                jump.prev_new_delta_root.elements[i],
+            );
+        }
+
+        let run_empty = builder.is_equal(jump.last_active_tx_index, jump.run_start_prev_index);
+        let run_nonempty = builder.not(run_empty);
+        let fold_coverage = builder.and(jumped, run_nonempty);
+        let prev_plus_one = builder.add(jump.last_active_tx_index, one);
+        let mut coverage_record_in = vec![jump.run_start_prev_index, prev_plus_one];
+        coverage_record_in.extend(jump.run_start_old_state_root.elements);
+        coverage_record_in.extend(jump.prev_new_state_root.elements);
+        coverage_record_in.extend(jump.run_start_old_delta_root.elements);
+        coverage_record_in.extend(jump.prev_new_delta_root.elements);
+        let coverage_record = builder.hash_n_to_hash_no_pad::<Poseidon2Hash>(coverage_record_in);
+        let folded_coverage = builder.hash_two_to_one(&jump.coverage_hash, &coverage_record);
+
+        let mut claim_record_in = vec![jump.last_active_tx_index, tx_index];
+        claim_record_in.extend(jump.prev_new_state_root.elements);
+        claim_record_in.extend(tx_old_state_root.elements);
+        claim_record_in.extend(jump.prev_new_delta_root.elements);
+        claim_record_in.extend(tx_old_delta_root.elements);
+        let claim_record = builder.hash_n_to_hash_no_pad::<Poseidon2Hash>(claim_record_in);
+        let folded_claims = builder.hash_two_to_one(&jump.claims_hash, &claim_record);
+
+        let tx_index_minus_one = builder.sub(tx_index, one);
+
+        JumpStateTarget {
+            last_active_tx_index: builder.select(is_active, tx_index, jump.last_active_tx_index),
+            prev_new_state_root: builder.select_hash(
+                is_active,
+                &tx_new_state_root,
+                &jump.prev_new_state_root,
+            ),
+            prev_new_delta_root: builder.select_hash(
+                is_active,
+                &tx_new_delta_root,
+                &jump.prev_new_delta_root,
+            ),
+            run_start_prev_index: builder.select(
+                jumped,
+                tx_index_minus_one,
+                jump.run_start_prev_index,
+            ),
+            run_start_old_state_root: builder.select_hash(
+                jumped,
+                &tx_old_state_root,
+                &jump.run_start_old_state_root,
+            ),
+            run_start_old_delta_root: builder.select_hash(
+                jumped,
+                &tx_old_delta_root,
+                &jump.run_start_old_delta_root,
+            ),
+            coverage_hash: builder.select_hash(
+                fold_coverage,
+                &folded_coverage,
+                &jump.coverage_hash,
+            ),
+            claims_hash: builder.select_hash(jumped, &folded_claims, &jump.claims_hash),
+            tx_count: builder.add(jump.tx_count, is_active.target),
+        }
+    }
+
+    fn define_post_tx_batch(
         &mut self,
         chain_id: u32,
-        new_account_tree_root: HashOutTarget,
-        new_account_pub_data_tree_root: HashOutTarget,
         new_account_delta_tree_root: HashOutTarget,
-        new_market_tree_root: HashOutTarget,
-        new_system_config: &SystemConfigTarget,
-        register_stack_after: &RegisterStackTarget,
-        all_assets_after: &[AssetTarget; ASSET_LIST_SIZE],
-        all_margined_assets_after: &[MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
-        all_market_details_after: &[MarketDetailsTarget; POSITION_LIST_SIZE],
+        public_market_details_hash_after: HashOutTarget,
         on_chain_operations_count: Target,
         on_chain_operations_pub_data: &[U8Target; ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE],
         priority_operations_count: Target,
         priority_operations_pub_data: &[U8Target; MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX],
+        mode: u8,
     ) {
-        self.handle_change_pub_key();
-        self.handle_transfer(chain_id);
-        self.handle_approve_integrator(chain_id);
+        match mode {
+            TX_HEAVY => {
+                self.handle_change_pub_key();
+                self.handle_transfer(chain_id);
+                self.handle_approve_integrator(chain_id);
+            }
+            TX_LIGHT => {
+                self.handle_zero_change_pub_key();
+                self.handle_zero_transfer();
+                self.handle_zero_approve_integrator();
+            }
+            _ => panic!("unknown tx circuit mode: {}", mode),
+        }
 
+        // Light txs produce no pub data, so these connect the targets to zeros.
         self.handle_on_chain_pub_data(on_chain_operations_count, on_chain_operations_pub_data);
         self.handle_priority_operation_pub_data(
             priority_operations_count,
             priority_operations_pub_data,
         );
 
-        // Connect new state tree roots to block witness
-        self.builder
-            .connect_hashes(new_account_tree_root, self.target.new_account_tree_root);
-        self.builder.connect_hashes(
-            new_account_pub_data_tree_root,
-            self.target.new_account_pub_data_tree_root,
-        );
-        self.builder
-            .connect_hashes(new_market_tree_root, self.target.new_market_tree_root);
         self.builder.connect_hashes(
             new_account_delta_tree_root,
             self.target.new_account_delta_tree_root,
         );
 
-        // Connect new register stack, new system config and new market details to block witness
-        self.target
-            .new_system_config
-            .connect(&mut self.builder, new_system_config);
-        self.target
-            .register_stack_after
-            .connect(&mut self.builder, register_stack_after);
-        self.target
-            .all_assets_after
-            .iter()
-            .zip_eq(all_assets_after)
-            .for_each(|(a, b)| {
-                connect_assets(&mut self.builder, a, b);
-            });
-        self.target
-            .all_margined_assets_after
-            .iter()
-            .zip_eq(all_margined_assets_after)
-            .for_each(|(a, b)| {
-                connect_margined_assets(&mut self.builder, a, b);
-            });
-        self.target
-            .all_market_details_after
-            .iter()
-            .zip_eq(all_market_details_after)
-            .for_each(|(a, b)| {
-                connect_market_details(&mut self.builder, a, b);
-            });
+        let last_tx = self
+            .target
+            .txs
+            .last()
+            .expect("block must contain at least one tx");
+        self.builder
+            .connect_hashes(self.target.new_validium_root, last_tx.new_validium_root);
+        self.builder
+            .connect_hashes(self.target.new_state_root, last_tx.new_state_root);
+
+        self.builder.connect_hashes(
+            self.target.public_market_details_hash_after,
+            public_market_details_hash_after,
+        );
+    }
+
+    fn handle_zero_change_pub_key(&mut self) {
+        let change_pub_key_message = ChangePubKeyMessageTarget::empty(&mut self.builder);
+        ChangePubKeyMessageTarget::connect(
+            &mut self.builder,
+            &change_pub_key_message,
+            &self.target.change_pub_key_message,
+        );
     }
 
     fn handle_change_pub_key(&mut self) {
@@ -703,6 +635,15 @@ impl BlockTxCircuit {
             &mut self.builder,
             &change_pub_key_message,
             &self.target.change_pub_key_message,
+        );
+    }
+
+    fn handle_zero_transfer(&mut self) {
+        let transfer_message = TransferMessageTarget::empty(&mut self.builder);
+        TransferMessageTarget::connect(
+            &mut self.builder,
+            &transfer_message,
+            &self.target.transfer_message,
         );
     }
 
@@ -757,6 +698,15 @@ impl BlockTxCircuit {
             &mut self.builder,
             &transfer_message,
             &self.target.transfer_message,
+        );
+    }
+
+    fn handle_zero_approve_integrator(&mut self) {
+        let approve_integrator_message = ApproveIntegratorMessageTarget::empty(&mut self.builder);
+        ApproveIntegratorMessageTarget::connect(
+            &mut self.builder,
+            &approve_integrator_message,
+            &self.target.approve_integrator_message,
         );
     }
 

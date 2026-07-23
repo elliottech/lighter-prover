@@ -18,7 +18,9 @@ use crate::types::account_position::{AccountPositionTarget, get_position_unreali
 use crate::types::config::{BIG_U96_LIMBS, Builder, F};
 use crate::types::constants::*;
 use crate::types::market::{MarketTarget, select_market};
-use crate::types::market_details::{MarketDetailsTarget, select_market_details};
+use crate::types::market_details::{
+    MarketDetailsTarget, MarketRiskDetailsTarget, select_market_details, select_market_risk_details,
+};
 use crate::types::tx_state::TxState;
 use crate::types::tx_type::TxTypeTargets;
 use crate::utils::CircuitBuilderUtils;
@@ -100,7 +102,7 @@ impl Apply for InternalExitPositionTxTarget {
         let funding_delta = get_funding_delta_for_position_and_market(
             builder,
             &tx_state.positions[OWNER_ACCOUNT_ID],
-            &tx_state.market_details,
+            &tx_state.market_risk_details,
         );
 
         // Calculate unrealized pnl
@@ -108,7 +110,7 @@ impl Apply for InternalExitPositionTxTarget {
             builder.biguint_u16_to_target(&tx_state.positions[OWNER_ACCOUNT_ID].position.abs);
         let position_value = get_position_unrealized_pnl(
             builder,
-            &tx_state.market_details,
+            &tx_state.market_risk_details,
             position_abs,
             tx_state.positions[OWNER_ACCOUNT_ID].position.sign,
             tx_state.positions[OWNER_ACCOUNT_ID].entry_quote,
@@ -160,6 +162,13 @@ impl Apply for InternalExitPositionTxTarget {
             is_expired_market_is_empty_and_enabled,
             &empty_market_details,
             &tx_state.market_details,
+        );
+        let empty_market_risk_details = MarketRiskDetailsTarget::empty(builder);
+        tx_state.market_risk_details = select_market_risk_details(
+            builder,
+            is_expired_market_is_empty_and_enabled,
+            &empty_market_risk_details,
+            &tx_state.market_risk_details,
         );
         let empty_order_book_tree_root = builder.constant_hash(EMPTY_ORDER_BOOK_TREE_ROOT);
         let empty_order_book = MarketTarget::empty(
