@@ -141,6 +141,19 @@ where
         tx_per_proof: usize,
         light_tx_per_proof: usize,
     ) -> serde_json::Result<Self> {
+        Self::from_json_with_empty_txs(data, tx_per_proof, light_tx_per_proof, 0, 0)
+    }
+
+    /// Like [`Self::from_json`], but when the block consists only of empty txs, appends
+    /// `heavy_empty_tx_count` heavy and `light_empty_tx_count` light copies of the block's
+    /// trailing empty tx before chunking. Blocks with active txs are parsed unchanged.
+    pub fn from_json_with_empty_txs(
+        data: &[u8],
+        tx_per_proof: usize,
+        light_tx_per_proof: usize,
+        heavy_empty_tx_count: usize,
+        light_empty_tx_count: usize,
+    ) -> serde_json::Result<Self> {
         let mut block: Self = serde_json::from_slice(data)?;
         let mut txs = std::mem::take(&mut block.txs);
         // The block's witness ends with a single empty tx (older witnesses may carry one
@@ -167,6 +180,19 @@ where
                 last_light_index = next_index;
             } else {
                 last_heavy_index = next_index;
+            }
+        }
+        if txs.is_empty() {
+            for (count, circuit_type, last_index) in [
+                (heavy_empty_tx_count, TX_HEAVY, last_heavy_index),
+                (light_empty_tx_count, TX_LIGHT, last_light_index),
+            ] {
+                let mut pad = empty_template
+                    .clone()
+                    .expect("block witness must end with an empty padding tx");
+                pad.tx_circuit_type = circuit_type;
+                pad.tx_index = last_index;
+                txs.extend(std::iter::repeat_n(pad, count));
             }
         }
         block.tx_chunks = Self::chunk_txs(

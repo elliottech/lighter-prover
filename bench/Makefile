@@ -1,3 +1,7 @@
+TX_COUNT ?= 30
+HEAVY_TX_PER_PROOF ?= 4
+LIGHT_TX_PER_PROOF ?= 10
+WITNESS ?= bench_test.json
 
 build:
 	@echo ""
@@ -7,6 +11,6 @@ build:
 
 run: 
 	@echo ""
-	@./bench
+	@./bench --tx-count $(TX_COUNT) --heavy-tx-per-proof $(HEAVY_TX_PER_PROOF) --light-tx-per-proof $(LIGHT_TX_PER_PROOF) --witness $(WITNESS)
 
 build-and-run: build run
