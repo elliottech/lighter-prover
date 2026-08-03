@@ -10,9 +10,11 @@ use hashbrown::HashMap;
 use itertools::Itertools;
 use log::warn;
 use plonky2::field::extension::Extendable;
-use plonky2::hash::hash_types::{HashOutTarget, RichField};
+use plonky2::hash::hash_types::{HashOutTarget, MerkleCapTarget, RichField};
 use plonky2::iop::target::{BoolTarget, Target};
-use plonky2::plonk::circuit_data::{CircuitData, CommonCircuitData, VerifierOnlyCircuitData};
+use plonky2::plonk::circuit_data::{
+    CircuitData, CommonCircuitData, VerifierCircuitTarget, VerifierOnlyCircuitData,
+};
 use plonky2::plonk::config::{AlgebraicHasher, GenericConfig};
 use plonky2::plonk::proof::{ProofWithPublicInputs, ProofWithPublicInputsTarget};
 use plonky2::recursion::dummy_circuit::dummy_proof;
@@ -286,6 +288,61 @@ where
         }
 
         acc
+    }
+
+    #[must_use]
+    pub fn extract_verifier_data_from_public_inputs(
+        &self,
+        public_inputs: &[Target],
+        common_data: &CommonCircuitData<F, D>,
+    ) -> VerifierCircuitTarget {
+        let cap_elements = common_data.config.fri_config.num_cap_elements();
+        let start_vk_pis = public_inputs.len() - 4 - 4 * cap_elements;
+
+        VerifierCircuitTarget {
+            constants_sigmas_cap: MerkleCapTarget(
+                (0..cap_elements)
+                    .map(|i| HashOutTarget {
+                        elements: core::array::from_fn(|j| {
+                            public_inputs[start_vk_pis + 4 + 4 * i + j]
+                        }),
+                    })
+                    .collect(),
+            ),
+            circuit_digest: HashOutTarget {
+                elements: core::array::from_fn(|i| public_inputs[start_vk_pis + i]),
+            },
+        }
+    }
+
+    pub fn conditional_connect_verifier_data(
+        &mut self,
+        condition: BoolTarget,
+        x: &VerifierCircuitTarget,
+        y: &VerifierCircuitTarget,
+    ) {
+        for i in 0..x.circuit_digest.elements.len() {
+            self.conditional_assert_eq(
+                condition,
+                x.circuit_digest.elements[i],
+                y.circuit_digest.elements[i],
+            );
+        }
+
+        assert_eq!(
+            x.constants_sigmas_cap.0.len(),
+            y.constants_sigmas_cap.0.len()
+        );
+        for (h0, h1) in x
+            .constants_sigmas_cap
+            .0
+            .iter()
+            .zip(y.constants_sigmas_cap.0.iter())
+        {
+            for i in 0..h0.elements.len() {
+                self.conditional_assert_eq(condition, h0.elements[i], h1.elements[i]);
+            }
+        }
     }
 }
 

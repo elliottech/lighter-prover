@@ -189,6 +189,15 @@ impl BlockCircuit {
             &block_light_tx_chain_circuit.common,
         );
 
+        let light_tx_chain_embedded_vk = self.builder.extract_verifier_data_from_public_inputs(
+            &self.target.light_tx_chain_proof.public_inputs,
+            &block_light_tx_chain_circuit.common,
+        );
+        self.builder.connect_verifier_data(
+            &light_tx_chain_embedded_vk,
+            &block_light_tx_chain_verifier_data,
+        );
+
         // Verify heavy tx chain proof
         let block_heavy_tx_chain_verifier_data = self
             .builder
@@ -197,6 +206,15 @@ impl BlockCircuit {
             &self.target.heavy_tx_chain_proof,
             &block_heavy_tx_chain_verifier_data,
             &block_heavy_tx_chain_circuit.common,
+        );
+
+        let heavy_tx_chain_embedded_vk = self.builder.extract_verifier_data_from_public_inputs(
+            &self.target.heavy_tx_chain_proof.public_inputs,
+            &block_heavy_tx_chain_circuit.common,
+        );
+        self.builder.connect_verifier_data(
+            &heavy_tx_chain_embedded_vk,
+            &block_heavy_tx_chain_verifier_data,
         );
 
         // Extract pre-exec and tx chain witnesses from the proofs

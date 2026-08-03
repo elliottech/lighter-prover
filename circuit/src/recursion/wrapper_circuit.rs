@@ -7,7 +7,7 @@ use anyhow::Result;
 use itertools::Itertools;
 use log::Level;
 use plonky2::field::types::Field;
-use plonky2::hash::hash_types::{HashOutTarget, MerkleCapTarget};
+use plonky2::hash::hash_types::HashOutTarget;
 use plonky2::iop::target::{BoolTarget, Target};
 use plonky2::iop::witness::{PartialWitness, WitnessWrite};
 use plonky2::plonk::circuit_data::{
@@ -34,10 +34,8 @@ use crate::hash_utils::CircuitBuilderHashUtils;
 use crate::keccak::keccak::{CircuitBuilderKeccak, KeccakOutputTarget};
 use crate::poseidon_bn128::plonky2_config::PoseidonBN128GoldilocksConfig;
 use crate::poseidon2::Poseidon2Hash;
-use crate::recursion::batch::{
-    BATCH_TARGET_INDEX, BatchTarget, SEGMENT_INFO_INDEX, SegmentInfoTarget,
-};
-use crate::types::config::{Builder, C, CIRCUIT_CONFIG, D, F};
+use crate::recursion::batch::{BATCH_TARGET_INDEX, BatchTarget, SegmentInfoTarget};
+use crate::types::config::{Builder, C, D, F};
 use crate::types::constants::*;
 use crate::types::market_details::{PublicMarketDetailsTarget, connect_public_market_details};
 use crate::uint::u8::{CircuitBuilderU8, U8Target, WitnessU8};
@@ -148,8 +146,10 @@ impl WrapperInnerCircuit {
             recursion_circuit,
         );
 
-        let embedded_vk =
-            Self::extract_vk_from_public_inputs(&self.target.chain_proofs[0].public_inputs);
+        let embedded_vk = self.builder.extract_verifier_data_from_public_inputs(
+            &self.target.chain_proofs[0].public_inputs,
+            recursion_circuit,
+        );
         self.builder
             .connect_verifier_data(&embedded_vk, &self.target.chain_verifier);
 
@@ -194,21 +194,15 @@ impl WrapperInnerCircuit {
             );
 
             // Conditionally bind the embedded VK to the expected chain verifier
-            let embedded_vk =
-                Self::extract_vk_from_public_inputs(&self.target.chain_proofs[i].public_inputs);
-            self.builder.conditional_assert_eq_hash(
-                is_enabled,
-                &embedded_vk.circuit_digest,
-                &self.target.chain_verifier.circuit_digest,
+            let embedded_vk = self.builder.extract_verifier_data_from_public_inputs(
+                &self.target.chain_proofs[i].public_inputs,
+                recursion_circuit,
             );
-            for (h0, h1) in embedded_vk
-                .constants_sigmas_cap
-                .0
-                .iter()
-                .zip(self.target.chain_verifier.constants_sigmas_cap.0.iter())
-            {
-                self.builder.conditional_assert_eq_hash(is_enabled, h0, h1);
-            }
+            self.builder.conditional_connect_verifier_data(
+                is_enabled,
+                &embedded_vk,
+                &self.target.chain_verifier,
+            );
 
             let current_batch = BatchTarget::from_public_inputs(
                 &self.target.chain_proofs[i].public_inputs[..BATCH_TARGET_INDEX],
@@ -240,25 +234,6 @@ impl WrapperInnerCircuit {
         self.builder.assert_zero(is_enabled_times_diff);
 
         batch
-    }
-
-    /// Extract the VerifierCircuitTarget embedded at the tail of chain proof public inputs.
-    /// Layout: [BatchTarget | SegmentInfoTarget | circuit_digest (4) | constants_sigmas_cap (4*16)]
-    fn extract_vk_from_public_inputs(public_inputs: &[Target]) -> VerifierCircuitTarget {
-        VerifierCircuitTarget {
-            constants_sigmas_cap: MerkleCapTarget(
-                (0..CIRCUIT_CONFIG.fri_config.num_cap_elements())
-                    .map(|i| HashOutTarget {
-                        elements: core::array::from_fn(|j| {
-                            public_inputs[SEGMENT_INFO_INDEX + 4 + 4 * i + j]
-                        }),
-                    })
-                    .collect(),
-            ),
-            circuit_digest: HashOutTarget {
-                elements: core::array::from_fn(|i| public_inputs[SEGMENT_INFO_INDEX + i]),
-            },
-        }
     }
 
     pub fn verify_batch_commitment(&mut self, batch: &BatchTarget) {
@@ -439,6 +414,13 @@ impl WrapperInnerCircuit {
             &self.target.delta_chain_verifier,
             delta_recursion_circuit,
         );
+
+        let embedded_vk = self.builder.extract_verifier_data_from_public_inputs(
+            &self.target.delta_chain_proof.public_inputs,
+            delta_recursion_circuit,
+        );
+        self.builder
+            .connect_verifier_data(&embedded_vk, &self.target.delta_chain_verifier);
 
         AggregatedDeltaTarget::from_public_inputs(
             &self.target.delta_chain_proof.public_inputs[..AggregatedDeltaTarget::END_INDEX],
