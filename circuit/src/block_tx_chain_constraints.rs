@@ -24,12 +24,13 @@ use crate::block_tx::{BlockTxWitnessTarget, JUMP_STATE_SIZE, JumpState, JumpStat
 use crate::block_tx_chain::BlockTxChainWitnessTarget;
 use crate::builder::custom::cyclic_base_proof;
 use crate::byte::split_gate::ByteDecompositionGate;
+use crate::eddsa::p3_schnorr_digest::P3_DIGEST_STATE_WIDTH;
 use crate::poseidon2::Poseidon2Gate;
 use crate::types::approve_integrator::{
     APPROVE_INTEGRATOR_PUBLIC_INPUTS_LEN, ApproveIntegratorMessageTarget,
 };
 use crate::types::change_pub_key::{CHANGE_PK_PUBLIC_INPUTS_LEN, ChangePubKeyMessageTarget};
-use crate::types::config::{Builder, C, CIRCUIT_CONFIG, D, F};
+use crate::types::config::{Builder, C, D, F};
 use crate::types::constants::{
     MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX, ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE,
 };
@@ -78,6 +79,8 @@ pub trait Circuit<C: GenericConfig<D, F = F>, F: RichField + Extendable<D>, cons
         new_state_root: HashOut<F>,
         new_validium_root: HashOut<F>,
         new_account_delta_tree_root: HashOut<F>,
+        signature_count: u64,
+        signature_digest_seed: [F; P3_DIGEST_STATE_WIDTH],
     ) -> ProofWithPublicInputs<F, C, D>;
 }
 
@@ -108,7 +111,7 @@ impl BlockTxChainCircuit {
         tx_common_circuit: &CommonCircuitData<F, D>,
         on_chain_operations_limit: usize,
     ) -> (Self, CommonCircuitData<F, D>) {
-        let mut builder = Builder::new(config);
+        let mut builder = Builder::new(config.clone());
 
         // Register public inputs
         let new_block =
@@ -124,7 +127,7 @@ impl BlockTxChainCircuit {
         // Building common data for current circuit
         let common_data_for_recursion = CommonCircuitData {
             num_public_inputs: builder.num_public_inputs(),
-            ..common_data_for_recursion(CHAIN_LOG_GATES)
+            ..common_data_for_recursion(CHAIN_LOG_GATES, config.clone())
         };
 
         log::info!(
@@ -371,6 +374,30 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
             .builder
             .assert_bool(BoolTarget::new_unsafe(current_tx.on_chain_operations_count));
 
+        // Connect signed chained information and running sig count exposed by tx circuit
+        // `BlockCircuit` binds per chain (heavy: `initial_with_count(signature_count)`,
+        // light: the heavy chain's final state) so both chains fold into one.
+        let is_first_recursion = circuit.builder.is_zero(circuit.target.recursion_step);
+        let running_digest_state: [Target; P3_DIGEST_STATE_WIDTH] = core::array::from_fn(|i| {
+            circuit.builder.select(
+                is_first_recursion,
+                block.signature_digest_seed[i],
+                block.signature_digest_state[i],
+            )
+        });
+        for i in 0..P3_DIGEST_STATE_WIDTH {
+            circuit.builder.connect(
+                running_digest_state[i],
+                current_tx.signature_digest_state_before[i],
+            );
+        }
+        circuit
+            .builder
+            .conditional_assert_zero(is_first_recursion, block.signed_so_far);
+        circuit
+            .builder
+            .connect(block.signed_so_far, current_tx.signed_count_before);
+
         let calculated_new_block = BlockTxChainWitnessTarget {
             block_number: block.block_number,
             created_at: block.created_at,
@@ -401,6 +428,11 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
             initial_account_delta_tree_root: block.initial_account_delta_tree_root,
 
             new_public_market_details_hash: current_tx.public_market_details_hash_after,
+
+            signature_digest_state: current_tx.signature_digest_state_after,
+            signature_count: block.signature_count,
+            signed_so_far: current_tx.signed_count_after,
+            signature_digest_seed: block.signature_digest_seed,
         };
 
         circuit
@@ -484,6 +516,8 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
         new_state_root: HashOut<F>,
         new_validium_root: HashOut<F>,
         old_account_delta_tree_root: HashOut<F>,
+        signature_count: u64,
+        signature_digest_seed: [F; P3_DIGEST_STATE_WIDTH],
     ) -> ProofWithPublicInputs<F, C, D> {
         let mut nonzero_public_inputs = HashMap::new();
 
@@ -526,6 +560,19 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
             nonzero_public_inputs.insert(initial_state_root_index + i, *elem);
         }
 
+        let signature_count_index = initial_state_root_index + 8 + P3_DIGEST_STATE_WIDTH;
+        nonzero_public_inputs.insert(
+            signature_count_index,
+            F::from_canonical_u64(signature_count),
+        );
+
+        // signed_so_far (signature_count_index + 1) stays zero; the digest seed the chain's
+        // running state starts from at step 0, bound per chain by `BlockCircuit`.
+        let signature_digest_seed_index = signature_count_index + 2;
+        for (i, elem) in signature_digest_seed.iter().enumerate() {
+            nonzero_public_inputs.insert(signature_digest_seed_index + i, *elem);
+        }
+
         cyclic_base_proof(
             &circuit_data.common,
             &circuit_data.verifier_only,
@@ -563,28 +610,25 @@ fn select_on_chain_pub_data(
 }
 
 // Generates `CommonCircuitData` usable for recursion.
-fn common_data_for_recursion(log_gates: usize) -> CommonCircuitData<F, D> {
-    let builder = Builder::new(CIRCUIT_CONFIG);
+fn common_data_for_recursion(log_gates: usize, config: CircuitConfig) -> CommonCircuitData<F, D> {
+    let builder = Builder::new(config.clone());
     let data = builder.build::<C>();
 
-    let mut builder = Builder::new(CIRCUIT_CONFIG);
+    let mut builder = Builder::new(config.clone());
     let proof = builder.add_virtual_proof_with_pis(&data.common);
     let verifier_data = builder.add_virtual_verifier_data(data.common.config.fri_config.cap_height);
     builder.verify_proof::<C>(&proof, &verifier_data, &data.common);
     let data = builder.build::<C>();
 
-    let mut builder = Builder::new(CIRCUIT_CONFIG);
+    let mut builder = Builder::new(config.clone());
     let proof = builder.add_virtual_proof_with_pis(&data.common);
     let verifier_data = builder.add_virtual_verifier_data(data.common.config.fri_config.cap_height);
     builder.verify_proof::<C>(&proof, &verifier_data, &data.common);
 
     builder.add_gate(Poseidon2Gate::new(), vec![]);
-    builder.add_gate(EqualityGate::new_from_config(&CIRCUIT_CONFIG), vec![]);
-    builder.add_gate(SelectionGate::new_from_config(&CIRCUIT_CONFIG), vec![]);
-    builder.add_gate(
-        ByteDecompositionGate::new_from_config(&CIRCUIT_CONFIG, 8),
-        vec![],
-    );
+    builder.add_gate(EqualityGate::new_from_config(&config), vec![]);
+    builder.add_gate(SelectionGate::new_from_config(&config), vec![]);
+    builder.add_gate(ByteDecompositionGate::new_from_config(&config, 8), vec![]);
     builder.add_gate(ConstantGate::new(2), vec![]);
 
     while builder.num_gates() < (1 << log_gates) - PADDING_HEADROOM {

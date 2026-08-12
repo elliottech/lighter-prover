@@ -65,6 +65,7 @@ pub struct L1RegisterAssetTxTarget {
 
     // helpers
     margin_enabled: BoolTarget,
+    in_margin_list: BoolTarget,
 
     // output
     is_enabled: BoolTarget,
@@ -88,6 +89,7 @@ impl L1RegisterAssetTxTarget {
 
             is_enabled: BoolTarget::default(),
             margin_enabled: builder._false(),
+            in_margin_list: builder._false(),
 
             success: BoolTarget::default(),
         }
@@ -155,7 +157,18 @@ impl Verify for L1RegisterAssetTxTarget {
         builder.range_check_biguint(&self.extension_multiplier, EXTENSION_MULTIPLIER_BITS);
         builder.range_check_biguint(&self.min_transfer_amount, MAX_EXCHANGE_ASSET_BALANCE_BITS);
         builder.range_check_biguint(&self.min_withdrawal_amount, MAX_EXCHANGE_ASSET_BALANCE_BITS);
-        builder.assert_bool(BoolTarget::new_unsafe(self.margin_mode));
+
+        // Margin mode must be disabled, enabled or priced-only
+        let is_margin_mode_disabled =
+            builder.is_equal_constant(self.margin_mode, ASSET_MARGIN_MODE_DISABLED);
+        self.margin_enabled =
+            builder.is_equal_constant(self.margin_mode, ASSET_MARGIN_MODE_ENABLED);
+        let is_priced_only =
+            builder.is_equal_constant(self.margin_mode, ASSET_MARGIN_MODE_PRICED_ONLY);
+        let is_margin_mode_valid =
+            builder.multi_or(&[is_margin_mode_disabled, self.margin_enabled, is_priced_only]);
+        builder.conditional_assert_true(self.is_enabled, is_margin_mode_valid);
+        self.in_margin_list = builder.or(self.margin_enabled, is_priced_only);
 
         let asset_margin_tick = builder.constant_u64(ASSET_MARGIN_TICK);
         builder.conditional_assert_lte(
@@ -185,8 +198,6 @@ impl Verify for L1RegisterAssetTxTarget {
             self.liquidation_fee,
         );
         builder.conditional_assert_lte(self.is_enabled, should_be_lte_fee_tick, fee_tick, 32);
-
-        self.margin_enabled = BoolTarget::new_unsafe(self.margin_mode);
 
         // LTV can't be zero if margin mode is enabled
         let is_ltv_zero = builder.is_zero(self.loan_to_value);
@@ -235,17 +246,17 @@ impl Verify for L1RegisterAssetTxTarget {
         let is_asset_empty = tx_state.assets[TX_ASSET_ID].is_empty(builder);
         self.success = builder.and(self.success, is_asset_empty);
 
-        // If margin is enabled but next available margin index is nil, reject the transaction
+        // If the asset joins the margined asset list but next available margin index is nil, reject the transaction
         let is_margin_index_nil =
             builder.is_equal_constant(tx_state.next_margin_asset_index, NIL_MARGIN_ASSET_INDEX);
-        let is_margin_index_nil_and_margin_enabled =
-            builder.and(self.margin_enabled, is_margin_index_nil);
-        self.success = builder.and_not(self.success, is_margin_index_nil_and_margin_enabled);
+        let is_margin_index_nil_and_in_margin_list =
+            builder.and(self.in_margin_list, is_margin_index_nil);
+        self.success = builder.and_not(self.success, is_margin_index_nil_and_in_margin_list);
 
-        // If margin enabled and margin index is not nil, check that margin index is empty
+        // If the asset joins the margined asset list and margin index is not nil, check that margin index is empty
         let is_margin_index_empty = tx_state.margined_asset[TX_ASSET_ID].is_empty(builder);
-        let success_and_margin_enabled = builder.and(self.success, self.margin_enabled);
-        builder.conditional_assert_true(success_and_margin_enabled, is_margin_index_empty);
+        let success_and_in_margin_list = builder.and(self.success, self.in_margin_list);
+        builder.conditional_assert_true(success_and_in_margin_list, is_margin_index_empty);
     }
 }
 
@@ -258,7 +269,7 @@ impl Apply for L1RegisterAssetTxTarget {
             builder.is_equal_constant(tx_state.next_margin_asset_index, NIL_MARGIN_ASSET_INDEX);
         let margin_index =
             builder.select(is_margin_index_nil, zero, tx_state.next_margin_asset_index);
-        let margin_index = builder.select(self.margin_enabled, margin_index, zero);
+        let margin_index = builder.select(self.in_margin_list, margin_index, zero);
         tx_state.assets[TX_ASSET_ID] = select_asset_target(
             builder,
             self.success,
@@ -272,10 +283,10 @@ impl Apply for L1RegisterAssetTxTarget {
             &tx_state.assets[TX_ASSET_ID],
         );
 
-        let success_and_margin_enabled = builder.and(self.success, self.margin_enabled);
+        let success_and_in_margin_list = builder.and(self.success, self.in_margin_list);
         tx_state.margined_asset[TX_ASSET_ID] = select_margined_asset_target(
             builder,
-            success_and_margin_enabled,
+            success_and_in_margin_list,
             &MarginedAssetTarget {
                 asset_index: self.asset_index,
                 loan_to_value: self.loan_to_value,

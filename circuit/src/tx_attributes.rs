@@ -32,9 +32,11 @@ pub const ATTR_SKIP_TX_NONCE: usize = 4;
 pub const ATTR_CANCEL_ALL_MARKET_INDEX: usize = 5;
 pub const ATTR_SELF_TRADE_BEHAVIOR_MODE: usize = 6;
 pub const ATTR_SELF_TRADE_EQUALITY_MODE: usize = 7;
-pub const TOTAL_ATTRIBUTE_COUNT: usize = ATTR_SELF_TRADE_EQUALITY_MODE + 1;
+pub const ATTR_ORDER_VERSION: usize = 8;
+pub const TOTAL_ATTRIBUTE_COUNT: usize = ATTR_ORDER_VERSION + 1;
 
-pub const ATTRIBUTE_TYPE_BITS: usize = 3;
+pub const ATTRIBUTE_TYPE_BITS: usize = 4;
+
 lazy_static! {
     pub static ref ATTR_BIT_SIZES: HashMap<usize, usize> = {
         let mut m = HashMap::new();
@@ -49,21 +51,23 @@ lazy_static! {
         m.insert(ATTR_CANCEL_ALL_MARKET_INDEX, MARKET_INDEX_BITS);
         m.insert(ATTR_SELF_TRADE_BEHAVIOR_MODE, 8);
         m.insert(ATTR_SELF_TRADE_EQUALITY_MODE, 8);
+        m.insert(ATTR_ORDER_VERSION, TIMESTAMP_BITS);
         m
     };
-    pub static ref ATTR_MAX_VALUES: HashMap<usize, usize> = {
+    pub static ref ATTR_MAX_VALUES: HashMap<usize, u64> = {
         let mut m = HashMap::new();
-        m.insert(ATTR_NIL, 0usize);
+        m.insert(ATTR_NIL, 0u64);
         m.insert(
             ATTR_INTEGRATOR_FEE_COLLECTOR_INDEX,
-            NIL_ACCOUNT_INDEX as usize,
+            NIL_ACCOUNT_INDEX as u64,
         );
-        m.insert(ATTR_INTEGRATOR_TAKER_FEE, FEE_TICK as usize);
-        m.insert(ATTR_INTEGRATOR_MAKER_FEE, FEE_TICK as usize);
-        m.insert(ATTR_SKIP_TX_NONCE, 1usize);
-        m.insert(ATTR_CANCEL_ALL_MARKET_INDEX, NIL_MARKET_INDEX as usize);
-        m.insert(ATTR_SELF_TRADE_BEHAVIOR_MODE, SELF_TRADE_BEHAVIOR_REDUCE as usize);
-        m.insert(ATTR_SELF_TRADE_EQUALITY_MODE, SELF_TRADE_EQUALITY_MASTER_ACCOUNT_INDEX as usize);
+        m.insert(ATTR_INTEGRATOR_TAKER_FEE, FEE_TICK );
+        m.insert(ATTR_INTEGRATOR_MAKER_FEE, FEE_TICK );
+        m.insert(ATTR_SKIP_TX_NONCE, 1u64);
+        m.insert(ATTR_CANCEL_ALL_MARKET_INDEX, NIL_MARKET_INDEX as u64);
+        m.insert(ATTR_SELF_TRADE_BEHAVIOR_MODE, SELF_TRADE_BEHAVIOR_REDUCE);
+        m.insert(ATTR_SELF_TRADE_EQUALITY_MODE, SELF_TRADE_EQUALITY_MASTER_ACCOUNT_INDEX );
+        m.insert(ATTR_ORDER_VERSION, MAX_ORDER_VERSION as u64);
         m
     };
     pub static ref ATTR_NIL_VALUES: [F; TOTAL_ATTRIBUTE_COUNT] = {
@@ -76,6 +80,7 @@ lazy_static! {
             F::from_canonical_u8(NIL_MARKET_INDEX), // Cancel All Market Index
             F::ZERO, // Self-trade behavior mode
             F::ZERO, // Self-trade equality mode
+            F::ZERO, // Order Modify Nonce
         ]
     };
 }
@@ -235,7 +240,7 @@ impl TxAttributesTarget {
     fn range_check_attribute_values(&self, builder: &mut Builder) {
         for i in 1..TOTAL_ATTRIBUTE_COUNT {
             builder.register_range_check(self.values[i], *ATTR_BIT_SIZES.get(&i).unwrap());
-            let max_val = builder.constant_usize(*ATTR_MAX_VALUES.get(&i).unwrap());
+            let max_val = builder.constant_u64(*ATTR_MAX_VALUES.get(&i).unwrap());
             builder.assert_lte(self.values[i], max_val, *ATTR_BIT_SIZES.get(&i).unwrap());
         }
     }

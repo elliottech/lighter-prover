@@ -123,11 +123,12 @@ impl Verify for L2UpdateAssetConfigTxTarget {
         let is_asset_empty = tx_state.assets[TX_ASSET_ID].is_empty(builder);
         builder.conditional_assert_false(is_enabled, is_asset_empty);
 
-        // Asset must be margin enabled
-        builder.conditional_assert_true(
-            is_enabled,
-            BoolTarget::new_unsafe(tx_state.assets[TX_ASSET_ID].margin_mode),
+        // Asset must be margin enabled (priced-only assets have no supply caps to configure)
+        let is_asset_margin_enabled = builder.is_equal_constant(
+            tx_state.assets[TX_ASSET_ID].margin_mode,
+            ASSET_MARGIN_MODE_ENABLED,
         );
+        builder.conditional_assert_true(is_enabled, is_asset_margin_enabled);
 
         // Can't be universal asset
         let is_universal_asset = is_universal_asset(builder, self.asset_index);

@@ -38,7 +38,7 @@ pub const BIGU16_U112_LIMBS: usize = 7;
 
 pub const CIRCUIT_CONFIG: CircuitConfig = CircuitConfig {
     num_wires: 136,
-    num_routed_wires: 80,
+    num_routed_wires: 120,
     num_constants: 2,
     use_base_arithmetic_gate: true,
     security_bits: 100,
@@ -53,6 +53,18 @@ pub const CIRCUIT_CONFIG: CircuitConfig = CircuitConfig {
         num_query_rounds: 28,
     },
     optimization_flags: (1 << 0) /*+ (1 << 1) */+ (1 << 2) + (1 << 3) + (1 << 4) + (1 << 5),
+};
+
+pub const BLOCK_TX_CHAIN_CIRCUIT_CONFIG: CircuitConfig = CircuitConfig {
+    num_wires: 136,
+    num_routed_wires: 40,
+    ..CIRCUIT_CONFIG
+};
+
+pub const BLOCK_CIRCUIT_CONFIG: CircuitConfig = CircuitConfig {
+    num_wires: 136,
+    num_routed_wires: 40,
+    ..CIRCUIT_CONFIG
 };
 
 pub const OUTER_WRAPPER_CONFIG: CircuitConfig = CircuitConfig {

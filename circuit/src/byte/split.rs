@@ -7,8 +7,10 @@ use plonky2::hash::hash_types::RichField;
 use plonky2::iop::target::Target;
 
 use super::split_gate::ByteDecompositionGate;
+use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::builder::Builder;
 use crate::uint::u8::U8Target;
+use crate::utils::CircuitBuilderUtils;
 
 const GOLDILOCKS_BYTES: usize = 8;
 
@@ -54,6 +56,18 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilderByteSplit<F, D>
             self.assert_zero(*t);
         });
         result.truncate(num_bytes);
+
+        if num_bytes == GOLDILOCKS_BYTES {
+            let low_sum = self.add_many([result[0], result[1], result[2], result[3]]);
+            let low_is_zero = self.is_zero(low_sum);
+
+            let high_sum = self.add_many([result[4], result[5], result[6], result[7]]);
+            let all_high_ones = self.constant(F::from_canonical_u64(4 * 255));
+            let high_all_ones = self.is_equal(high_sum, all_high_ones);
+
+            let is_non_canonical = self.and_not(high_all_ones, low_is_zero);
+            self.assert_false(is_non_canonical);
+        }
 
         // Convert to U8Target
         let result = result.into_iter().map(U8Target).collect::<Vec<U8Target>>();

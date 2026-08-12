@@ -6,8 +6,10 @@ use itertools::Itertools;
 use log::Level;
 use plonky2::field::extension::Extendable;
 use plonky2::field::types::{Field, Field64};
+use plonky2::gates::constant::ConstantGate;
+use plonky2::gates::gate::GateRef;
 use plonky2::hash::hash_types::{HashOutTarget, NUM_HASH_OUT_ELTS, RichField};
-use plonky2::iop::target::Target;
+use plonky2::iop::target::{BoolTarget, Target};
 use plonky2::iop::witness::{PartialWitness, WitnessWrite};
 use plonky2::plonk::circuit_data::{CircuitConfig, CircuitData};
 use plonky2::plonk::config::GenericConfig;
@@ -18,6 +20,9 @@ use plonky2::util::timing::TimingTree;
 
 use crate::block_tx::{BlockTx, JumpStateTarget};
 use crate::bool_utils::CircuitBuilderBoolUtils;
+use crate::eddsa::gadgets::base_field::QuinticExtensionTarget;
+use crate::eddsa::p3_schnorr_digest::{P3_DIGEST_STATE_WIDTH, P3SchnorrDigestState};
+use crate::eddsa::schnorr::SchnorrSigTarget;
 use crate::hash_utils::CircuitBuilderHashUtils;
 use crate::poseidon2::Poseidon2Hash;
 use crate::tx_constraints::{TxTarget, TxTargetWitness};
@@ -99,6 +104,11 @@ pub struct BlockTxTarget {
 
     pub old_jump: JumpStateTarget,
     pub new_jump: JumpStateTarget,
+
+    pub signature_digest_state_before: [Target; P3_DIGEST_STATE_WIDTH],
+    pub signature_digest_state_after: [Target; P3_DIGEST_STATE_WIDTH],
+    pub signed_count_before: Target,
+    pub signed_count_after: Target,
 }
 
 impl Default for BlockTxTarget {
@@ -137,6 +147,11 @@ impl Default for BlockTxTarget {
 
             old_jump: JumpStateTarget::default(),
             new_jump: JumpStateTarget::default(),
+
+            signature_digest_state_before: core::array::from_fn(|_| Target::default()),
+            signature_digest_state_after: core::array::from_fn(|_| Target::default()),
+            signed_count_before: Target::default(),
+            signed_count_after: Target::default(),
         }
     }
 }
@@ -154,6 +169,7 @@ impl Circuit<C, F, D> for BlockTxCircuit {
             priority_operations_pub_data,
             public_market_details_hash_after,
             account_delta_tree_root_after,
+            tx_signature_data,
         ) = circuit.define_tx_loop(tx_limit, chain_id, mode);
 
         circuit.define_post_tx_batch(
@@ -164,6 +180,7 @@ impl Circuit<C, F, D> for BlockTxCircuit {
             &on_chain_operations_pub_data,
             priority_operations_count,
             &priority_operations_pub_data,
+            &tx_signature_data,
             mode,
         );
 
@@ -224,6 +241,15 @@ impl Circuit<C, F, D> for BlockTxCircuit {
         pw.set_hash_target(target.old_jump.claims_hash, block.old_jump.claims_hash)?;
         pw.set_target(target.old_jump.tx_count, block.old_jump.tx_count)?;
 
+        for (t, v) in target
+            .signature_digest_state_before
+            .iter()
+            .zip(block.signature_digest_state_before.iter())
+        {
+            pw.set_target(*t, *v)?;
+        }
+        pw.set_target(target.signed_count_before, block.signed_count_before)?;
+
         target
             .txs
             .iter()
@@ -237,7 +263,12 @@ impl Circuit<C, F, D> for BlockTxCircuit {
 impl BlockTxCircuit {
     /// Initializes a new block virtual targets for the given number of transactions.
     pub fn new(config: CircuitConfig, tx_limit: usize) -> Self {
+        let num_constants = config.num_constants;
         let mut builder = Builder::new(config);
+        // Keep the gate set reproducible by `dummy_circuit`, which always instantiates a
+        // `ConstantGate` (used by the chain circuit to fill the inactive heavy/light proof
+        // slot with a dummy proof).
+        builder.add_gate_to_gate_set(GateRef::new(ConstantGate::new(num_constants)));
 
         Self {
             target: BlockTxTarget {
@@ -273,6 +304,15 @@ impl BlockTxCircuit {
 
                 old_jump: JumpStateTarget::new(&mut builder),
                 new_jump: JumpStateTarget::new(&mut builder),
+
+                signature_digest_state_before: core::array::from_fn(|_| {
+                    builder.add_virtual_target()
+                }),
+                signature_digest_state_after: core::array::from_fn(|_| {
+                    builder.add_virtual_target()
+                }),
+                signed_count_before: builder.add_virtual_target(),
+                signed_count_after: builder.add_virtual_target(),
             },
 
             builder,
@@ -330,6 +370,19 @@ impl BlockTxCircuit {
         self.target
             .new_jump
             .register_public_inputs(&mut self.builder);
+
+        // p3-schnorr digest sponge state in/out and running signed count — identical
+        // layout for the heavy and light circuits.
+        for &lane in &self.target.signature_digest_state_before {
+            self.builder.register_public_input(lane);
+        }
+        for &lane in &self.target.signature_digest_state_after {
+            self.builder.register_public_input(lane);
+        }
+        self.builder
+            .register_public_input(self.target.signed_count_before);
+        self.builder
+            .register_public_input(self.target.signed_count_after);
     }
 
     fn define_tx_loop(
@@ -344,6 +397,12 @@ impl BlockTxCircuit {
         [U8Target; MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX], // priority operations public data
         HashOutTarget,                                             // new public market details hash
         HashOutTarget,                                             // new account delta tree root
+        Vec<(
+            QuinticExtensionTarget,
+            QuinticExtensionTarget,
+            SchnorrSigTarget,
+            BoolTarget,
+        )>, // (account_pk, tx_hash, signature, signature_check) per tx slot
     ) {
         assert_eq!(self.target.txs.len(), tx_limit, "txs count mismatch");
         assert!(
@@ -362,6 +421,8 @@ impl BlockTxCircuit {
         self.builder
             .register_range_check(self.target.created_at, TIMESTAMP_BITS);
 
+        let mut tx_signature_data = Vec::with_capacity(tx_limit);
+
         let mut current_account_delta_tree_root = self.builder.zero_hash_out();
         let mut public_market_details_hash_after = self.builder.zero_hash_out();
 
@@ -375,6 +436,10 @@ impl BlockTxCircuit {
                 on_chain_pub_data_exists,
                 tx_public_market_details_hash_after,
                 account_delta_tree_root_after,
+                account_pk,
+                tx_hash,
+                signature,
+                signature_check,
             ) = match mode {
                 TX_HEAVY => tx.define(
                     index,
@@ -426,6 +491,8 @@ impl BlockTxCircuit {
                     &priority_operations_pub_data,
                 );
             }
+
+            tx_signature_data.push((account_pk, tx_hash, signature, signature_check));
         }
 
         JumpStateTarget::connect(&mut self.builder, &jump, &self.target.new_jump);
@@ -437,6 +504,7 @@ impl BlockTxCircuit {
             priority_operations_pub_data,
             public_market_details_hash_after,
             current_account_delta_tree_root,
+            tx_signature_data,
         )
     }
 
@@ -547,8 +615,16 @@ impl BlockTxCircuit {
         on_chain_operations_pub_data: &[U8Target; ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE],
         priority_operations_count: Target,
         priority_operations_pub_data: &[U8Target; MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX],
+        tx_signature_data: &[(
+            QuinticExtensionTarget,
+            QuinticExtensionTarget,
+            SchnorrSigTarget,
+            BoolTarget,
+        )],
         mode: u8,
     ) {
+        self.handle_signature_digest(tx_signature_data);
+
         match mode {
             TX_HEAVY => {
                 self.handle_change_pub_key();
@@ -589,6 +665,39 @@ impl BlockTxCircuit {
             self.target.public_market_details_hash_after,
             public_market_details_hash_after,
         );
+    }
+
+    fn handle_signature_digest(
+        &mut self,
+        tx_signature_data: &[(
+            QuinticExtensionTarget,
+            QuinticExtensionTarget,
+            SchnorrSigTarget,
+            BoolTarget,
+        )],
+    ) {
+        let mut digest_state = P3SchnorrDigestState {
+            state: self.target.signature_digest_state_before,
+        };
+        let mut signed_count = self.target.signed_count_before;
+        for (account_pk, tx_hash, signature, signature_check) in tx_signature_data {
+            digest_state.absorb_instance_conditional(
+                &mut self.builder,
+                *account_pk,
+                *tx_hash,
+                signature,
+                *signature_check,
+            );
+            signed_count = self.builder.add(signed_count, signature_check.target);
+        }
+        for i in 0..P3_DIGEST_STATE_WIDTH {
+            self.builder.connect(
+                digest_state.state[i],
+                self.target.signature_digest_state_after[i],
+            );
+        }
+        self.builder
+            .connect(signed_count, self.target.signed_count_after);
     }
 
     fn handle_zero_change_pub_key(&mut self) {

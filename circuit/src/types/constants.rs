@@ -385,6 +385,8 @@ pub const EMPTY_ASSET_BALANCE: i128 = 0;
 pub const ASSET_MARGIN_MODE_DISABLED: u64 = 0;
 /// means asset can be used as margin
 pub const ASSET_MARGIN_MODE_ENABLED: u64 = 1;
+/// means asset is priced in the margined asset list but can't be used as margin
+pub const ASSET_MARGIN_MODE_PRICED_ONLY: u64 = 2;
 
 // Account Asset Margin Modes
 /// means account is not using this asset as margin
@@ -403,6 +405,9 @@ pub const NIL_ORDER_NONCE_INDEX: i64 = 0;
 pub const NIL_ORDER_EXPIRY: i64 = 0;
 pub const MIN_ORDER_EXPIRY_PERIOD: i64 = 1000 * 60 * 4; // 4 minutes = 240,000 ms
 pub const MAX_ORDER_EXPIRY_PERIOD: i64 = 1000 * 60 * 60 * 24 * 30; // 30 days = 2,592,000,000 ms
+
+pub const NIL_ORDER_VERSION: i64 = 0;
+pub const MAX_ORDER_VERSION: i64 = (1 << TIMESTAMP_BITS) - 1;
 
 // Cancel all orders time in force types
 pub const IMMEDIATE_CANCEL_ALL: u8 = 0;
@@ -856,3 +861,5 @@ const fn const_hash_out(e: [u64; NUM_HASH_OUT_ELTS]) -> HashOut<F> {
 
 pub const TX_HEAVY: u8 = 0;
 pub const TX_LIGHT: u8 = 1;
+
+pub const MAX_REAL_SIGNATURES: usize = 500;

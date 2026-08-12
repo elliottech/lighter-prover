@@ -63,6 +63,7 @@ pub fn affine_summation_pairwise<C: Curve>(points: Vec<AffinePoint<C>>) -> Proje
             _ => panic!(),
         }
     }
+
     reduced_points
         .iter()
         .fold(ProjectivePoint::ZERO, |sum, x| sum + *x)

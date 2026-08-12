@@ -73,6 +73,7 @@ pub struct TxState {
     pub is_asset_used_as_margin: [[BoolTarget; NB_ASSETS_PER_TX]; NB_ACCOUNTS_PER_TX], // If it is true, then the asset is used as margin for the account
     pub order_path_helper: [BoolTarget; ORDER_BOOK_MERKLE_LEVELS],
     pub matching_engine_flag: BoolTarget,
+    pub order_book_merkle_split_flag: BoolTarget,
     pub update_impact_prices_flag: BoolTarget,
     pub taker_fee: SignedTarget,
     pub maker_fee: SignedTarget,
@@ -125,6 +126,7 @@ impl Default for TxState {
             }),
             order_path_helper: core::array::from_fn(|_| BoolTarget::default()),
             matching_engine_flag: BoolTarget::default(),
+            order_book_merkle_split_flag: BoolTarget::default(),
             update_impact_prices_flag: BoolTarget::default(),
             taker_fee: SignedTarget::default(),
             maker_fee: SignedTarget::default(),

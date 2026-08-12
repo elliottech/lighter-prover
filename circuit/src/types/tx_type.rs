@@ -9,7 +9,7 @@ use super::constants::*;
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::comparison::CircuitBuilderSubtractiveComparison;
 use crate::eddsa::gadgets::base_field::{CircuitBuilderGFp5, QuinticExtensionTarget};
-use crate::eddsa::schnorr::{SchnorrSigTarget, verify_schnorr_signature_conditional_circuit};
+use crate::eddsa::schnorr::SchnorrSigTarget;
 use crate::uint::u8::CircuitBuilderU8;
 
 #[derive(Debug)]
@@ -360,8 +360,10 @@ impl TxTypeTargets {
         }
     }
 
-    pub fn verify(&self, builder: &mut Builder, verify_inputs: &TxTypeVerifyTargets) {
-        self.verify_l2_tx(builder, verify_inputs);
+    /// Returns `signature_check`: true iff this tx carries a signature.
+    /// False for L2 change-pubkey with an empty new pubkey.
+    pub fn verify(&self, builder: &mut Builder, verify_inputs: &TxTypeVerifyTargets) -> BoolTarget {
+        let signature_check = self.verify_l2_tx(builder, verify_inputs);
 
         // For L1 and L2 transactions, next instruction should be EXECUTE_TRANSACTION.
         // Internal transactions are validated in their corresponding validation functions.
@@ -381,9 +383,15 @@ impl TxTypeTargets {
             verify_inputs.sub_account_index,
             ACCOUNT_INDEX_BITS,
         );
+
+        signature_check
     }
 
-    pub fn verify_l2_tx(&self, builder: &mut Builder, verify_inputs: &TxTypeVerifyTargets) {
+    pub fn verify_l2_tx(
+        &self,
+        builder: &mut Builder,
+        verify_inputs: &TxTypeVerifyTargets,
+    ) -> BoolTarget {
         // Verify set transaction expiry.
         builder.register_range_check(verify_inputs.expired_at, TIMESTAMP_BITS);
         builder.conditional_assert_lt(
@@ -424,13 +432,6 @@ impl TxTypeTargets {
         let is_new_pubkey_zero = builder.is_zero_quintic_ext(verify_inputs.account_pk);
         let no_signature_check = builder.and(self.is_l2_change_pub_key, is_new_pubkey_zero);
         let signature_check = builder.and_not(self.is_layer2, no_signature_check);
-        verify_schnorr_signature_conditional_circuit(
-            builder,
-            signature_check,
-            &verify_inputs.account_pk,
-            &verify_inputs.tx_hash,
-            &verify_inputs.signature,
-        );
 
         // If dead man's switch is supposed to be triggered for transaction initiator,
         // do not allow user to sending dms blocked transactions.
@@ -555,5 +556,7 @@ impl TxTypeTargets {
         builder.conditional_assert_true(check_active_pool_tx, is_valid_active_pool_tx);
         let check_frozen_pool_tx = builder.and(is_frozen_pool, self.is_layer2);
         builder.conditional_assert_true(check_frozen_pool_tx, is_valid_frozen_pool_tx);
+
+        signature_check
     }
 }

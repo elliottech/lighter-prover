@@ -1,5 +1,11 @@
 [workspace]
-members = ["circuit", "bench", "desertexit/circuits"]
+members = [
+  "circuit",
+  "bench",
+  "desertexit/circuits",
+  "p3/crates/p3-schnorr",
+  "p3/crates/p3-schnorr-recursion",
+]
 resolver = "2"
 
 [workspace.package]
@@ -32,12 +38,32 @@ sha2 = { version = "0.10.6" }
 unroll = { version = "0.1.5", default-features = false }
 rayon = "1.5.1"
 plonky2 = { git = "https://github.com/elliottech/plonky2", rev = "e1c2d35450948b88fca6a7e69e2643c3ecad3caa", package = "plonky2"} # dev branch
+# plonky2 = { path = "../plonky2-lighter/plonky2", features = ["metal"] }
 lazy_static = "1.4.0"
 env_logger = "0.11.3"
 ff = { package = "ff", version = "0.13", features = ["derive"] }
 paste = "1.0"
 clap = { version = "4.5.21", features = ["derive"] }
 clap_derive = { version = "4.0.0-rc.1" }
+
+# p3 (Plonky3) dependencies for the vendored p3 crates under `p3/`
+criterion = { version = "0.5", default-features = false }
+goldilocks-crypto = "0.1.2"
+p3-air = "0.6.0"
+p3-challenger = "0.6.0"
+p3-commit = "0.6.0"
+p3-dft = "0.6.0"
+p3-field = "0.6.0"
+p3-fri = "0.6.0"
+p3-goldilocks = "0.6.3"
+p3-matrix = "0.6.0"
+p3-merkle-tree = "0.6.0"
+p3-poseidon2 = "0.6.0"
+p3-symmetric = "0.6.0"
+p3-uni-stark = "0.6.0"
+p3-util = "0.6.0"
+poseidon-hash = "0.1.4"
+thiserror = "2"
 
 # Dev dependencies
 tiny-keccak = { version = "2.0.2", features = ["keccak"] }

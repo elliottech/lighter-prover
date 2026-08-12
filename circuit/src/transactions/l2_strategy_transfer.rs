@@ -209,12 +209,14 @@ impl Verify for L2StrategyTransferTxTarget {
 
 impl Apply for L2StrategyTransferTxTarget {
     fn apply(&mut self, builder: &mut Builder, tx_state: &mut TxState) -> BoolTarget {
-        let from_collateral_diff = builder.neg_bigint(&self.extended_transfer_amount);
         let zero_bigint = builder.zero_bigint();
+        let enabled_transfer_amount =
+            builder.select_bigint(self.success, &self.extended_transfer_amount, &zero_bigint);
+        let from_collateral_diff = builder.neg_bigint(&enabled_transfer_amount);
         for i in 0..NB_STRATEGIES {
             let is_to_strategy = builder.is_equal_constant(self.to_strategy_index, i as u64);
             let to_delta =
-                builder.select_bigint(is_to_strategy, &self.extended_transfer_amount, &zero_bigint);
+                builder.select_bigint(is_to_strategy, &enabled_transfer_amount, &zero_bigint);
             tx_state.accounts[OWNER_ACCOUNT_ID]
                 .public_pool_info
                 .strategies[i] = builder.add_bigint_non_carry(

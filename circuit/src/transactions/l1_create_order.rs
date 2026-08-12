@@ -113,6 +113,7 @@ impl L1CreateOrderTxTarget {
             pending_time_in_force: ioc,
             pending_reduce_only: builder.one(),
             pending_expiry: builder.zero(),
+            pending_order_version: builder.constant_i64(NIL_ORDER_VERSION),
 
             generic_field_0: builder.zero(),
 

@@ -7,6 +7,7 @@
 
 use core::marker::PhantomData;
 
+use p3_schnorr_recursion::poseidon2_gate::{P3Poseidon2Gate, P3Poseidon2Generator};
 use plonky2::field::extension::Extendable;
 use plonky2::field::types::PrimeField;
 use plonky2::gadgets::arithmetic::EqualityGenerator;
@@ -191,7 +192,8 @@ impl<F: RichField + Extendable<D> + Poseidon2, const D: usize> GateSerializer<F,
         QuinticSquaringGate,
         ByteDecompositionGate,
         U32InterleaveGate,
-        UninterleaveToU32Gate
+        UninterleaveToU32Gate,
+        P3Poseidon2Gate<D>
     }
 }
 
@@ -281,7 +283,8 @@ where
         NonNativeSubtractionGenerator<F, D, CC::ScalarField>,
         NonNativeMultipleAddsGenerator<F, D, CC::ScalarField>,
         NonNativeInverseGenerator<F, D, CC::ScalarField>,
-        NonNativeAdditionGenerator<F, D, CC::ScalarField>
+        NonNativeAdditionGenerator<F, D, CC::ScalarField>,
+        P3Poseidon2Generator<F, D>
     }
 }
 

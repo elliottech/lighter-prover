@@ -6,6 +6,7 @@ use plonky2::field::types::Field;
 use plonky2::hash::hash_types::{HashOut, HashOutTarget, RichField};
 use plonky2::iop::target::{BoolTarget, Target};
 
+use crate::eddsa::p3_schnorr_digest::P3_DIGEST_STATE_WIDTH;
 use crate::tx::Tx;
 use crate::types::approve_integrator::{
     APPROVE_INTEGRATOR_PUBLIC_INPUTS_LEN, ApproveIntegratorMessage, ApproveIntegratorMessageTarget,
@@ -226,6 +227,9 @@ where
     pub old_jump: JumpState<F>,
 
     pub txs: Vec<Tx<F>>,
+
+    pub signature_digest_state_before: [F; P3_DIGEST_STATE_WIDTH],
+    pub signed_count_before: F,
 }
 
 #[derive(Debug, Clone)]
@@ -252,6 +256,11 @@ where
 
     pub old_jump: JumpState<F>,
     pub new_jump: JumpState<F>,
+
+    pub signature_digest_state_before: [F; P3_DIGEST_STATE_WIDTH],
+    pub signature_digest_state_after: [F; P3_DIGEST_STATE_WIDTH],
+    pub signed_count_before: F,
+    pub signed_count_after: F,
 }
 
 impl<F> BlockTxWitness<F>
@@ -286,7 +295,12 @@ where
         let old_jump_start = priority_pub_data_end;
         let new_jump_start = old_jump_start + JUMP_STATE_SIZE;
         let new_jump_end = new_jump_start + JUMP_STATE_SIZE;
-        let total_pis_size = new_jump_end;
+
+        let digest_state_before_start = new_jump_end;
+        let digest_state_after_start = digest_state_before_start + P3_DIGEST_STATE_WIDTH;
+        let signed_count_before_index = digest_state_after_start + P3_DIGEST_STATE_WIDTH;
+        let signed_count_after_index = signed_count_before_index + 1;
+        let total_pis_size = signed_count_after_index + 1;
 
         assert_eq!(
             public_inputs.len(),
@@ -329,6 +343,15 @@ where
 
             old_jump: JumpState::from_public_inputs(&public_inputs[old_jump_start..new_jump_start]),
             new_jump: JumpState::from_public_inputs(&public_inputs[new_jump_start..new_jump_end]),
+
+            signature_digest_state_before: core::array::from_fn(|i| {
+                public_inputs[digest_state_before_start + i]
+            }),
+            signature_digest_state_after: core::array::from_fn(|i| {
+                public_inputs[digest_state_after_start + i]
+            }),
+            signed_count_before: public_inputs[signed_count_before_index],
+            signed_count_after: public_inputs[signed_count_after_index],
         }
     }
 }
@@ -354,6 +377,11 @@ pub struct BlockTxWitnessTarget {
 
     pub old_jump: JumpStateTarget,
     pub new_jump: JumpStateTarget,
+
+    pub signature_digest_state_before: [Target; P3_DIGEST_STATE_WIDTH],
+    pub signature_digest_state_after: [Target; P3_DIGEST_STATE_WIDTH],
+    pub signed_count_before: Target,
+    pub signed_count_after: Target,
 }
 
 impl BlockTxWitnessTarget {
@@ -384,7 +412,12 @@ impl BlockTxWitnessTarget {
         let old_jump_start = priority_pub_data_end;
         let new_jump_start = old_jump_start + JUMP_STATE_SIZE;
         let new_jump_end = new_jump_start + JUMP_STATE_SIZE;
-        let total_pis_size = new_jump_end;
+
+        let digest_state_before_start = new_jump_end;
+        let digest_state_after_start = digest_state_before_start + P3_DIGEST_STATE_WIDTH;
+        let signed_count_before_index = digest_state_after_start + P3_DIGEST_STATE_WIDTH;
+        let signed_count_after_index = signed_count_before_index + 1;
+        let total_pis_size = signed_count_after_index + 1;
 
         assert_eq!(
             pis.len(),
@@ -431,6 +464,15 @@ impl BlockTxWitnessTarget {
 
             old_jump: JumpStateTarget::from_public_inputs(&pis[old_jump_start..new_jump_start]),
             new_jump: JumpStateTarget::from_public_inputs(&pis[new_jump_start..new_jump_end]),
+
+            signature_digest_state_before: core::array::from_fn(|i| {
+                pis[digest_state_before_start + i]
+            }),
+            signature_digest_state_after: core::array::from_fn(|i| {
+                pis[digest_state_after_start + i]
+            }),
+            signed_count_before: pis[signed_count_before_index],
+            signed_count_after: pis[signed_count_after_index],
         }
     }
 }

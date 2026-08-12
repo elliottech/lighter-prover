@@ -10,6 +10,7 @@ use crate::bigint::bigint::CircuitBuilderBigInt;
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::comparison::CircuitBuilderSubtractiveComparison;
 use crate::eddsa::gadgets::base_field::{CircuitBuilderGFp5, QuinticExtensionTarget};
+use crate::eddsa::schnorr::SchnorrSigTarget;
 use crate::hash_utils::CircuitBuilderHashUtils;
 use crate::hints::CircuitBuilderHints;
 use crate::matching_engine::execute_matching_light;
@@ -52,8 +53,12 @@ impl TxTarget {
         BoolTarget,
         [U8Target; ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE],
         BoolTarget,
-        HashOutTarget, // public market details hash
-        HashOutTarget, // account delta tree root
+        HashOutTarget,          // public market details hash
+        HashOutTarget,          // account delta tree root
+        QuinticExtensionTarget, // account_pk (absorbed into the p3-schnorr digest when signed)
+        QuinticExtensionTarget, // tx_hash (absorbed into the p3-schnorr digest when signed)
+        SchnorrSigTarget,       // signature (absorbed into the p3-schnorr digest when signed)
+        BoolTarget,             // signature_check: slot carries a real signature to verify
     ) {
         let tx_type = TxTypeTargets::new(builder, self.tx_type);
 
@@ -71,7 +76,7 @@ impl TxTarget {
         let partial_main_account = self.select_light_partial_main_account(builder);
 
         let nil_account_index = builder.constant_i64(NIL_ACCOUNT_INDEX);
-        tx_type.verify(
+        let signature_check = tx_type.verify(
             builder,
             &TxTypeVerifyTargets {
                 expired_at: self.expired_at,
@@ -202,6 +207,7 @@ impl TxTarget {
             is_asset_used_as_margin: core::array::from_fn(|_| is_asset_used_as_margin),
             order_path_helper,
             matching_engine_flag: builder._false(),
+            order_book_merkle_split_flag: builder._false(),
             update_impact_prices_flag: builder._false(),
             taker_fee: self.taker_fee,
             maker_fee: self.maker_fee,
@@ -317,6 +323,10 @@ impl TxTarget {
             builder._false(),
             public_market_details_hash,
             self.old_account_delta_tree_root,
+            account_pk,
+            tx_hash,
+            self.signature.clone(),
+            signature_check,
         )
     }
 

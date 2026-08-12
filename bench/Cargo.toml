@@ -38,6 +38,8 @@ clap_derive = { workspace = true }
 tiny-keccak =  { workspace = true }
 paste = { workspace = true }
 circuit = { path = "../circuit", default-features = true }
+p3-schnorr-recursion = { path = "../p3/crates/p3-schnorr-recursion", features = ["plonky2-nightly"] }
+p3-schnorr = { path = "../p3/crates/p3-schnorr", features = ["reference"] }
 
 [dev-dependencies]
 flate2 = "1.0"

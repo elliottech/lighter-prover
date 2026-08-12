@@ -28,6 +28,8 @@ use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::ecdsa::gadgets::ecdsa::{
     CircuitBuilderECDSAPublicKey, CircuitBuilderECDSASignature, conditional_verify_ecdsa_sig,
 };
+use crate::eddsa::p3_schnorr_digest::{P3_DIGEST_STATE_WIDTH, P3SchnorrDigestState};
+use crate::eddsa::schnorr_helper::dummy_signature_batch_digest;
 use crate::hash_utils::CircuitBuilderHashUtils;
 use crate::keccak::keccak::CircuitBuilderKeccak;
 use crate::nonnative::CircuitBuilderNonNative;
@@ -53,11 +55,13 @@ pub trait Circuit<
     /// `builder` can be used to build circuit via calling [`Builder::build()`]
     ///
     /// `target` can be used to assign partial witness in [`BlockTxChainCircuit::prove()`] function
+    #[allow(clippy::too_many_arguments)]
     fn define(
         config: CircuitConfig,
         block_pre_exec_circuit: &CircuitData<F, C, D>,
         block_light_tx_chain_circuit: &CircuitData<F, C, D>,
         block_heavy_tx_chain_circuit: &CircuitData<F, C, D>,
+        signature_batch_circuit: &CircuitData<F, C, D>,
         on_chain_operations_limit: usize,
     ) -> Self;
 
@@ -68,6 +72,7 @@ pub trait Circuit<
         pre_exec_proof: &ProofWithPublicInputs<F, C, D>,
         light_tx_chain_proof: &ProofWithPublicInputs<F, C, D>,
         heavy_tx_chain_proof: &ProofWithPublicInputs<F, C, D>,
+        signature_batch_proof: &ProofWithPublicInputs<F, C, D>,
     ) -> Result<PartialWitness<F>>;
 
     fn prove(
@@ -77,6 +82,7 @@ pub trait Circuit<
         pre_exec_proof: &ProofWithPublicInputs<F, C, D>,
         light_tx_chain_proof: &ProofWithPublicInputs<F, C, D>,
         heavy_tx_chain_proof: &ProofWithPublicInputs<F, C, D>,
+        signature_batch_proof: &ProofWithPublicInputs<F, C, D>,
     ) -> Result<ProofWithPublicInputs<F, C, D>>;
 
     fn prove_and_compress(
@@ -86,6 +92,7 @@ pub trait Circuit<
         pre_exec_proof: &ProofWithPublicInputs<F, C, D>,
         light_tx_chain_proof: &ProofWithPublicInputs<F, C, D>,
         heavy_tx_chain_proof: &ProofWithPublicInputs<F, C, D>,
+        signature_batch_proof: &ProofWithPublicInputs<F, C, D>,
     ) -> Result<CompressedProofWithPublicInputs<F, C, D>>;
 }
 
@@ -101,6 +108,10 @@ pub struct BlockTarget {
     pub light_tx_chain_proof: ProofWithPublicInputsTarget<D>, // proof of light tx chain execution
     pub heavy_tx_chain_proof: ProofWithPublicInputsTarget<D>, // proof of heavy tx chain execution
 
+    /// Heavy-chain instances first, then light-chain ones. The two chains fold into one digest by seeding
+    /// the light chain's sponge state with the heavy chain's final state.
+    pub signature_batch_proof: ProofWithPublicInputsTarget<D>,
+
     pub block: BlockWitnessTarget, // Public block witness
 
     // Private witness: raw public market details after the block.
@@ -113,6 +124,7 @@ impl BlockCircuit {
         block_pre_exec_common_circuit: &CommonCircuitData<F, D>,
         block_light_tx_chain_common_circuit: &CommonCircuitData<F, D>,
         block_heavy_tx_chain_common_circuit: &CommonCircuitData<F, D>,
+        signature_batch_common_circuit: &CommonCircuitData<F, D>,
         on_chain_operations_limit: usize,
     ) -> Self {
         let mut builder = Builder::new(config);
@@ -153,17 +165,21 @@ impl BlockCircuit {
                     .add_virtual_proof_with_pis(block_light_tx_chain_common_circuit),
                 heavy_tx_chain_proof: builder
                     .add_virtual_proof_with_pis(block_heavy_tx_chain_common_circuit),
+                signature_batch_proof: builder
+                    .add_virtual_proof_with_pis(signature_batch_common_circuit),
             },
             builder,
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn handle_proofs(
         &mut self,
         on_chain_operations_limit: usize,
         block_pre_exec_circuit: &CircuitData<F, C, D>,
         block_light_tx_chain_circuit: &CircuitData<F, C, D>,
         block_heavy_tx_chain_circuit: &CircuitData<F, C, D>,
+        signature_batch_circuit: &CircuitData<F, C, D>,
     ) -> (
         BlockPreExecWitnessTarget,
         BlockTxChainWitnessTarget,
@@ -231,6 +247,65 @@ impl BlockCircuit {
             on_chain_operations_limit,
             1,
         );
+
+        // Fold both chains' signed txs into ONE p3-schnorr batch digest:
+        //   heavy seed = initial_with_count(signature_count)   (count = block total)
+        //   light seed = heavy final sponge state
+        //   digest     = squeeze(light final sponge state)
+        // Each chain accumulates its own local `signed_so_far` (0 at step 0); their sum
+        // must equal the count the sponge was seeded with in the beginning.
+        let signature_count = light_tx_chain_witness.signature_count;
+        self.builder
+            .connect(heavy_tx_chain_witness.signature_count, signature_count);
+        let total_signed = self.builder.add(
+            heavy_tx_chain_witness.signed_so_far,
+            light_tx_chain_witness.signed_so_far,
+        );
+        self.builder.connect(total_signed, signature_count);
+
+        let heavy_initial_state =
+            P3SchnorrDigestState::initial_with_count(&mut self.builder, signature_count);
+        for i in 0..P3_DIGEST_STATE_WIDTH {
+            self.builder.connect(
+                heavy_tx_chain_witness.signature_digest_seed[i],
+                heavy_initial_state.state[i],
+            );
+            self.builder.connect(
+                light_tx_chain_witness.signature_digest_seed[i],
+                heavy_tx_chain_witness.signature_digest_state[i],
+            );
+        }
+
+        // A block with zero signed slots has no batch to prove
+        let one = self.builder.one();
+        let dummy_digest = dummy_signature_batch_digest().map(|lane| self.builder.constant(lane));
+        let is_empty = self.builder.is_zero(signature_count);
+        let expected_count = self.builder.select(is_empty, one, signature_count);
+        self.builder.connect(
+            self.target.signature_batch_proof.public_inputs[0],
+            expected_count,
+        );
+
+        let signature_batch_verifier_data = self
+            .builder
+            .constant_verifier_data(&signature_batch_circuit.verifier_only);
+        self.builder.verify_proof::<C>(
+            &self.target.signature_batch_proof,
+            &signature_batch_verifier_data,
+            &signature_batch_circuit.common,
+        );
+
+        let signature_digest = P3SchnorrDigestState {
+            state: light_tx_chain_witness.signature_digest_state,
+        }
+        .digest();
+        for (i, &digest_lane) in signature_digest.iter().enumerate() {
+            let expected_lane = self.builder.select(is_empty, dummy_digest[i], digest_lane);
+            self.builder.connect(
+                expected_lane,
+                self.target.signature_batch_proof.public_inputs[1 + i],
+            );
+        }
 
         (
             pre_exec_witness,
@@ -418,6 +493,7 @@ impl Circuit<C, F, D> for BlockCircuit {
         block_pre_exec_circuit: &CircuitData<F, C, D>,
         block_light_tx_chain_circuit: &CircuitData<F, C, D>,
         block_heavy_tx_chain_circuit: &CircuitData<F, C, D>,
+        signature_batch_circuit: &CircuitData<F, C, D>,
         on_chain_operations_limit: usize,
     ) -> Self {
         let mut circuit = Self::new(
@@ -425,6 +501,7 @@ impl Circuit<C, F, D> for BlockCircuit {
             &block_pre_exec_circuit.common,
             &block_light_tx_chain_circuit.common,
             &block_heavy_tx_chain_circuit.common,
+            &signature_batch_circuit.common,
             on_chain_operations_limit,
         );
 
@@ -434,6 +511,7 @@ impl Circuit<C, F, D> for BlockCircuit {
                 block_pre_exec_circuit,
                 block_light_tx_chain_circuit,
                 block_heavy_tx_chain_circuit,
+                signature_batch_circuit,
             );
 
         circuit.perform_sanity_checks(
@@ -633,12 +711,14 @@ impl Circuit<C, F, D> for BlockCircuit {
         pre_exec_proof: &ProofWithPublicInputs<F, C, D>,
         light_tx_chain_proof: &ProofWithPublicInputs<F, C, D>,
         heavy_tx_chain_proof: &ProofWithPublicInputs<F, C, D>,
+        signature_batch_proof: &ProofWithPublicInputs<F, C, D>,
     ) -> Result<PartialWitness<F>> {
         let mut pw = PartialWitness::new();
 
         pw.set_proof_with_pis_target(&target.pre_exec_proof, pre_exec_proof)?;
         pw.set_proof_with_pis_target(&target.light_tx_chain_proof, light_tx_chain_proof)?;
         pw.set_proof_with_pis_target(&target.heavy_tx_chain_proof, heavy_tx_chain_proof)?;
+        pw.set_proof_with_pis_target(&target.signature_batch_proof, signature_batch_proof)?;
 
         let block_witness = BlockWitness::from_block(block, 1);
 
@@ -717,6 +797,7 @@ impl Circuit<C, F, D> for BlockCircuit {
         pre_exec_proof: &ProofWithPublicInputs<F, C, D>,
         light_tx_chain_proof: &ProofWithPublicInputs<F, C, D>,
         heavy_tx_chain_proof: &ProofWithPublicInputs<F, C, D>,
+        signature_batch_proof: &ProofWithPublicInputs<F, C, D>,
     ) -> Result<ProofWithPublicInputs<F, C, D>> {
         let mut timing = TimingTree::new("BlockCircuit", Level::Debug);
 
@@ -727,6 +808,7 @@ impl Circuit<C, F, D> for BlockCircuit {
                 pre_exec_proof,
                 light_tx_chain_proof,
                 heavy_tx_chain_proof,
+                signature_batch_proof,
             )?
         });
         let proof = circuit_data.prove(pw)?;
@@ -744,6 +826,7 @@ impl Circuit<C, F, D> for BlockCircuit {
         pre_exec_proof: &ProofWithPublicInputs<F, C, D>,
         light_tx_chain_proof: &ProofWithPublicInputs<F, C, D>,
         heavy_tx_chain_proof: &ProofWithPublicInputs<F, C, D>,
+        signature_batch_proof: &ProofWithPublicInputs<F, C, D>,
     ) -> Result<CompressedProofWithPublicInputs<F, C, D>> {
         let mut timing = TimingTree::new("BlockCircuit", Level::Debug);
 
@@ -754,6 +837,7 @@ impl Circuit<C, F, D> for BlockCircuit {
                 pre_exec_proof,
                 light_tx_chain_proof,
                 heavy_tx_chain_proof,
+                signature_batch_proof,
             )?
         });
         let proof = circuit_data.prove(pw)?;

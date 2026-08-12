@@ -13,11 +13,12 @@ use crate::eddsa::gadgets::base_field::QuinticExtensionTarget;
 use crate::eddsa::schnorr::hash_to_quintic_extension_circuit;
 use crate::matching_engine::{
     decrement_locked_balance_for_order, decrement_order_count_in_place, get_next_order_nonce,
-    trigger_child_orders,
+    get_quote, is_not_valid_reduce_only_direction, trigger_child_orders,
 };
+use crate::order_book_tree_helpers::order_indexes_to_merkle_path;
 use crate::tx_attributes::{
     ATTR_INTEGRATOR_FEE_COLLECTOR_INDEX, ATTR_INTEGRATOR_MAKER_FEE, ATTR_INTEGRATOR_TAKER_FEE,
-    ATTR_SELF_TRADE_BEHAVIOR_MODE, ATTR_SELF_TRADE_EQUALITY_MODE,
+    ATTR_ORDER_VERSION, ATTR_SELF_TRADE_BEHAVIOR_MODE, ATTR_SELF_TRADE_EQUALITY_MODE,
 };
 use crate::tx_interface::{Apply, TxHash, Verify};
 use crate::types::account_order::{AccountOrderTarget, OrderFlags, select_account_order_target};
@@ -69,6 +70,8 @@ pub struct L2ModifyOrderTxTarget {
 
     // Output
     success: BoolTarget,
+
+    // Helpers
     is_perps_market: BoolTarget,
 }
 
@@ -85,6 +88,8 @@ impl L2ModifyOrderTxTarget {
 
             // Output
             success: BoolTarget::default(),
+
+            // Helpers
             is_perps_market: BoolTarget::default(),
         }
     }
@@ -115,6 +120,7 @@ impl L2ModifyOrderTxTarget {
             pending_time_in_force: account_order.time_in_force,
             pending_reduce_only: account_order.reduce_only,
             pending_expiry: account_order.expiry,
+            pending_order_version: account_order.order_version,
 
             generic_field_0: builder.zero(),
 
@@ -181,6 +187,16 @@ impl L2ModifyOrderTxTarget {
                 self_trade_equality_mode: tx_state.get_attribute(ATTR_SELF_TRADE_EQUALITY_MODE),
             }
             .to_target(builder);
+        }
+
+        // Version update
+        {
+            let given_order_version = tx_state.get_attribute(ATTR_ORDER_VERSION);
+            let is_given_order_version_nil =
+                builder.is_equal_constant(given_order_version, NIL_ORDER_VERSION as u64);
+            let flag = builder.and_not(flag, is_given_order_version_nil);
+            account_order.order_version =
+                builder.select(flag, given_order_version, account_order.order_version);
         }
 
         // Base amount is zero
@@ -323,6 +339,17 @@ impl Verify for L2ModifyOrderTxTarget {
             builder.is_equal_constant(tx_state.market.status, MARKET_STATUS_ACTIVE as u64);
         builder.conditional_assert_true(self.success, is_order_book_enabled);
 
+        let new_order_version = tx_state.get_attribute(ATTR_ORDER_VERSION);
+        let is_new_order_version_nil =
+            builder.is_equal_constant(new_order_version, NIL_ORDER_VERSION as u64);
+        let is_order_version_incrased = builder.is_gt(
+            new_order_version,
+            tx_state.account_order.order_version,
+            TIMESTAMP_BITS,
+        );
+        let is_version_correct = builder.or(is_order_version_incrased, is_new_order_version_nil);
+        self.success = builder.and(self.success, is_version_correct);
+
         let is_trigger_status_na = builder.is_equal_constant(
             tx_state.account_order.trigger_status,
             TRIGGER_STATUS_NA as u64,
@@ -441,6 +468,89 @@ impl Verify for L2ModifyOrderTxTarget {
             TIMESTAMP_BITS,
         );
         self.success = builder.and(self.success, is_order_expiry_gt_block_created_at);
+
+        // Spot balance check
+        {
+            // let spot_success_flag = builder.and_not(self.success, self.is_perps_market);
+
+            // Check if the new base amount will exceed the matched base amount (initial - remaining)
+            // If so, we calculate old and new locked balances and see if the available asset balance
+            // allows that to happen.
+            // let matched_base_amount = builder.sub(
+            //     tx_state.account_order.initial_base_amount,
+            //     tx_state.account_order.remaining_base_amount,
+            // );
+            // let new_base_amount_gt_matched_amount = builder.is_gt(
+            //     self.base_amount,
+            //     matched_base_amount,
+            //     ORDER_BASE_AMOUNT_BITS,
+            // );
+            // let flag = builder.and(spot_success_flag, new_base_amount_gt_matched_amount);
+
+            // let (old_locked_amount, ask_asset_index) = get_locked_amount_and_ask_asset_index(
+            //     builder,
+            //     flag,
+            //     &tx_state.market,
+            //     tx_state.account_order.remaining_base_amount,
+            //     tx_state.account_order.price,
+            //     tx_state.account_order.is_ask,
+            // );
+
+            // let new_remaining_base_amount = builder.sub(self.base_amount, matched_base_amount);
+            // let (new_locked_amount, _) = get_locked_amount_and_ask_asset_index(
+            //     builder,
+            //     flag,
+            //     &tx_state.market,
+            //     new_remaining_base_amount,
+            //     self.price,
+            //     tx_state.account_order.is_ask,
+            // );
+            // let (locked_amount_delta, old_amount_was_greater) =
+            //     builder.try_sub_biguint(&new_locked_amount, &old_locked_amount);
+            // let new_locked_gte_old = builder.not(BoolTarget::new_unsafe(old_amount_was_greater.0));
+
+            // let is_base_asset = builder.is_equal(
+            //     tx_state.account_assets[OWNER_ACCOUNT_ID][BASE_ASSET_ID].index_0,
+            //     ask_asset_index,
+            // );
+
+            // let _spot = builder.constant_u64(PRODUCT_TYPE_SPOT);
+            // let base_asset_available_balance = get_available_asset_balance(
+            //     builder,
+            //     _spot,
+            //     tx_state.asset_indices[BASE_ASSET_ID],
+            //     &tx_state.accounts[OWNER_ACCOUNT_ID],
+            //     &tx_state.account_assets[OWNER_ACCOUNT_ID][BASE_ASSET_ID],
+            //     tx_state.is_asset_used_as_margin[OWNER_ACCOUNT_ID][BASE_ASSET_ID],
+            //     &tx_state.risk_infos[OWNER_ACCOUNT_ID].cross_risk_parameters,
+            //     &tx_state.margined_asset[BASE_ASSET_ID],
+            //     &tx_state.account_margined_assets[OWNER_ACCOUNT_ID][BASE_ASSET_ID].balance,
+            // );
+            // let quote_asset_available_balance = get_available_asset_balance(
+            //     builder,
+            //     _spot,
+            //     tx_state.asset_indices[QUOTE_ASSET_ID],
+            //     &tx_state.accounts[OWNER_ACCOUNT_ID],
+            //     &tx_state.account_assets[OWNER_ACCOUNT_ID][QUOTE_ASSET_ID],
+            //     tx_state.is_asset_used_as_margin[OWNER_ACCOUNT_ID][QUOTE_ASSET_ID],
+            //     &tx_state.risk_infos[OWNER_ACCOUNT_ID].cross_risk_parameters,
+            //     &tx_state.margined_asset[QUOTE_ASSET_ID],
+            //     &tx_state.account_margined_assets[OWNER_ACCOUNT_ID][QUOTE_ASSET_ID].balance,
+            // );
+
+            // let available_balance = builder.select_biguint(
+            //     is_base_asset,
+            //     &base_asset_available_balance,
+            //     &quote_asset_available_balance,
+            // );
+            // let not_enough_available_balance =
+            //     builder.is_lt_biguint(&available_balance, &locked_amount_delta);
+
+            // let should_be_false =
+            //     builder.multi_and(&[flag, new_locked_gte_old, not_enough_available_balance]);
+
+            // builder.conditional_assert_false(self.success, should_be_false);
+        }
     }
 }
 
@@ -541,6 +651,59 @@ impl Apply for L2ModifyOrderTxTarget {
         // Set new register
         let instruction = self.get_instruction_from_account_order(builder, &new_account_order);
         tx_state.put_to_instruction_stack_unsafe(builder, is_in_progress_order, &instruction, 0);
+
+        // In progress modify - cancel the old key, split ob merkle verification.
+        {
+            tx_state.order_book_merkle_split_flag = is_in_progress_order;
+
+            let empty_order_at_new_key =
+                OrderTarget::empty(builder, self.price, new_account_order.nonce);
+            let insert_order_path_helper =
+                order_indexes_to_merkle_path(builder, self.price, new_account_order.nonce);
+
+            let is_not_valid_reduce_only = is_not_valid_reduce_only_direction(
+                builder,
+                tx_state.positions[TAKER_ACCOUNT_ID].position.sign,
+                new_account_order.is_ask,
+            );
+            let is_reduce_only = builder.is_equal(new_account_order.reduce_only, one);
+            let is_invalid_reduce_only = builder.multi_and(&[
+                self.is_perps_market,
+                is_reduce_only,
+                is_not_valid_reduce_only,
+            ]);
+
+            // An empty opposite side also yields a zero quote, so it needs no separate check
+            let (opposite_base_sum, _) = get_quote(
+                builder,
+                new_account_order.is_ask,
+                &empty_order_at_new_key,
+                &tx_state.order_book_tree_path,
+                &insert_order_path_helper,
+            );
+            let is_non_crossing = builder.is_zero(opposite_base_sum);
+
+            let should_execute_matching = builder.or(is_invalid_reduce_only, is_non_crossing);
+            let execute_matching_flag = builder.and(is_in_progress_order, should_execute_matching);
+
+            // Put empty order information to tx state so matching thinks it's placing a new order to the new key
+            tx_state.order = select_order_target(
+                builder,
+                is_in_progress_order,
+                &empty_order_at_new_key,
+                &tx_state.order,
+            );
+            for i in 0..ORDER_BOOK_MERKLE_LEVELS {
+                tx_state.order_path_helper[i] = builder.select_bool(
+                    is_in_progress_order,
+                    insert_order_path_helper[i],
+                    tx_state.order_path_helper[i],
+                );
+            }
+
+            tx_state.matching_engine_flag =
+                builder.or(tx_state.matching_engine_flag, execute_matching_flag);
+        }
 
         // Set new account order
         tx_state.account_order = select_account_order_target(

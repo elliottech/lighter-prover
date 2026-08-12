@@ -152,11 +152,12 @@ impl Verify for L2UpdateAccountAssetConfigTxTarget {
         );
         builder.conditional_assert_false(is_enabled, is_same_margin_mode);
 
-        // Asset must be margin-enabled
-        builder.conditional_assert_true(
-            is_enabled,
-            BoolTarget::new_unsafe(tx_state.assets[TX_ASSET_ID].margin_mode),
+        // Asset must be margin-enabled (priced-only is rejected)
+        let is_asset_margin_enabled = builder.is_equal_constant(
+            tx_state.assets[TX_ASSET_ID].margin_mode,
+            ASSET_MARGIN_MODE_ENABLED,
         );
+        builder.conditional_assert_true(is_enabled, is_asset_margin_enabled);
 
         // Asset must have available balance to cover for margin balance when disabling margin mode
         let _perps = builder.constant_u64(PRODUCT_TYPE_PERPS);

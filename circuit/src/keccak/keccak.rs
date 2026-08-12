@@ -159,7 +159,9 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilderKeccak<F, D> fo
 
         input.push(self.one_u8());
         input.resize(num_blocks * block_size_in_bytes, self.zero_u8());
-        input[num_blocks * block_size_in_bytes - 1] = self.constant_u8(128);
+        let last_index = num_blocks * block_size_in_bytes - 1;
+        let final_pad_bit = self.constant_u8(128);
+        input[last_index] = U8Target(self.add(input[last_index].0, final_pad_bit.0));
 
         // Convert to biguint
         input.reverse();

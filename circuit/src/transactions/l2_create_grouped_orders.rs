@@ -721,6 +721,10 @@ impl Apply for L2CreateGroupedOrdersTxTarget {
     fn apply(&mut self, builder: &mut Builder, tx_state: &mut TxState) -> BoolTarget {
         let nil_nonce = builder.constant_i64(NIL_ORDER_NONCE_INDEX);
 
+        // Margin mode coercion / margin_set_flag locking is handled inside
+        // increment_order_count_in_place (pending orders) and the matching engine when in-progress
+        // orders rest, plus apply_trade on fills, mirroring coerceUnsetMarginMode.
+
         let mut order_instructions: [BaseRegisterInfoTarget; MAX_NB_GROUPED_ORDERS] =
             array::from_fn(|_| BaseRegisterInfoTarget::default());
 
@@ -781,6 +785,8 @@ impl Apply for L2CreateGroupedOrdersTxTarget {
                 pending_time_in_force: self.orders[i].time_in_force,
                 pending_reduce_only: self.orders[i].reduce_only,
                 pending_expiry: self.orders[i].order_expiry,
+
+                pending_order_version: builder.constant_i64(NIL_ORDER_VERSION),
 
                 generic_field_0: builder.zero(),
 

@@ -1,0 +1,51 @@
+[package]
+name = "p3-schnorr"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+readme = "../../README.md"
+
+[features]
+default = ["parallel"]
+parallel = [
+    "p3-dft/parallel",
+    "p3-uni-stark/parallel",
+    "p3-util/parallel",
+]
+reference = ["dep:goldilocks-crypto"]
+
+[dependencies]
+bincode.workspace = true
+goldilocks-crypto = { workspace = true, optional = true }
+p3-air.workspace = true
+p3-challenger.workspace = true
+p3-commit.workspace = true
+p3-dft.workspace = true
+p3-field.workspace = true
+p3-fri.workspace = true
+p3-goldilocks.workspace = true
+p3-matrix.workspace = true
+p3-merkle-tree.workspace = true
+p3-symmetric.workspace = true
+p3-uni-stark.workspace = true
+p3-util.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+poseidon-hash.workspace = true
+rayon.workspace = true
+
+[[bench]]
+name = "air"
+harness = false
+required-features = ["reference"]
+
+[[example]]
+name = "timing"
+required-features = ["reference"]
+
+[[test]]
+name = "reference"
+path = "tests/reference.rs"
+required-features = ["reference"]

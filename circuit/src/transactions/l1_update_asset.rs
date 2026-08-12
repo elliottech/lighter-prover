@@ -63,6 +63,7 @@ pub struct L1UpdateAssetTxTarget {
 
     // helpers
     margin_enabled: BoolTarget,
+    in_margin_list: BoolTarget,
     enabling_margin: BoolTarget,
 
     // output
@@ -85,6 +86,7 @@ impl L1UpdateAssetTxTarget {
             index_price_divider: builder.add_virtual_target(),
 
             margin_enabled: builder._false(),
+            in_margin_list: builder._false(),
             enabling_margin: builder._false(),
 
             success: BoolTarget::default(),
@@ -145,7 +147,18 @@ impl Verify for L1UpdateAssetTxTarget {
 
         builder.range_check_biguint(&self.min_transfer_amount, MAX_EXCHANGE_ASSET_BALANCE_BITS);
         builder.range_check_biguint(&self.min_withdrawal_amount, MAX_EXCHANGE_ASSET_BALANCE_BITS);
-        builder.assert_bool(BoolTarget::new_unsafe(self.margin_mode));
+
+        // Margin mode must be disabled, enabled or priced-only
+        let is_margin_mode_disabled =
+            builder.is_equal_constant(self.margin_mode, ASSET_MARGIN_MODE_DISABLED);
+        self.margin_enabled =
+            builder.is_equal_constant(self.margin_mode, ASSET_MARGIN_MODE_ENABLED);
+        let is_priced_only =
+            builder.is_equal_constant(self.margin_mode, ASSET_MARGIN_MODE_PRICED_ONLY);
+        let is_margin_mode_valid =
+            builder.multi_or(&[is_margin_mode_disabled, self.margin_enabled, is_priced_only]);
+        builder.conditional_assert_true(self.is_enabled, is_margin_mode_valid);
+        self.in_margin_list = builder.or(self.margin_enabled, is_priced_only);
 
         let asset_margin_tick = builder.constant_u64(ASSET_MARGIN_TICK);
         builder.conditional_assert_lte(
@@ -176,12 +189,8 @@ impl Verify for L1UpdateAssetTxTarget {
         );
         builder.conditional_assert_lte(self.is_enabled, should_be_lte_fee_tick, fee_tick, 32);
 
-        self.margin_enabled =
-            builder.is_equal_constant(self.margin_mode, ASSET_MARGIN_MODE_ENABLED);
-        self.enabling_margin = builder.and_not(
-            self.margin_enabled,
-            BoolTarget::new_unsafe(tx_state.assets[TX_ASSET_ID].margin_mode),
-        );
+        let old_in_margin_list = tx_state.assets[TX_ASSET_ID].is_in_margin_list(builder);
+        self.enabling_margin = builder.and_not(self.in_margin_list, old_in_margin_list);
 
         // LTV can't be zero if margin mode is enabled
         let is_ltv_zero = builder.is_zero(self.loan_to_value);
@@ -226,12 +235,14 @@ impl Verify for L1UpdateAssetTxTarget {
             builder.conditional_assert_true(is_usdc_asset, is_usdc_liquidation_fee_zero);
         }
 
-        // Can't disable margin once it's enabled
-        let margin_already_enabled =
-            BoolTarget::new_unsafe(tx_state.assets[TX_ASSET_ID].margin_mode);
-        let is_disabling_enabled_margin =
-            builder.and_not(margin_already_enabled, self.margin_enabled);
-        self.success = builder.and_not(self.success, is_disabling_enabled_margin);
+        // Once in the margined asset list, an asset can't leave it, and a margin enabled asset
+        // can't be downgraded to priced-only. Upgrading priced-only to margin enabled is allowed.
+        let is_same_margin_mode =
+            builder.is_equal(self.margin_mode, tx_state.assets[TX_ASSET_ID].margin_mode);
+        let is_allowed_margin_mode = builder.or(self.margin_enabled, is_same_margin_mode);
+        let is_invalid_margin_transition =
+            builder.and_not(old_in_margin_list, is_allowed_margin_mode);
+        self.success = builder.and_not(self.success, is_invalid_margin_transition);
 
         // Ensure that asset is not empty
         let is_asset_empty = tx_state.assets[TX_ASSET_ID].is_empty(builder);
@@ -280,10 +291,10 @@ impl Apply for L1UpdateAssetTxTarget {
             tx_state.first_asset_margin_index,
         );
 
-        let success_and_margin_enabled = builder.and(self.success, self.margin_enabled);
+        let success_and_in_margin_list = builder.and(self.success, self.in_margin_list);
         tx_state.margined_asset[TX_ASSET_ID] = select_margined_asset_target(
             builder,
-            success_and_margin_enabled,
+            success_and_in_margin_list,
             &MarginedAssetTarget {
                 asset_index: self.asset_index,
                 loan_to_value: self.loan_to_value,

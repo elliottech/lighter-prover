@@ -127,11 +127,6 @@ impl RiskInfoTarget {
             cross_risk_parameters,
             current_risk_parameters,
         }
-
-        // Self {
-        //     cross_risk_parameters: RiskParametersTarget::default(),
-        //     current_risk_parameters: RiskParametersTarget::default(),
-        // }
     }
 }
 

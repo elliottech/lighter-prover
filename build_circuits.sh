@@ -4,8 +4,10 @@ set -e
 echo "Clearing all previous circuit files"
 ls | grep "block-circuit.*.bin" | xargs rm -f
 ls | grep "block-tx-circuit.*.bin" | xargs rm -f
+ls | grep "block-tx-light-circuit.*.bin" | xargs rm -f
 ls | grep "block-pre-exec-circuit.*.bin" | xargs rm -f
 ls | grep "block-tx-chain-circuit.*.bin" | xargs rm -f
+ls | grep "block-tx-light-chain-circuit.*.bin" | xargs rm -f
 ls | grep "cyclic-circuit.*.bin" | xargs rm -f
 ls | grep "blob-evaluation-circuit.*.bin" | xargs rm -f
 ls | grep "delta-circuit.*.bin" | xargs rm -f
@@ -18,8 +20,8 @@ ls | grep "final::.*.vk" | xargs rm -f
 ls | grep "final::.*.sol" | xargs rm -f
 ls | grep "final::.*.r1cs" | xargs rm -f
 
-TX_PER_PROOF=${TX_PER_PROOF:-4}
-LIGHT_TX_PER_PROOF=${LIGHT_TX_PER_PROOF:-10}
+TX_PER_PROOF=${TX_PER_PROOF:-5}
+LIGHT_TX_PER_PROOF=${LIGHT_TX_PER_PROOF:-15}
 ON_CHAIN_OPERATIONS_LIMIT=1
 PRIORITY_OPERATIONS_LIMIT=1
 CHAIN_ID=${CHAIN_ID:-304} # Default to mainnet if not set
@@ -57,8 +59,10 @@ echo "Running block circuit builder"
 ./target/release/build_block_circuit --chain-id $CHAIN_ID --tx-per-proof $TX_PER_PROOF --light-tx-per-proof $LIGHT_TX_PER_PROOF --on-chain-operations-limit $ON_CHAIN_OPERATIONS_LIMIT --priority-operations-limit $PRIORITY_OPERATIONS_LIMIT
 export block_circuit=$(ls -t block-circuit*.bin | head -n 1)
 export block_tx_circuit=$(ls -t block-tx-circuit*.bin | head -n 1)
+export block_tx_light_circuit=$(ls -t block-tx-light-circuit*.bin | head -n 1)
 export block_pre_exec_circuit=$(ls -t block-pre-exec-circuit*.bin | head -n 1)
 export block_tx_chain_circuit=$(ls -t block-tx-chain-circuit*.bin | head -n 1)
+export block_tx_light_chain_circuit=$(ls -t block-tx-light-chain-circuit*.bin | head -n 1)
 
 echo "Running recursion circuit builder"
 ./target/release/build_recursion_circuit --on-chain-operations-limit $ON_CHAIN_OPERATIONS_LIMIT --priority-operations-limit $PRIORITY_OPERATIONS_LIMIT --block-circuit-path $block_circuit

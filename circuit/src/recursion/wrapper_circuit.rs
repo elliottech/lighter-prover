@@ -518,6 +518,9 @@ impl WrapperInnerCircuit {
         }
         let state = self.builder.bitstream_export(0);
 
+        self.builder.assert_one(state.number_ending.target);
+        self.builder.assert_zero(state.chunks_left);
+
         self.builder
             .assert_lte(aggregated_delta.degree, state.degree, 18);
         let degree_difference = self.builder.sub(state.degree, aggregated_delta.degree);

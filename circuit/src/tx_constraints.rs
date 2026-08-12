@@ -184,8 +184,10 @@ use crate::types::market_details::{
     market_details_hashes_from_bucket_hashes, market_risk_details_bucket_hash,
     random_access_market_risk_details,
 };
-use crate::types::order::{OrderTarget, OrderTargetWitness};
-use crate::types::order_book_node::{OrderBookNodeTarget, OrderBookNodeTargetWitness};
+use crate::types::order::{OrderTarget, OrderTargetWitness, select_order_target};
+use crate::types::order_book_node::{
+    OrderBookNode, OrderBookNodeTarget, OrderBookNodeTargetWitness, select_order_book_path,
+};
 use crate::types::public_pool::{PublicPoolInfoTarget, PublicPoolShareTarget};
 use crate::types::register::{
     BaseRegisterInfoTarget, RegisterInfoTargetWitness, RegisterStackTarget,
@@ -310,6 +312,7 @@ pub struct TxTarget {
     pub market_tree_merkle_proof: [HashOutTarget; MARKET_MERKLE_LEVELS],
     pub market_details_tree_merkle_proof: [HashOutTarget; MARKET_DETAILS_TREE_HEIGHT],
     pub order_book_tree_path: [OrderBookNodeTarget; ORDER_BOOK_MERKLE_LEVELS],
+    pub cancelled_order_book_tree_path: [OrderBookNodeTarget; ORDER_BOOK_MERKLE_LEVELS],
 
     pub system_config_before: SystemConfigTarget,
     pub register_stack_before: RegisterStackTarget,
@@ -530,6 +533,7 @@ impl TxTarget {
             market_tree_merkle_proof: array::from_fn(|_| builder.add_virtual_hash()),
             market_details_tree_merkle_proof: array::from_fn(|_| builder.add_virtual_hash()),
             order_book_tree_path: array::from_fn(|_| OrderBookNodeTarget::new(builder)),
+            cancelled_order_book_tree_path: array::from_fn(|_| OrderBookNodeTarget::new(builder)),
 
             system_config_before: SystemConfigTarget::new(builder),
             register_stack_before: RegisterStackTarget::new(builder),
@@ -589,6 +593,10 @@ impl TxTarget {
         BoolTarget,                                          // is there a on chain operation
         HashOutTarget,                                       // public market details hash
         HashOutTarget,                                       // account delta tree root
+        QuinticExtensionTarget, // account_pk (absorbed into the p3-schnorr digest when signed)
+        QuinticExtensionTarget, // tx_hash (absorbed into the p3-schnorr digest when signed)
+        SchnorrSigTarget,       // signature (absorbed into the p3-schnorr digest when signed)
+        BoolTarget,             // signature_check: slot carries a real signature to verify
     ) {
         let tx_type = TxTypeTargets::new(builder, self.tx_type);
         let tx_hash = self.select_tx_hash(builder, &tx_type, chain_id);
@@ -596,7 +604,7 @@ impl TxTarget {
         let partial_main_account = self.select_partial_main_account(builder, &tx_type);
 
         // Perform common verifications for the transaction.
-        tx_type.verify(
+        let signature_check = tx_type.verify(
             builder,
             &TxTypeVerifyTargets {
                 expired_at: self.expired_at,
@@ -736,6 +744,7 @@ impl TxTarget {
             is_asset_used_as_margin,
             order_path_helper,
             matching_engine_flag: builder._false(),
+            order_book_merkle_split_flag: builder._false(),
             update_impact_prices_flag: builder._false(),
             taker_fee: self.taker_fee,
             maker_fee: self.maker_fee,
@@ -920,6 +929,10 @@ impl TxTarget {
             on_chain_pub_data_exists,
             current_public_market_details_hash,
             current_account_delta_tree_root,
+            account_pk,
+            tx_hash,
+            self.signature.clone(),
+            signature_check,
         )
     }
 
@@ -2339,14 +2352,77 @@ impl TxTarget {
         tx_state: &mut TxState,
         market_tree_root_before: HashOutTarget,
     ) -> HashOutTarget {
-        // Verify order leaf against order book tree
-        let order_hash = self.order_before.hash(builder);
+        // There may be two ob leaf updates when a modify tx cancels an order and places another one
+        // without matching. Old and new orders will have different (price,nonce) keys in that case and
+        // we 'split' the ob merkle verification. In all other cases, we repeat the same verification.
+        let order_hash_before = self.order_before.hash(builder);
+        let cancelled_order_book_tree_path = order_indexes_to_merkle_path(
+            builder,
+            self.order_before.price_index,
+            self.order_before.nonce_index,
+        );
+        let order_book_tree_path = select_order_book_path(
+            builder,
+            tx_state.order_book_merkle_split_flag,
+            &self.cancelled_order_book_tree_path,
+            &self.order_book_tree_path,
+        );
         verify_order_book_tree_merkle_proof(
             builder,
             &self.market_before.order_book_root,
-            order_hash,
+            order_hash_before,
+            &order_book_tree_path,
+            cancelled_order_book_tree_path,
+        );
+
+        // ob leaf before will be the cancelled leaf
+        let cancelled_empty_leaf = OrderTarget::empty(
+            builder,
+            self.order_before.price_index,
+            self.order_before.nonce_index,
+        );
+        let cancelled_order_book_tree_path_after = get_order_book_path_delta(
+            builder,
+            tx_state.order_book_merkle_split_flag,
+            &self.order_before,
+            &self.cancelled_order_book_tree_path,
+            &cancelled_empty_leaf,
+        );
+        let empty_hash = builder.zero_hash_out();
+        let root_after_cancel = recalculate_order_book_tree_root(
+            builder,
+            empty_hash,
+            &cancelled_order_book_tree_path_after,
+            cancelled_order_book_tree_path,
+        );
+        let order_book_root_before = builder.select_hash(
+            tx_state.order_book_merkle_split_flag,
+            &root_after_cancel,
+            &self.market_before.order_book_root,
+        );
+        let order_leaf_before_hash = builder.select_hash(
+            tx_state.order_book_merkle_split_flag,
+            &empty_hash,
+            &order_hash_before,
+        );
+        verify_order_book_tree_merkle_proof(
+            builder,
+            &order_book_root_before,
+            order_leaf_before_hash,
             &self.order_book_tree_path,
             tx_state.order_path_helper,
+        );
+
+        let empty_order_at_insert_key = OrderTarget::empty(
+            builder,
+            tx_state.order.price_index,
+            tx_state.order.nonce_index,
+        );
+        let order_leaf_before = select_order_target(
+            builder,
+            tx_state.order_book_merkle_split_flag,
+            &empty_order_at_insert_key,
+            &self.order_before,
         );
 
         let market_hash = self.market_before.hash(builder);
@@ -2360,9 +2436,11 @@ impl TxTarget {
             market_index_merkle_path,
         );
 
+        let _true = builder._true();
         let order_book_tree_path_after = get_order_book_path_delta(
             builder,
-            &self.order_before,
+            _true,
+            &order_leaf_before,
             &self.order_book_tree_path,
             &tx_state.order,
         );
@@ -3657,6 +3735,15 @@ impl<T: Witness<F> + PartialWitnessCurve<F>, F: PrimeField64 + Extendable<5> + R
             self.set_order_book_node_target(
                 &a.order_book_tree_path[i],
                 &b.order_book_tree_path[i],
+            )?;
+        }
+        let canceled_order_book_tree_path = b
+            .cancelled_order_book_tree_path
+            .unwrap_or([OrderBookNode::empty(); ORDER_BOOK_MERKLE_LEVELS]);
+        for i in 0..ORDER_BOOK_MERKLE_LEVELS {
+            self.set_order_book_node_target(
+                &a.cancelled_order_book_tree_path[i],
+                &canceled_order_book_tree_path[i],
             )?;
         }
 

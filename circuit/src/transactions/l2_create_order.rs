@@ -157,6 +157,8 @@ impl L2CreateOrderTxTarget {
             pending_reduce_only: self.reduce_only,
             pending_expiry: self.order_expiry,
 
+            pending_order_version: builder.constant_i64(NIL_ORDER_VERSION),
+
             generic_field_0: builder.zero(),
 
             pending_trigger_price: self.trigger_price,
@@ -195,6 +197,8 @@ impl L2CreateOrderTxTarget {
             reduce_only: self.reduce_only,
             trigger_price: self.trigger_price,
             expiry: self.order_expiry,
+
+            order_version: builder.constant_i64(NIL_ORDER_VERSION),
 
             integrator_fee_collector_index: tx_attributes.get(ATTR_INTEGRATOR_FEE_COLLECTOR_INDEX),
             integrator_taker_fee: tx_attributes.get(ATTR_INTEGRATOR_TAKER_FEE),
@@ -565,14 +569,62 @@ impl Verify for L2CreateOrderTxTarget {
                 INSURANCE_FUND_ACCOUNT_TYPE as u64,
             );
             let insurance_fund_spot_flag = builder.and(flag, is_insurance_fund);
-            builder.conditional_assert_true(
-                insurance_fund_spot_flag,
-                BoolTarget::new_unsafe(tx_state.assets[BASE_ASSET_ID].margin_mode),
-            );
-            builder.conditional_assert_true(
-                insurance_fund_spot_flag,
-                BoolTarget::new_unsafe(tx_state.assets[QUOTE_ASSET_ID].margin_mode),
-            );
+            let is_base_in_margin_list = tx_state.assets[BASE_ASSET_ID].is_in_margin_list(builder);
+            builder.conditional_assert_true(insurance_fund_spot_flag, is_base_in_margin_list);
+            let is_quote_in_margin_list =
+                tx_state.assets[QUOTE_ASSET_ID].is_in_margin_list(builder);
+            builder.conditional_assert_true(insurance_fund_spot_flag, is_quote_in_margin_list);
+
+            // Make sure user has enough available balance to lock for limit orders
+            // let (amount_to_lock, ask_asset_index) = get_locked_amount_and_ask_asset_index(
+            //     builder,
+            //     flag,
+            //     &tx_state.market,
+            //     self.calculated_base_amount,
+            //     self.price,
+            //     self.is_ask,
+            // );
+            // let is_base_asset = builder.is_equal(
+            //     tx_state.account_assets[OWNER_ACCOUNT_ID][BASE_ASSET_ID].index_0,
+            //     ask_asset_index,
+            // );
+
+            // let _spot = builder.constant_u64(PRODUCT_TYPE_SPOT);
+            // let base_asset_available_balance = get_available_asset_balance(
+            //     builder,
+            //     _spot,
+            //     tx_state.asset_indices[BASE_ASSET_ID],
+            //     &tx_state.accounts[OWNER_ACCOUNT_ID],
+            //     &tx_state.account_assets[OWNER_ACCOUNT_ID][BASE_ASSET_ID],
+            //     tx_state.is_asset_used_as_margin[OWNER_ACCOUNT_ID][BASE_ASSET_ID],
+            //     &tx_state.risk_infos[OWNER_ACCOUNT_ID].cross_risk_parameters,
+            //     &tx_state.margined_asset[BASE_ASSET_ID],
+            //     &tx_state.account_margined_assets[OWNER_ACCOUNT_ID][BASE_ASSET_ID].balance,
+            // );
+            // let quote_asset_available_balance = get_available_asset_balance(
+            //     builder,
+            //     _spot,
+            //     tx_state.asset_indices[QUOTE_ASSET_ID],
+            //     &tx_state.accounts[OWNER_ACCOUNT_ID],
+            //     &tx_state.account_assets[OWNER_ACCOUNT_ID][QUOTE_ASSET_ID],
+            //     tx_state.is_asset_used_as_margin[OWNER_ACCOUNT_ID][QUOTE_ASSET_ID],
+            //     &tx_state.risk_infos[OWNER_ACCOUNT_ID].cross_risk_parameters,
+            //     &tx_state.margined_asset[QUOTE_ASSET_ID],
+            //     &tx_state.account_margined_assets[OWNER_ACCOUNT_ID][QUOTE_ASSET_ID].balance,
+            // );
+            // let available_balance = builder.select_biguint(
+            //     is_base_asset,
+            //     &base_asset_available_balance,
+            //     &quote_asset_available_balance,
+            // );
+            // let spot_balance_check_inv =
+            //     builder.multi_or(&[is_ioc, order_type_target.is_twap_order]);
+            // let spot_balance_check_flag = builder.and_not(flag, spot_balance_check_inv);
+            // builder.conditional_assert_lte_biguint(
+            //     spot_balance_check_flag,
+            //     &amount_to_lock,
+            //     &available_balance,
+            // );
         }
 
         // Perps validations
@@ -628,6 +680,10 @@ impl Apply for L2CreateOrderTxTarget {
     // oterwise it is always the maker order
     fn apply(&mut self, builder: &mut Builder, tx_state: &mut TxState) -> BoolTarget {
         let one = builder.one();
+
+        // Margin mode coercion / margin_set_flag locking is handled inside
+        // increment_order_count_in_place (pending orders here, in-progress orders via the matching
+        // engine when they rest) and in apply_trade on fills, mirroring coerceUnsetMarginMode.
 
         // Set new market
         let ask_nonce_plus_one = builder.add(tx_state.market.ask_nonce, one);

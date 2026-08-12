@@ -11,8 +11,10 @@ use circuit::block_tx_chain_constraints::{BlockTxChainCircuit, Circuit as _};
 use circuit::block_tx_constraints::{BlockTxCircuit, Circuit as _};
 use circuit::circuit_serializer::{BlockGateSerializer, BlockGeneratorSerializer};
 use circuit::ecdsa::curve::secp256k1::Secp256K1;
-use circuit::types::config::{C, CIRCUIT_CONFIG, D};
-use circuit::types::constants::{TX_HEAVY, TX_LIGHT};
+use circuit::types::config::{
+    BLOCK_CIRCUIT_CONFIG, BLOCK_TX_CHAIN_CIRCUIT_CONFIG, C, CIRCUIT_CONFIG, D,
+};
+use circuit::types::constants::{MAX_REAL_SIGNATURES, TX_HEAVY, TX_LIGHT};
 use clap::Parser;
 use env_logger::{DEFAULT_FILTER_ENV, Env, try_init_from_env};
 use log::info;
@@ -89,19 +91,31 @@ fn main() -> Result<()> {
     let pre_exec_data = pre_exec_circuit.builder.build::<C>();
     info!("BlockPreExecutionCircuit defined!");
 
-    let heavy_chain_circuit =
-        BlockTxChainCircuit::define(CIRCUIT_CONFIG, &heavy_data, args.on_chain_operations_limit);
+    let heavy_chain_circuit = BlockTxChainCircuit::define(
+        BLOCK_TX_CHAIN_CIRCUIT_CONFIG,
+        &heavy_data,
+        args.on_chain_operations_limit,
+    );
     let heavy_chain_circuit_data = heavy_chain_circuit.builder.build::<C>();
-    let light_chain_circuit =
-        BlockTxChainCircuit::define(CIRCUIT_CONFIG, &light_data, args.on_chain_operations_limit);
+    let light_chain_circuit = BlockTxChainCircuit::define(
+        BLOCK_TX_CHAIN_CIRCUIT_CONFIG,
+        &light_data,
+        args.on_chain_operations_limit,
+    );
     let light_chain_circuit_data = light_chain_circuit.builder.build::<C>();
     info!("BlockTxChainCircuit defined!");
 
+    let signature_batch_circuit =
+        p3_schnorr_recursion::build_transcript_verifier_circuit(MAX_REAL_SIGNATURES)
+            .expect("failed to build p3-schnorr-recursion TranscriptVerifierCircuit");
+    info!("p3-schnorr TranscriptVerifierCircuit defined!");
+
     let circuit = BlockCircuit::define(
-        CIRCUIT_CONFIG,
+        BLOCK_CIRCUIT_CONFIG,
         &pre_exec_data,
         &light_chain_circuit_data,
         &heavy_chain_circuit_data,
+        &signature_batch_circuit.data,
         args.on_chain_operations_limit,
     );
     let data = circuit.builder.build::<C>();

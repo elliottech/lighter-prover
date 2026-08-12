@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 use plonky2::field::extension::Extendable;
+use plonky2::field::extension::quintic::QuinticExtension;
 use plonky2::field::types::Field;
 use plonky2::hash::hash_types::{HashOut, RichField};
 use serde::Deserialize;
@@ -287,6 +288,9 @@ where
     #[serde(default)]
     pub signature: SchnorrSig,
 
+    #[serde(rename = "txh", default)]
+    pub tx_hash: Option<[u64; 5]>,
+
     #[serde(rename = "tf", default)]
     pub taker_fee: i64,
     #[serde(rename = "mf", default)]
@@ -441,6 +445,11 @@ where
     #[serde_as(as = "[_; ORDER_BOOK_MERKLE_LEVELS]")]
     pub order_book_tree_path: [OrderBookNode<F>; ORDER_BOOK_MERKLE_LEVELS],
 
+    #[serde(rename = "cobpb")]
+    #[serde(default)]
+    #[serde_as(as = "Option<[_; ORDER_BOOK_MERKLE_LEVELS]>")]
+    pub cancelled_order_book_tree_path: Option<[OrderBookNode<F>; ORDER_BOOK_MERKLE_LEVELS]>,
+
     /*************************/
     /*  IMPACT PRICE HELPERS */
     /*************************/
@@ -473,5 +482,25 @@ where
 impl Tx<F> {
     pub fn is_empty(&self) -> bool {
         self.tx_type == TX_TYPE_EMPTY
+    }
+
+    pub fn signature_instance(
+        &self,
+    ) -> Option<(QuinticExtension<F>, QuinticExtension<F>, SchnorrSig)> {
+        let is_change_pub_key = self.tx_type == TX_TYPE_L2_CHANGE_PUB_KEY;
+        let signed = self.tx_hash.is_some()
+            && !(is_change_pub_key && self.l2_change_pub_key_tx.pub_key.is_zero());
+        if !signed {
+            return None;
+        }
+        Some((
+            if is_change_pub_key {
+                self.l2_change_pub_key_tx.pub_key
+            } else {
+                self.api_key_before.public_key
+            },
+            QuinticExtension(self.tx_hash.unwrap().map(F::from_canonical_u64)),
+            self.signature.clone(),
+        ))
     }
 }

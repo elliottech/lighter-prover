@@ -6,12 +6,14 @@ use std::fmt;
 
 use num::BigInt;
 use plonky2::field::extension::Extendable;
+use plonky2::field::extension::quintic::QuinticExtension;
 use plonky2::field::types::Field;
 use plonky2::hash::hash_types::{HashOut, RichField};
 use serde::Deserialize;
 use serde_with::serde_as;
 
 use crate::deserializers;
+use crate::eddsa::schnorr::SchnorrSig;
 use crate::tx::Tx;
 use crate::types::asset::Asset;
 use crate::types::config::F;
@@ -141,13 +143,29 @@ where
         tx_per_proof: usize,
         light_tx_per_proof: usize,
     ) -> serde_json::Result<Self> {
-        Self::from_json_with_empty_txs(data, tx_per_proof, light_tx_per_proof, 0, 0)
+        Self::from_json_inner(data, tx_per_proof, light_tx_per_proof, 0, 0)
     }
 
     /// Like [`Self::from_json`], but when the block consists only of empty txs, appends
     /// `heavy_empty_tx_count` heavy and `light_empty_tx_count` light copies of the block's
     /// trailing empty tx before chunking. Blocks with active txs are parsed unchanged.
     pub fn from_json_with_empty_txs(
+        data: &[u8],
+        tx_per_proof: usize,
+        light_tx_per_proof: usize,
+        heavy_empty_tx_count: usize,
+        light_empty_tx_count: usize,
+    ) -> serde_json::Result<Self> {
+        Self::from_json_inner(
+            data,
+            tx_per_proof,
+            light_tx_per_proof,
+            heavy_empty_tx_count,
+            light_empty_tx_count,
+        )
+    }
+
+    fn from_json_inner(
         data: &[u8],
         tx_per_proof: usize,
         light_tx_per_proof: usize,
@@ -229,7 +247,8 @@ where
         let mut has_heavy = false;
         let mut has_light = false;
         for t in txs {
-            let buf = if t.tx_circuit_type == TX_LIGHT {
+            let is_light = t.tx_circuit_type == TX_LIGHT;
+            let buf = if is_light {
                 has_light = true;
                 &mut light_buf
             } else {
@@ -262,8 +281,45 @@ where
             }
             chunks.push(std::mem::take(buf));
         }
+
         chunks
     }
+}
+
+impl Block<F> {
+    #[allow(clippy::type_complexity)]
+    pub fn signature_batches(
+        &self,
+    ) -> (
+        Vec<(QuinticExtension<F>, QuinticExtension<F>, SchnorrSig)>,
+        Vec<(QuinticExtension<F>, QuinticExtension<F>, SchnorrSig)>,
+    ) {
+        chunk_signature_batches(&self.tx_chunks)
+    }
+}
+
+#[allow(clippy::type_complexity)]
+pub fn chunk_signature_batches(
+    tx_chunks: &[Vec<Tx<F>>],
+) -> (
+    Vec<(QuinticExtension<F>, QuinticExtension<F>, SchnorrSig)>,
+    Vec<(QuinticExtension<F>, QuinticExtension<F>, SchnorrSig)>,
+) {
+    let mut heavy = Vec::new();
+    let mut light = Vec::new();
+    for chunk in tx_chunks {
+        for tx in chunk {
+            let Some(instance) = tx.signature_instance() else {
+                continue;
+            };
+            if tx.tx_circuit_type == TX_LIGHT {
+                light.push(instance);
+            } else {
+                heavy.push(instance);
+            }
+        }
+    }
+    (heavy, light)
 }
 
 #[serde_as]

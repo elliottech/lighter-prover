@@ -25,6 +25,7 @@ use crate::types::config::{Builder, F};
 use crate::types::constants::{KECCAK_HASH_OUT_BYTE_SIZE, POSITION_LIST_SIZE, TIMESTAMP_BITS};
 use crate::types::market_details::{
     PublicMarketDetails, PublicMarketDetailsTarget, PublicMarketDetailsWitness,
+    connect_public_market_details,
 };
 use crate::uint::u8::U8Target;
 use crate::uint::u32::gadgets::arithmetic_u32::U32Target;
@@ -519,6 +520,12 @@ impl BatchTarget {
         builder.connect_keccak_output(
             self.new_prefix_priority_operation_hash,
             other.new_prefix_priority_operation_hash,
+        );
+
+        connect_public_market_details(
+            builder,
+            &self.new_public_market_details,
+            &other.new_public_market_details,
         );
     }
 

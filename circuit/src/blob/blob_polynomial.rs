@@ -143,3 +143,103 @@ impl BlobPolynomialTarget {
         builder.add_nonnative(&result, &select_evaluation)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use plonky2::field::types::{Field, PrimeField64};
+    use plonky2::iop::generator::generate_partial_witness;
+    use plonky2::iop::witness::{PartialWitness, Witness};
+    use plonky2::plonk::circuit_data::CircuitData;
+
+    use super::*;
+    use crate::types::config::{C, CIRCUIT_CONFIG};
+    use crate::types::constants::KECCAK_HASH_OUT_BYTE_SIZE;
+
+    fn bls12_381_scalar_modulus() -> BigUint {
+        BigUint::parse_bytes(
+            b"52435875175126190479447740508185965837690552500527637822603658699938581184513",
+            10,
+        )
+        .unwrap()
+    }
+
+    fn horner(blob_bytes: &[u8], x: &BigUint, modulus: &BigUint) -> BigUint {
+        let mut acc = BigUint::from(0u32);
+        for chunk in blob_bytes.chunks(31).rev() {
+            let coeff = BigUint::from_bytes_be(chunk);
+            acc = (&acc * x + coeff) % modulus;
+        }
+        acc
+    }
+
+    fn read_nonnative(
+        data: &CircuitData<F, C, D>,
+        result: &NonNativeTarget<BLS12381Scalar>,
+    ) -> BigUint {
+        let witness =
+            generate_partial_witness(PartialWitness::new(), &data.prover_only, &data.common)
+                .unwrap();
+        let mut value = BigUint::from(0u32);
+        for (i, limb) in result.value.limbs.iter().enumerate() {
+            value += BigUint::from(witness.get_target(limb.0).to_canonical_u64()) << (32 * i);
+        }
+        value
+    }
+
+    #[test]
+    fn horner_eval_matches_field_reference() {
+        let modulus = bls12_381_scalar_modulus();
+
+        let mut blob_bytes = [0u8; BLOB_DATA_BYTES_COUNT];
+        rand::Rng::fill(&mut rand::thread_rng(), &mut blob_bytes[..]);
+
+        let mut x_bytes =
+            rand::Rng::r#gen::<[u8; KECCAK_HASH_OUT_BYTE_SIZE]>(&mut rand::thread_rng());
+        x_bytes[0] = 0x50; // shouldnt start with 0
+        let x_big = BigUint::from_bytes_be(&x_bytes) % &modulus;
+
+        let mut builder = Builder::new(CIRCUIT_CONFIG);
+
+        let coeffs: Vec<NonNativeTarget<BLS12381Scalar>> = blob_bytes
+            .chunks(31)
+            .map(|chunk| {
+                builder.constant_nonnative(BLS12381Scalar::from_noncanonical_biguint(
+                    BigUint::from_bytes_be(chunk),
+                ))
+            })
+            .collect();
+        let polynomial = BlobPolynomialTarget(coeffs.try_into().unwrap());
+
+        let x_target =
+            builder.constant_nonnative(BLS12381Scalar::from_noncanonical_biguint(x_big.clone()));
+
+        let result = polynomial.eval_horner(&mut builder, &x_target);
+
+        let data = builder.build::<C>();
+        let computed = read_nonnative(&data, &result);
+        assert_eq!(computed, horner(&blob_bytes, &x_big, &modulus));
+    }
+
+    #[test]
+    fn horner_reference_matches_cross_language_vector() {
+        let modulus = bls12_381_scalar_modulus();
+
+        let mut data = Vec::new();
+        data.extend_from_slice(&[0x01u8; 31]);
+        data.extend_from_slice(&[0x02u8; 31]);
+        data.extend_from_slice(&[0xFEu8; 31]);
+        let seq: [u8; 31] = core::array::from_fn(|i| (i + 1) as u8);
+        data.extend_from_slice(&seq);
+        data.extend_from_slice(&[0xABu8; 31]);
+
+        let sigma = BigUint::from_bytes_be(&[0xFFu8; KECCAK_HASH_OUT_BYTE_SIZE]) % &modulus;
+        assert_eq!(
+            horner(&data, &sigma, &modulus),
+            BigUint::parse_bytes(
+                b"24617813824646772078802389226664255382394747069069376600481304461730634567801",
+                10,
+            )
+            .unwrap()
+        );
+    }
+}

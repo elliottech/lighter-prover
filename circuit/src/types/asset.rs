@@ -129,10 +129,18 @@ impl AssetTarget {
         builder.is_zero(added)
     }
 
+    /// True when the asset occupies a margined asset list slot,
+    /// i.e. margin mode is enabled (1) or priced-only (2).
+    pub fn is_in_margin_list(&self, builder: &mut Builder) -> BoolTarget {
+        let is_disabled = builder.is_zero(self.margin_mode);
+        builder.not(is_disabled)
+    }
+
     pub fn margin_index(&self, builder: &mut Builder) -> Target {
         let nil_margined_asset_index = builder.constant_u64(MARGINED_ASSET_LIST_SIZE as u64);
+        let is_in_margin_list = self.is_in_margin_list(builder);
         builder.select(
-            BoolTarget::new_unsafe(self.margin_mode), // 0 disabled, 1 enabled
+            is_in_margin_list,
             self.margin_index,
             nil_margined_asset_index,
         )

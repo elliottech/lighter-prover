@@ -14,7 +14,7 @@ use crate::tx_attributes::is_integrator_fee_disabled;
 use crate::types::config::Builder;
 use crate::utils::CircuitBuilderUtils;
 
-pub const BASE_REGISTER_INFO_SIZE: usize = 23;
+pub const BASE_REGISTER_INFO_SIZE: usize = 24;
 
 #[derive(Clone, Debug, Deserialize, Copy)]
 #[serde(default)]
@@ -76,6 +76,9 @@ pub struct BaseRegisterInfo {
     #[serde(rename = "ptcoi0")]
     pub pending_to_cancel_order_index0: i64,
 
+    #[serde(rename = "pov")]
+    pub pending_order_version: i64,
+
     #[serde(rename = "gf0")]
     pub generic_field_0: i64,
     #[serde(rename = "gf1")]
@@ -115,6 +118,7 @@ impl BaseRegisterInfo {
             pending_to_trigger_order_index0: 0,
             pending_to_trigger_order_index1: 0,
             pending_to_cancel_order_index0: 0,
+            pending_order_version: 0,
             generic_field_1: 0,
             generic_field_2: 0,
             generic_field_3: 0,
@@ -145,6 +149,7 @@ impl BaseRegisterInfo {
             && self.generic_field_1 == 0
             && self.generic_field_2 == 0
             && self.generic_field_3 == 0
+            && self.pending_order_version == 0
     }
 
     pub fn from_vec<F>(pis: &[F]) -> Self
@@ -176,6 +181,7 @@ impl BaseRegisterInfo {
             generic_field_1: i64::try_from(pis[20].to_canonical_u64()).unwrap(),
             generic_field_2: i64::try_from(pis[21].to_canonical_u64()).unwrap(),
             generic_field_3: i64::try_from(pis[22].to_canonical_u64()).unwrap(),
+            pending_order_version: i64::try_from(pis[23].to_canonical_u64()).unwrap(),
         }
     }
 }
@@ -211,6 +217,8 @@ pub struct BaseRegisterInfoTarget {
     pub generic_field_1: Target,
     pub generic_field_2: Target,
     pub generic_field_3: Target,
+
+    pub pending_order_version: Target,
 }
 
 impl BaseRegisterInfoTarget {
@@ -245,6 +253,8 @@ impl BaseRegisterInfoTarget {
             generic_field_1: builder.add_virtual_target(),
             generic_field_2: builder.add_virtual_target(),
             generic_field_3: builder.add_virtual_target(),
+
+            pending_order_version: builder.add_virtual_target(),
         }
     }
 
@@ -284,6 +294,7 @@ impl BaseRegisterInfoTarget {
         builder.connect(self.generic_field_1, other.generic_field_1);
         builder.connect(self.generic_field_2, other.generic_field_2);
         builder.connect(self.generic_field_3, other.generic_field_3);
+        builder.connect(self.pending_order_version, other.pending_order_version);
     }
 
     pub fn is_equal(builder: &mut Builder, a: &Self, b: &Self) -> BoolTarget {
@@ -320,6 +331,7 @@ impl BaseRegisterInfoTarget {
             builder.is_equal(a.generic_field_1, b.generic_field_1),
             builder.is_equal(a.generic_field_2, b.generic_field_2),
             builder.is_equal(a.generic_field_3, b.generic_field_3),
+            builder.is_equal(a.pending_order_version, b.pending_order_version),
         ];
         builder.multi_and(&assertions)
     }
@@ -354,6 +366,7 @@ impl BaseRegisterInfoTarget {
             builder.is_zero(self.pending_to_cancel_order_index0),
             builder.is_zero(self.generic_field_0), // Generic
             builder.is_zero(self.generic_field_1), // Generic
+            builder.is_zero(self.pending_order_version),
         ];
         builder.multi_and(&assertions)
     }
@@ -389,6 +402,8 @@ impl BaseRegisterInfoTarget {
             generic_field_1: builder.zero(),
             generic_field_2: builder.zero(),
             generic_field_3: builder.zero(),
+
+            pending_order_version: builder.zero(),
         }
     }
 
@@ -452,6 +467,10 @@ impl BaseRegisterInfoTarget {
         );
         builder.println(self.generic_field_2, &format!("{} generic_field_2", tag));
         builder.println(self.generic_field_3, &format!("{} generic_field_3", tag));
+        builder.println(
+            self.pending_order_version,
+            &format!("{} pending_order_version", tag),
+        );
     }
 
     pub fn get_hash_parameters(&self) -> Vec<Target> {
@@ -479,6 +498,7 @@ impl BaseRegisterInfoTarget {
             self.generic_field_1,
             self.generic_field_2,
             self.generic_field_3,
+            self.pending_order_version,
         ]
     }
 
@@ -506,6 +526,7 @@ impl BaseRegisterInfoTarget {
         builder.register_public_input(self.generic_field_1);
         builder.register_public_input(self.generic_field_2);
         builder.register_public_input(self.generic_field_3);
+        builder.register_public_input(self.pending_order_version);
     }
 
     /// Converts a slice of `Target` into a `BaseRegisterInfoTarget`. Follow same order as [`Self::register_public_input`].
@@ -535,6 +556,7 @@ impl BaseRegisterInfoTarget {
             generic_field_1: pis[20],
             generic_field_2: pis[21],
             generic_field_3: pis[22],
+            pending_order_version: pis[23],
         }
     }
 
@@ -661,6 +683,10 @@ impl<T: Witness<F>, F: PrimeField64> BaseRegisterInfoTargetWitness<F> for T {
             register_target.generic_field_3,
             F::from_canonical_i64(register.generic_field_3),
         )?;
+        self.set_target(
+            register_target.pending_order_version,
+            F::from_canonical_i64(register.pending_order_version),
+        )?;
 
         Ok(())
     }
@@ -736,6 +762,11 @@ pub fn select_register_target(
         generic_field_1: builder.select(is_enabled, a.generic_field_1, b.generic_field_1),
         generic_field_2: builder.select(is_enabled, a.generic_field_2, b.generic_field_2),
         generic_field_3: builder.select(is_enabled, a.generic_field_3, b.generic_field_3),
+        pending_order_version: builder.select(
+            is_enabled,
+            a.pending_order_version,
+            b.pending_order_version,
+        ),
     }
 }
 
@@ -789,6 +820,8 @@ impl BaseRegisterInfoTarget {
                 .constant_i64(rand::thread_rng().gen_range(0..=(1usize << 32) - 1) as i64),
             generic_field_3: builder
                 .constant_i64(rand::thread_rng().gen_range(0..=(1usize << 32) - 1) as i64),
+            pending_order_version: builder
+                .constant_i64(rand::thread_rng().gen_range(0..=(1usize << 48) - 1) as i64),
         }
     }
 }

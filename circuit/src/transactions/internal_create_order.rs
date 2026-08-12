@@ -119,6 +119,7 @@ impl InternalCreateOrderTxTarget {
             pending_time_in_force: builder.constant_from_u8(IOC),
             pending_reduce_only: tx_state.account_order.reduce_only,
             pending_expiry: builder.constant_i64(NIL_ORDER_EXPIRY),
+            pending_order_version: tx_state.account_order.order_version, // snapshot twap parent order version
             generic_field_0: builder.zero(),
             pending_trigger_price: builder.zero(),
             pending_trigger_status: builder.zero(),
@@ -178,6 +179,7 @@ impl InternalCreateOrderTxTarget {
             pending_to_trigger_order_index0: tx_state.account_order.to_trigger_order_index0,
             pending_to_trigger_order_index1: tx_state.account_order.to_trigger_order_index1,
             pending_to_cancel_order_index0: tx_state.account_order.to_cancel_order_index0,
+            pending_order_version: tx_state.account_order.order_version,
             generic_field_1,
             generic_field_2,
             generic_field_3,

@@ -46,25 +46,30 @@ use crate::utils::CircuitBuilderUtils;
 
 pub fn get_order_book_path_delta(
     builder: &mut Builder,
+    is_enabled: BoolTarget,
     order_before: &OrderTarget,
     order_book_path_before: &[OrderBookNodeTarget; ORDER_BOOK_MERKLE_LEVELS],
     order_after: &OrderTarget,
 ) -> [OrderBookNodeTarget; ORDER_BOOK_MERKLE_LEVELS] {
+    let order_before_ask_base_sum = builder.mul(is_enabled.target, order_before.ask_base_sum);
+    let order_before_ask_quote_sum = builder.mul(is_enabled.target, order_before.ask_quote_sum);
+    let order_before_bid_base_sum = builder.mul(is_enabled.target, order_before.bid_base_sum);
+    let order_before_bid_quote_sum = builder.mul(is_enabled.target, order_before.bid_quote_sum);
     let sibling_ask_base_amount = builder.sub(
         order_book_path_before[0].ask_base_sum,
-        order_before.ask_base_sum,
+        order_before_ask_base_sum,
     );
     let sibling_ask_quote_amount = builder.sub(
         order_book_path_before[0].ask_quote_sum,
-        order_before.ask_quote_sum,
+        order_before_ask_quote_sum,
     );
     let sibling_bid_base_amount = builder.sub(
         order_book_path_before[0].bid_base_sum,
-        order_before.bid_base_sum,
+        order_before_bid_base_sum,
     );
     let sibling_bid_quote_amount = builder.sub(
         order_book_path_before[0].bid_quote_sum,
-        order_before.bid_quote_sum,
+        order_before_bid_quote_sum,
     );
 
     let mut order_book_path_after_vec = vec![OrderBookNodeTarget {
@@ -2782,6 +2787,8 @@ fn get_account_order_from_register(
         to_trigger_order_index0: register.pending_to_trigger_order_index0,
         to_trigger_order_index1: register.pending_to_trigger_order_index1,
         to_cancel_order_index0: register.pending_to_cancel_order_index0,
+
+        order_version: register.pending_order_version,
 
         integrator_fee_collector_index,
         integrator_taker_fee,

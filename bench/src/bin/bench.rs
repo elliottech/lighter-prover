@@ -13,11 +13,17 @@ use circuit::block_tx::{BlockTx, BlockTxWitness, JumpState};
 use circuit::block_tx_chain_constraints::{BlockTxChainCircuit, Circuit as _};
 use circuit::block_tx_constraints::{BlockTxCircuit, Circuit as _};
 use circuit::builder::custom::cyclic_base_proof;
-use circuit::types::config::{C, CIRCUIT_CONFIG, F};
+use circuit::eddsa::schnorr_helper::{
+    absorb_signature_instance, initial_signature_digest_state, prove_signature_batch_proof,
+};
+use circuit::types::config::{
+    BLOCK_CIRCUIT_CONFIG, BLOCK_TX_CHAIN_CIRCUIT_CONFIG, C, CIRCUIT_CONFIG, F,
+};
 use circuit::types::constants::*;
 use clap::Parser;
 use env_logger::{Builder, DEFAULT_FILTER_ENV, Env};
 use log::{Level, LevelFilter, Log, Metadata, Record, info};
+use plonky2::field::types::Field;
 use plonky2::recursion::dummy_circuit::dummy_circuit;
 
 const CHAIN_ID: u32 = 304;
@@ -28,10 +34,10 @@ struct Args {
     #[arg(long, default_value_t = 500)]
     tx_count: usize,
 
-    #[arg(long, default_value_t = 4)]
+    #[arg(long, default_value_t = 5)]
     heavy_tx_per_proof: usize,
 
-    #[arg(long, default_value_t = 10)]
+    #[arg(long, default_value_t = 15)]
     light_tx_per_proof: usize,
 
     #[arg(long, default_value = "bench_test.json")]
@@ -83,18 +89,24 @@ fn main() {
     let light_bt = light_circuit.target;
     let light_data = light_circuit.builder.build::<C>();
 
-    let heavy_chain_circuit = BlockTxChainCircuit::define(CIRCUIT_CONFIG, &data, 1);
+    let heavy_chain_circuit = BlockTxChainCircuit::define(BLOCK_TX_CHAIN_CIRCUIT_CONFIG, &data, 1);
     let heavy_chain_circuit_t = heavy_chain_circuit.target;
     let heavy_chain_circuit_data = heavy_chain_circuit.builder.build::<C>();
-    let light_chain_circuit = BlockTxChainCircuit::define(CIRCUIT_CONFIG, &light_data, 1);
+    let light_chain_circuit =
+        BlockTxChainCircuit::define(BLOCK_TX_CHAIN_CIRCUIT_CONFIG, &light_data, 1);
     let light_chain_circuit_t = light_chain_circuit.target;
     let light_chain_circuit_data = light_chain_circuit.builder.build::<C>();
 
+    let signature_batch_circuit =
+        p3_schnorr_recursion::build_transcript_verifier_circuit(MAX_REAL_SIGNATURES)
+            .expect("failed to build p3-schnorr-recursion TranscriptVerifierCircuit");
+
     let block_circuit = BlockCircuit::define(
-        CIRCUIT_CONFIG,
+        BLOCK_CIRCUIT_CONFIG,
         &pre_exec_data,
         &light_chain_circuit_data,
         &heavy_chain_circuit_data,
+        &signature_batch_circuit.data,
         1,
     );
     let block_circuit_t = block_circuit.target;
@@ -134,6 +146,15 @@ fn main() {
     let state_metadata = pre_exec_witness.new_state_metadata.clone();
     let created_at = block.created_at;
 
+    let (block_heavy_signature_data, block_light_signature_data) = block.signature_batches();
+    let total_signed_count =
+        (block_heavy_signature_data.len() + block_light_signature_data.len()) as u64;
+    let heavy_seed = initial_signature_digest_state(total_signed_count as usize);
+    let light_seed = block_heavy_signature_data
+        .iter()
+        .fold(heavy_seed, |state, (pk, tx_hash, sig)| {
+            absorb_signature_instance(state, *pk, *tx_hash, sig)
+        });
     let mut current_heavy_chain_proof = BlockTxChainCircuit::cyclic_base_proof(
         &heavy_chain_circuit_data,
         &dummy_heavy_tx_chain_circuit,
@@ -142,6 +163,8 @@ fn main() {
         pre_exec_witness.new_state_root,
         pre_exec_witness.new_validium_root,
         block.old_account_delta_tree_root,
+        total_signed_count,
+        heavy_seed,
     );
     let mut current_light_chain_proof = BlockTxChainCircuit::cyclic_base_proof(
         &light_chain_circuit_data,
@@ -151,6 +174,8 @@ fn main() {
         pre_exec_witness.new_state_root,
         pre_exec_witness.new_validium_root,
         block.old_account_delta_tree_root,
+        total_signed_count,
+        light_seed,
     );
 
     let mut heavy_jump = JumpState::initial(
@@ -165,6 +190,12 @@ fn main() {
 
     let mut heavy_index: u64 = 0;
     let mut light_index: u64 = 0;
+    let mut all_heavy_tx_signature_data = Vec::new();
+    let mut all_light_tx_signature_data = Vec::new();
+    let mut heavy_digest_state = heavy_seed;
+    let mut light_digest_state = light_seed;
+    let mut heavy_signed_so_far = 0u64;
+    let mut light_signed_so_far = 0u64;
     for (index, tx) in block.tx_chunks.iter().enumerate() {
         let is_light = tx[0].tx_circuit_type == TX_LIGHT;
         let block_tx = BlockTx {
@@ -172,6 +203,16 @@ fn main() {
             state_metadata_hash: state_metadata.hash(),
             old_jump: if is_light { light_jump } else { heavy_jump },
             txs: tx.to_vec(),
+            signature_digest_state_before: if is_light {
+                light_digest_state
+            } else {
+                heavy_digest_state
+            },
+            signed_count_before: F::from_canonical_u64(if is_light {
+                light_signed_so_far
+            } else {
+                heavy_signed_so_far
+            }),
         };
 
         let tx_dt = Instant::now();
@@ -199,10 +240,22 @@ fn main() {
         let tx_proof = tx_proof.unwrap();
 
         let tx_witness = BlockTxWitness::from_public_inputs(&tx_proof.public_inputs.clone());
+        let signature_slots: Vec<_> = tx.iter().filter_map(|tx| tx.signature_instance()).collect();
+        let (digest_state, signed_so_far) = if is_light {
+            (&mut light_digest_state, &mut light_signed_so_far)
+        } else {
+            (&mut heavy_digest_state, &mut heavy_signed_so_far)
+        };
+        for (pk, tx_hash, sig) in &signature_slots {
+            *digest_state = absorb_signature_instance(*digest_state, *pk, *tx_hash, sig);
+            *signed_so_far += 1;
+        }
         if is_light {
             light_jump = tx_witness.new_jump;
+            all_light_tx_signature_data.extend(signature_slots.iter().cloned());
         } else {
             heavy_jump = tx_witness.new_jump;
+            all_heavy_tx_signature_data.extend(signature_slots.iter().cloned());
         }
 
         let chain_dt = Instant::now();
@@ -247,6 +300,14 @@ fn main() {
         }
     }
 
+    let all_tx_signature_data: Vec<_> = all_heavy_tx_signature_data
+        .iter()
+        .chain(all_light_tx_signature_data.iter())
+        .cloned()
+        .collect();
+    let signature_batch_proof =
+        prove_signature_batch_proof(&signature_batch_circuit, &all_tx_signature_data);
+
     let block_prove_time = Instant::now();
     let final_proof = BlockCircuit::prove(
         &block_circuit_t,
@@ -255,6 +316,7 @@ fn main() {
         &pre_proof,
         &current_light_chain_proof,
         &current_heavy_chain_proof,
+        &signature_batch_proof,
     );
     let block_prove_total = block_prove_time.elapsed();
     if let Err(err) = final_proof {
