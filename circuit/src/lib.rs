@@ -70,3 +70,6 @@ pub mod tx_interface;
 pub mod types;
 pub mod uint;
 pub mod utils;
+
+#[cfg(test)]
+pub mod gate_batch_testing;

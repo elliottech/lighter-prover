@@ -492,12 +492,9 @@ impl RiskParametersTarget {
             let old_margin_balance = builder.mul_bigint_by_bool(old_margin_balance, flag);
             let new_margin_balance = builder.mul_bigint_by_bool(new_margin_balance, flag);
 
-            let asset_index_price =
-                builder.target_to_biguint_single_limb_unsafe(margined_asset.index_price);
-            let asset_ltv_big =
-                builder.target_to_biguint_single_limb_unsafe(margined_asset.loan_to_value);
-            let asset_lt_big =
-                builder.target_to_biguint_single_limb_unsafe(margined_asset.liquidation_threshold);
+            let asset_index_price = builder.target_to_biguint(margined_asset.index_price);
+            let asset_ltv_big = builder.target_to_biguint(margined_asset.loan_to_value);
+            let asset_lt_big = builder.target_to_biguint(margined_asset.liquidation_threshold);
 
             let old_multiplier = builder.mul_bigint_with_biguint_non_carry(
                 &old_margin_balance,

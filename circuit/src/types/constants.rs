@@ -157,7 +157,7 @@ pub const TX_TYPE_L2_CREATE_STAKING_POOL: u8 = 33;
 // pub const TX_TYPE_L2_UPDATE_STAKING_POOL: u8 = 34;
 pub const TX_TYPE_L2_STAKE_ASSETS: u8 = 35;
 pub const TX_TYPE_L2_UNSTAKE_ASSETS: u8 = 36;
-pub const TX_TYPE_L2_FORCE_BURN_SHARES: u8 = 40;
+pub const DEPRECATED_TX_TYPE_L2_FORCE_BURN_SHARES: u8 = 40;
 pub const TX_TYPE_L2_UPDATE_ACCOUNT_CONFIG: u8 = 41;
 pub const TX_TYPE_L2_UPDATE_ACCOUNT_ASSET_CONFIG: u8 = 42;
 pub const TX_TYPE_L2_STRATEGY_TRANSFER: u8 = 43;
@@ -297,6 +297,7 @@ pub const SUB_ACCOUNT_TYPE: u8 = 1;
 pub const PUBLIC_POOL_ACCOUNT_TYPE: u8 = 2;
 pub const INSURANCE_FUND_ACCOUNT_TYPE: u8 = 3; // Insurance Fund Public Pool
 pub const LIGHTER_STAKING_POOL_ACCOUNT_TYPE: u8 = 4; // Lighter Staking Pool
+pub const TREASURY_SUB_ACCOUNT_TYPE: u8 = 5; // Sub Account of the Treasury Account
 
 pub const ACCOUNT_ACCOUNT_TRADING_MODE_SIMPLE: u8 = 0;
 pub const ACCOUNT_ACCOUNT_TRADING_MODE_UNIFIED: u8 = 1;
@@ -534,11 +535,7 @@ pub const BASE_ASSET_ID: usize = 0;
 pub const QUOTE_ASSET_ID: usize = 1;
 
 pub const USDC_BASE_ASSET_ID: usize = 0;
-pub const SHARE_OWNER_ACCOUNT_ID: usize = 1;
 pub const STAKE_ASSET_ID: usize = 1;
-
-pub const OWNER_OR_POOL_ACCOUNT_ID_1: usize = 0;
-pub const OWNER_OR_POOL_ACCOUNT_ID_2: usize = 1;
 
 pub const SELF_TRADE_EQUALITY_ACCOUNT_INDEX: u64 = 0;
 pub const SELF_TRADE_EQUALITY_MASTER_ACCOUNT_INDEX: u64 = 1;

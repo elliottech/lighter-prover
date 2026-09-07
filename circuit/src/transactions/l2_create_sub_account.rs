@@ -120,10 +120,16 @@ impl Verify for L2CreateSubAccountTxTarget {
 
 impl Apply for L2CreateSubAccountTxTarget {
     fn apply(&mut self, builder: &mut Builder, tx_state: &mut TxState) -> BoolTarget {
-        let sub_account_type = builder.constant(F::from_canonical_u8(SUB_ACCOUNT_TYPE));
+        let is_treasury_master =
+            builder.is_equal_constant(self.account_index, TREASURY_ACCOUNT_INDEX as u64);
+        let new_account_type = builder.select_constant(
+            is_treasury_master,
+            TREASURY_SUB_ACCOUNT_TYPE as u64,
+            SUB_ACCOUNT_TYPE as u64,
+        );
         tx_state.accounts[SUB_ACCOUNT_ID].account_type = builder.select(
             self.success,
-            sub_account_type,
+            new_account_type,
             tx_state.accounts[SUB_ACCOUNT_ID].account_type,
         );
         tx_state.accounts[SUB_ACCOUNT_ID].l1_address = builder.select_biguint(

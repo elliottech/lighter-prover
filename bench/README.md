@@ -19,14 +19,14 @@ make run
 Runs `./bench` against `bench_test.json` with the default configuration. Variables can be overridden:
 
 ```sh
-make run TX_COUNT=500 HEAVY_TX_PER_PROOF=5 LIGHT_TX_PER_PROOF=15 WITNESS=bench_test.json
+make run TX_COUNT=500 HEAVY_TX_PER_PROOF=5 LIGHT_TX_PER_PROOF=13 WITNESS=bench_test.json
 ```
 
 | Variable | Default | Description |
 | --- | --- | --- |
 | `TX_COUNT` | `500` | Number of txs the block is filled with. |
 | `HEAVY_TX_PER_PROOF` | `5` | Number of heavy txs proven per proof |
-| `LIGHT_TX_PER_PROOF` | `15` | Number of light txs proven per proof |
+| `LIGHT_TX_PER_PROOF` | `13` | Number of light txs proven per proof |
 | `WITNESS` | `bench_test.json` | Path to the block witness JSON file. Regular block witnesses work too; their txs are proven as-is and `TX_COUNT` is ignored. |
 
 Or build and run in one step:

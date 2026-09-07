@@ -38,7 +38,7 @@ pub const BIGU16_U112_LIMBS: usize = 7;
 
 pub const CIRCUIT_CONFIG: CircuitConfig = CircuitConfig {
     num_wires: 136,
-    num_routed_wires: 120,
+    num_routed_wires: 80,
     num_constants: 2,
     use_base_arithmetic_gate: true,
     security_bits: 100,

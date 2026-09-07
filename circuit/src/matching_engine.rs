@@ -2518,15 +2518,17 @@ fn is_valid_spot_trade(
                 .usdc_collateral_with_funding
                 .sign,
         );
+        let is_taker_unified_non_insurance_fund =
+            builder.and_not(is_taker_unified, is_taker_insurance_fund_for_risk);
         let is_taker_base_collateral_invalid = builder.multi_and(&[
-            not_taker_insurance_fund_for_risk,
+            is_taker_unified_non_insurance_fund,
             is_base_asset_universal,
             is_taker_ask,
             is_taker_collateral_negative,
         ]);
         valid_taker_base = builder.and_not(valid_taker_base, is_taker_base_collateral_invalid);
         let is_taker_quote_collateral_invalid = builder.multi_and(&[
-            not_taker_insurance_fund_for_risk,
+            is_taker_unified_non_insurance_fund,
             is_quote_asset_universal,
             is_taker_bid,
             is_taker_collateral_negative,
@@ -2536,8 +2538,6 @@ fn is_valid_spot_trade(
         let is_taker_valid_risk_change = tx_state.risk_infos[TAKER_ACCOUNT_ID]
             .current_risk_parameters
             .is_valid_risk_change(builder, &new_taker_risk_info.current_risk_parameters);
-        let is_taker_unified_non_insurance_fund =
-            builder.and_not(is_taker_unified, is_taker_insurance_fund_for_risk);
         let is_taker_invalid_risk_change = builder.and_not(
             is_taker_unified_non_insurance_fund,
             is_taker_valid_risk_change,
@@ -2561,15 +2561,17 @@ fn is_valid_spot_trade(
                 .usdc_collateral_with_funding
                 .sign,
         );
+        let is_maker_unified_non_insurance_fund =
+            builder.and_not(is_maker_unified, is_maker_insurance_fund);
         let is_maker_base_collateral_invalid = builder.multi_and(&[
-            not_maker_insurance_fund,
+            is_maker_unified_non_insurance_fund,
             is_base_asset_universal,
             is_taker_bid,
             is_maker_collateral_negative,
         ]);
         valid_maker_base = builder.and_not(valid_maker_base, is_maker_base_collateral_invalid);
         let is_maker_quote_collateral_invalid = builder.multi_and(&[
-            not_maker_insurance_fund,
+            is_maker_unified_non_insurance_fund,
             is_quote_asset_universal,
             is_taker_ask,
             is_maker_collateral_negative,
@@ -2579,8 +2581,6 @@ fn is_valid_spot_trade(
         let is_maker_valid_risk_change = tx_state.risk_infos[MAKER_ACCOUNT_ID]
             .current_risk_parameters
             .is_valid_risk_change(builder, &new_maker_risk_info.current_risk_parameters);
-        let is_maker_unified_non_insurance_fund =
-            builder.and_not(is_maker_unified, is_maker_insurance_fund);
         let is_maker_invalid_risk_change = builder.and_not(
             is_maker_unified_non_insurance_fund,
             is_maker_valid_risk_change,

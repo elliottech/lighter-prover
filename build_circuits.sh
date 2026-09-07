@@ -21,7 +21,7 @@ ls | grep "final::.*.sol" | xargs rm -f
 ls | grep "final::.*.r1cs" | xargs rm -f
 
 TX_PER_PROOF=${TX_PER_PROOF:-5}
-LIGHT_TX_PER_PROOF=${LIGHT_TX_PER_PROOF:-15}
+LIGHT_TX_PER_PROOF=${LIGHT_TX_PER_PROOF:-13}
 ON_CHAIN_OPERATIONS_LIMIT=1
 PRIORITY_OPERATIONS_LIMIT=1
 CHAIN_ID=${CHAIN_ID:-304} # Default to mainnet if not set

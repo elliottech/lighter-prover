@@ -45,7 +45,6 @@ pub struct TxTypeTargets {
     pub is_l2_create_staking_pool: BoolTarget,
     pub is_l2_stake_assets: BoolTarget,
     pub is_l2_unstake_assets: BoolTarget,
-    pub is_l2_force_burn_shares: BoolTarget,
     pub is_l2_update_account_config: BoolTarget,
     pub is_l2_strategy_transfer: BoolTarget,
     pub is_l2_update_market_config: BoolTarget,
@@ -141,8 +140,6 @@ impl TxTypeTargets {
         let is_l2_stake_assets = builder.is_equal_constant(tx_type, TX_TYPE_L2_STAKE_ASSETS as u64);
         let is_l2_unstake_assets =
             builder.is_equal_constant(tx_type, TX_TYPE_L2_UNSTAKE_ASSETS as u64);
-        let is_l2_force_burn_shares =
-            builder.is_equal_constant(tx_type, TX_TYPE_L2_FORCE_BURN_SHARES as u64);
         let is_l2_update_account_config =
             builder.is_equal_constant(tx_type, TX_TYPE_L2_UPDATE_ACCOUNT_CONFIG as u64);
         let is_l2_strategy_transfer =
@@ -211,7 +208,6 @@ impl TxTypeTargets {
             is_l2_create_staking_pool.target,
             is_l2_stake_assets.target,
             is_l2_unstake_assets.target,
-            is_l2_force_burn_shares.target,
             is_l2_update_account_config.target,
             is_l2_strategy_transfer.target,
             is_l2_update_market_config.target,
@@ -250,7 +246,6 @@ impl TxTypeTargets {
             is_l2_create_staking_pool.target,
             is_l2_stake_assets.target,
             is_l2_unstake_assets.target,
-            is_l2_force_burn_shares.target,
             is_l2_update_account_config.target,
             is_l2_strategy_transfer.target,
             is_l2_update_market_config.target,
@@ -294,11 +289,9 @@ impl TxTypeTargets {
             is_l2_create_grouped_orders.target,
         ]));
 
-        let is_share_burn_tx = BoolTarget::new_unsafe(builder.add_many(vec![
-            is_l1_burn_shares.target,
-            is_l2_force_burn_shares.target,
-            is_l2_burn_shares.target,
-        ]));
+        let is_share_burn_tx = BoolTarget::new_unsafe(
+            builder.add_many(vec![is_l1_burn_shares.target, is_l2_burn_shares.target]),
+        );
 
         TxTypeTargets {
             is_empty,
@@ -332,7 +325,6 @@ impl TxTypeTargets {
             is_l2_create_staking_pool,
             is_l2_stake_assets,
             is_l2_unstake_assets,
-            is_l2_force_burn_shares,
             is_l2_update_account_config,
             is_l2_strategy_transfer,
             is_l2_update_market_config,
@@ -456,9 +448,22 @@ impl TxTypeTargets {
             self.is_l2_create_staking_pool,
             self.is_l2_stake_assets,
             self.is_l2_unstake_assets,
+            self.is_l2_create_sub_account,
         ]);
         let check_treasury_tx = builder.and(is_treasury, self.is_layer2);
         builder.conditional_assert_true(check_treasury_tx, is_valid_treasury_tx);
+
+        // If transaction initiator is a treasury sub account, only l2 transfer to the treasury account is allowed.
+        let is_treasury_sub_account = builder.is_equal_constant(
+            verify_inputs.tx_sender_account_partial.account_type,
+            TREASURY_SUB_ACCOUNT_TYPE as u64,
+        );
+        let is_valid_treasury_sub_account_tx = builder.multi_or(&[self.is_l2_transfer]);
+        let check_treasury_sub_account_tx = builder.and(is_treasury_sub_account, self.is_layer2);
+        builder.conditional_assert_true(
+            check_treasury_sub_account_tx,
+            is_valid_treasury_sub_account_tx,
+        );
 
         // If sender is a staking pool, no L2 transactions are allowed.
         let is_staking_pool = builder.is_equal_constant(
@@ -546,7 +551,6 @@ impl TxTypeTargets {
             self.is_l2_modify_order,
             self.is_l2_update_leverage,
             self.is_l2_create_grouped_orders,
-            self.is_l2_force_burn_shares,
             self.is_l2_strategy_transfer,
         ]);
         let is_valid_frozen_pool_tx =

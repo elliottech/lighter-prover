@@ -15,7 +15,7 @@ type BlobDataInput struct {
 	AssetIndex         int16 `json:"asi"`
 	MasterAccountIndex int64 `json:"mai"`
 
-	BlobBytes []string `json:"blobs"`
+	BlobBytes []string `json:"blobs"` // [types.BlobBytesSize]byte{}
 
 	InitialAccountPubDataLeaves []*PubdataAccountWitness `json:"ial"`
 
@@ -26,7 +26,7 @@ const (
 	MasterAccount = iota
 	SubAccount    = 1
 	PublicPool    = 2
-	InsuranceFund = 3 
+	InsuranceFund = 3 // Insurance Fund Public Pool
 
 	AssetListSize  = (1 << AssetIndexBits)
 	AssetIndexBits = 6

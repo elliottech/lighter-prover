@@ -24,8 +24,8 @@ p3-matrix.workspace = true
 p3-schnorr = { path = "../p3-schnorr" }
 p3-symmetric.workspace = true
 p3-uni-stark.workspace = true
-plonky2 = { git = "https://github.com/elliottech/plonky2", rev = "e1c2d35450948b88fca6a7e69e2643c3ecad3caa", package = "plonky2", optional = true }
-starky = { git = "https://github.com/elliottech/plonky2", rev = "e1c2d35450948b88fca6a7e69e2643c3ecad3caa", package = "starky", optional = true }
+plonky2 = { path = "../../../plonky2/plonky2", package = "plonky2", optional = true }
+starky = { path = "../../../plonky2/starky", package = "starky", optional = true }
 anyhow = { version = "1.0.40", default-features = false, optional = true }
 thiserror.workspace = true
 

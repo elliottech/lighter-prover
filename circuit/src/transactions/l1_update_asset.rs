@@ -292,6 +292,7 @@ impl Apply for L1UpdateAssetTxTarget {
         );
 
         let success_and_in_margin_list = builder.and(self.success, self.in_margin_list);
+        let old_margined_asset = tx_state.margined_asset[TX_ASSET_ID].clone();
         tx_state.margined_asset[TX_ASSET_ID] = select_margined_asset_target(
             builder,
             success_and_in_margin_list,
@@ -303,9 +304,11 @@ impl Apply for L1UpdateAssetTxTarget {
                 liquidation_fee: self.liquidation_fee,
                 index_price: self.index_price,
                 index_price_divider: self.index_price_divider,
-                ..Default::default()
+                global_supply_cap: old_margined_asset.global_supply_cap.clone(),
+                user_supply_cap: old_margined_asset.user_supply_cap.clone(),
+                total_supplied_amount: old_margined_asset.total_supplied_amount.clone(),
             },
-            &tx_state.margined_asset[TX_ASSET_ID],
+            &old_margined_asset,
         );
 
         self.success

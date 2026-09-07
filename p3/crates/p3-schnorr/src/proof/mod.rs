@@ -27,8 +27,8 @@ use p3_goldilocks::{Goldilocks, Poseidon2Goldilocks, default_goldilocks_poseidon
 use p3_merkle_tree::MerkleTreeMmcs;
 use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
 use p3_uni_stark::{
-    PcsError, PreprocessedVerifierKey, Proof, StarkConfig, VerificationError,
-    prove_with_preprocessed, setup_preprocessed, verify_with_preprocessed,
+    PcsError, PreprocessedProverData, PreprocessedVerifierKey, Proof, StarkConfig,
+    VerificationError, prove_with_preprocessed, setup_preprocessed, verify_with_preprocessed,
 };
 use thiserror::Error;
 

@@ -32,7 +32,6 @@ pub mod l2_create_order;
 pub mod l2_create_public_pool;
 pub mod l2_create_staking_pool;
 pub mod l2_create_sub_account;
-pub mod l2_force_burn_shares;
 pub mod l2_mint_shares;
 pub mod l2_modify_order;
 pub mod l2_stake_assets;

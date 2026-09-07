@@ -164,7 +164,6 @@ impl MarginedAssetTarget {
             self.liquidation_threshold, // Max 10_000
             self.liquidation_factor,    // Max 1_000_000
             self.liquidation_fee,       // Max 1_000_000
-            self.index_price,           // 32 bits
             self.index_price_divider,   // 56 bits
             self.global_supply_cap.limbs[0].0,
             self.global_supply_cap.limbs[1].0,
@@ -176,7 +175,9 @@ impl MarginedAssetTarget {
             self.total_supplied_amount.limbs[1].0,
             self.total_supplied_amount.limbs[2].0,
         ]);
-        builder.is_zero(added)
+        let is_index_price_zero = builder.is_zero(self.index_price);
+        let is_added_zero = builder.is_zero(added);
+        builder.and(is_index_price_zero, is_added_zero)
     }
 
     pub fn print(&self, builder: &mut Builder, tag: &str) {

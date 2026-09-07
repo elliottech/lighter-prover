@@ -118,9 +118,6 @@ use crate::transactions::l2_create_staking_pool::{
 use crate::transactions::l2_create_sub_account::{
     L2CreateSubAccountTxTarget, L2CreateSubAccountTxTargetWitness,
 };
-use crate::transactions::l2_force_burn_shares::{
-    L2ForceBurnSharesTxTarget, L2ForceBurnSharesTxTargetWitness,
-};
 use crate::transactions::l2_mint_shares::{L2MintSharesTxTarget, L2MintSharesTxTargetWitness};
 use crate::transactions::l2_modify_order::{L2ModifyOrderTxTarget, L2ModifyOrderTxTargetWitness};
 use crate::transactions::l2_stake_assets::{L2StakeAssetsTxTarget, L2StakeAssetsTxTargetWitness};
@@ -240,7 +237,6 @@ pub struct TxTarget {
     pub l2_create_staking_pool_tx_target: TransactionTarget<L2CreateStakingPoolTxTarget>,
     pub l2_stake_assets_tx_target: TransactionTarget<L2StakeAssetsTxTarget>,
     pub l2_unstake_assets_tx_target: TransactionTarget<L2UnstakeAssetsTxTarget>,
-    pub l2_force_burn_shares_tx_target: TransactionTarget<L2ForceBurnSharesTxTarget>,
     pub l2_update_account_config_tx_target: TransactionTarget<L2UpdateAccountConfigTxTarget>,
     pub l2_strategy_transfer_tx_target: TransactionTarget<L2StrategyTransferTxTarget>,
     pub l2_update_market_config_tx_target: TransactionTarget<L2UpdateMarketConfigTxTarget>,
@@ -418,9 +414,6 @@ impl TxTarget {
             ),
             l2_stake_assets_tx_target: TransactionTarget::new(L2StakeAssetsTxTarget::new(builder)),
             l2_unstake_assets_tx_target: TransactionTarget::new(L2UnstakeAssetsTxTarget::new(
-                builder,
-            )),
-            l2_force_burn_shares_tx_target: TransactionTarget::new(L2ForceBurnSharesTxTarget::new(
                 builder,
             )),
             l2_update_account_config_tx_target: TransactionTarget::new(
@@ -601,7 +594,7 @@ impl TxTarget {
         let tx_type = TxTypeTargets::new(builder, self.tx_type);
         let tx_hash = self.select_tx_hash(builder, &tx_type, chain_id);
         let account_pk = self.select_account_pk(builder, &tx_type);
-        let partial_main_account = self.select_partial_main_account(builder, &tx_type);
+        let partial_main_account = self.build_partial_main_account();
 
         // Perform common verifications for the transaction.
         let signature_check = tx_type.verify(
@@ -862,7 +855,7 @@ impl TxTarget {
 
         self.verify_position_delta_merkle_proofs(builder, tx_state, &old_position_delta_hashes);
 
-        self.verify_api_key_merkle_proof(builder, tx_state, &tx_type);
+        self.verify_api_key_merkle_proof(builder, tx_state);
 
         self.verify_account_orders_merkle_proof(builder, tx_state);
 
@@ -2049,26 +2042,14 @@ impl TxTarget {
         // )
     }
 
-    fn verify_api_key_merkle_proof(
-        &self,
-        builder: &mut Builder,
-        tx_state: &mut TxState,
-        tx_type: &TxTypeTargets,
-    ) {
+    fn verify_api_key_merkle_proof(&self, builder: &mut Builder, tx_state: &mut TxState) {
         let api_key_before_hash = self.api_key_before.hash(builder);
         let api_key_merkle_path =
             api_key_index_to_merkle_path(builder, self.api_key_before.api_key_index);
 
-        // Force burn swaps owner and pool accounts
-        let api_key_root = builder.select_hash(
-            tx_type.is_l2_force_burn_shares,
-            &self.accounts_before[SUB_ACCOUNT_ID].api_key_root,
-            &self.accounts_before[OWNER_ACCOUNT_ID].api_key_root,
-        );
-
         verify_merkle_proof(
             builder,
-            &api_key_root,
+            &self.accounts_before[OWNER_ACCOUNT_ID].api_key_root,
             api_key_before_hash,
             self.api_key_tree_merkle_proof,
             api_key_merkle_path,
@@ -2082,16 +2063,7 @@ impl TxTarget {
             api_key_merkle_path,
         );
 
-        tx_state.accounts[OWNER_ACCOUNT_ID].api_key_root = builder.select_hash(
-            tx_type.is_l2_force_burn_shares,
-            &tx_state.accounts[OWNER_ACCOUNT_ID].api_key_root,
-            &new_api_key_root,
-        );
-        tx_state.accounts[SUB_ACCOUNT_ID].api_key_root = builder.select_hash(
-            tx_type.is_l2_force_burn_shares,
-            &new_api_key_root,
-            &tx_state.accounts[SUB_ACCOUNT_ID].api_key_root,
-        );
+        tx_state.accounts[OWNER_ACCOUNT_ID].api_key_root = new_api_key_root;
     }
 
     fn verify_assets_merkle_proofs(
@@ -2502,35 +2474,15 @@ impl TxTarget {
 
     /// Selects parts of the main account for tx type related verifications.
     /// Any new field verification added to `verify_l2_tx` requires a change here as well.
-    fn select_partial_main_account(
-        &self,
-        builder: &mut Builder,
-        tx_type: &TxTypeTargets,
-    ) -> AccountTarget {
+    fn build_partial_main_account(&self) -> AccountTarget {
         AccountTarget {
-            account_index: builder.select(
-                tx_type.is_l2_force_burn_shares,
-                self.accounts_before[SUB_ACCOUNT_ID].account_index,
-                self.accounts_before[OWNER_ACCOUNT_ID].account_index,
-            ),
-            account_type: builder.select(
-                tx_type.is_l2_force_burn_shares,
-                self.accounts_before[SUB_ACCOUNT_ID].account_type,
-                self.accounts_before[OWNER_ACCOUNT_ID].account_type,
-            ),
-            cancel_all_time: builder.select(
-                tx_type.is_l2_force_burn_shares,
-                self.accounts_before[SUB_ACCOUNT_ID].cancel_all_time,
-                self.accounts_before[OWNER_ACCOUNT_ID].cancel_all_time,
-            ),
+            account_index: self.accounts_before[OWNER_ACCOUNT_ID].account_index,
+            account_type: self.accounts_before[OWNER_ACCOUNT_ID].account_type,
+            cancel_all_time: self.accounts_before[OWNER_ACCOUNT_ID].cancel_all_time,
             public_pool_info: PublicPoolInfoTarget {
-                status: builder.select(
-                    tx_type.is_l2_force_burn_shares,
-                    self.accounts_before[SUB_ACCOUNT_ID].public_pool_info.status,
-                    self.accounts_before[OWNER_ACCOUNT_ID]
-                        .public_pool_info
-                        .status,
-                ),
+                status: self.accounts_before[OWNER_ACCOUNT_ID]
+                    .public_pool_info
+                    .status,
                 ..PublicPoolInfoTarget::default()
             },
             ..AccountTarget::default()
@@ -2730,18 +2682,6 @@ impl TxTarget {
         selected_hash = builder.select_quintic_ext(
             tx_type.is_l2_unstake_assets,
             l2_unstake_assets_tx_hash,
-            selected_hash,
-        );
-
-        let l2_force_burn_shares_tx_hash = self.l2_force_burn_shares_tx_target.hash(
-            builder,
-            self.nonce,
-            self.expired_at,
-            chain_id,
-        );
-        selected_hash = builder.select_quintic_ext(
-            tx_type.is_l2_force_burn_shares,
-            l2_force_burn_shares_tx_hash,
             selected_hash,
         );
 
@@ -2963,8 +2903,6 @@ impl TxTarget {
             .verify(builder, tx_type, tx_state);
         self.l2_unstake_assets_tx_target
             .verify(builder, tx_type, tx_state);
-        self.l2_force_burn_shares_tx_target
-            .verify(builder, tx_type, tx_state);
         self.l2_update_account_config_tx_target
             .verify(builder, tx_type, tx_state);
         self.l2_strategy_transfer_tx_target
@@ -3165,7 +3103,6 @@ impl TxTarget {
             .apply(builder, tx_state);
         self.l2_stake_assets_tx_target.apply(builder, tx_state);
         self.l2_unstake_assets_tx_target.apply(builder, tx_state);
-        self.l2_force_burn_shares_tx_target.apply(builder, tx_state);
         self.l2_update_account_config_tx_target
             .apply(builder, tx_state);
         self.l2_strategy_transfer_tx_target.apply(builder, tx_state);
@@ -3519,10 +3456,6 @@ impl<T: Witness<F> + PartialWitnessCurve<F>, F: PrimeField64 + Extendable<5> + R
         self.set_l2_unstake_assets_tx_target(
             &a.l2_unstake_assets_tx_target.inner,
             &b.l2_unstake_assets_tx,
-        )?;
-        self.set_l2_force_burn_shares_tx_target(
-            &a.l2_force_burn_shares_tx_target.inner,
-            &b.l2_force_burn_shares_tx,
         )?;
         self.set_l2_update_account_config_tx_target(
             &a.l2_update_account_config_tx_target.inner,

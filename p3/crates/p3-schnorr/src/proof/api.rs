@@ -1,3 +1,37 @@
+/// Preprocessed prover data, cached per trace height.
+///
+/// The preprocessed trace depends only on the row count (see
+/// [`BaseAir::preprocessed_trace`]), while committing to it costs a full
+/// LDE + Merkle build — worth reusing across proofs of the same shape.
+fn preprocessed_for_height(
+    config: &SignatureBatchStarkConfig,
+    air: &SignatureBatchAir,
+    log_height: usize,
+) -> Result<
+    std::sync::Arc<PreprocessedProverData<SignatureBatchStarkConfig>>,
+    SignatureBatchProofError,
+> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    static CACHE: OnceLock<
+        Mutex<HashMap<usize, Arc<PreprocessedProverData<SignatureBatchStarkConfig>>>>,
+    > = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(data) = cache.lock().unwrap().get(&log_height) {
+        return Ok(data.clone());
+    }
+    let (preprocessed, _) =
+        setup_preprocessed::<SignatureBatchStarkConfig, _>(config, air, log_height)
+            .ok_or(SignatureBatchProofError::MissingPreprocessedColumns)?;
+    let data = Arc::new(preprocessed);
+    cache
+        .lock()
+        .unwrap()
+        .insert(log_height, data.clone());
+    Ok(data)
+}
+
 pub fn schnorr_stark_config() -> SignatureBatchStarkConfig {
     let perm = default_goldilocks_poseidon2_16();
     let hash = Hash::new(perm.clone());
@@ -138,9 +172,7 @@ pub fn prove_signature_batch_trace(
     ensure_trace_height(&public_inputs, trace.rows)?;
     let log_height = trace.rows.ilog2() as usize;
     let config = schnorr_stark_config();
-    let (preprocessed, _) =
-        setup_preprocessed::<SignatureBatchStarkConfig, _>(&config, &trace.air, log_height)
-            .ok_or(SignatureBatchProofError::MissingPreprocessedColumns)?;
+    let preprocessed = preprocessed_for_height(&config, &trace.air, log_height)?;
     let inner = prove_with_preprocessed(
         &config,
         &trace.air,

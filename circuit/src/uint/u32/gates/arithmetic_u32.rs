@@ -181,7 +181,75 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for U32ArithmeticG
     }
 
     fn eval_unfiltered_base_batch(&self, vars_base: EvaluationVarsBaseBatch<F>) -> Vec<F> {
-        self.eval_unfiltered_base_batch_packed(vars_base)
+        assert_eq!(1 << Self::limb_bits(), 4);
+        let n = vars_base.len();
+        let wires = vars_base.local_wires;
+        let three = F::from_canonical_usize(3);
+        let limb_base = F::from_canonical_u64(1u64 << Self::limb_bits());
+        let base32 = F::from_canonical_u64(1 << 32u64);
+        let u32_max = F::from_canonical_u32(u32::MAX);
+        let midpoint = Self::num_limbs() / 2;
+        let mut res = vec![F::ZERO; n * <Self as Gate<F, D>>::num_constraints(self)];
+        let mut chunks = res.chunks_exact_mut(n);
+        let mut combined_low = vec![F::ZERO; n];
+        let mut combined_high = vec![F::ZERO; n];
+
+        for i in 0..self.num_ops {
+            let multiplicand_0 = &wires[self.wire_ith_multiplicand_0(i) * n..][..n];
+            let multiplicand_1 = &wires[self.wire_ith_multiplicand_1(i) * n..][..n];
+            let addend = &wires[self.wire_ith_addend(i) * n..][..n];
+            let output_low = &wires[self.wire_ith_output_low_half(i) * n..][..n];
+            let output_high = &wires[self.wire_ith_output_high_half(i) * n..][..n];
+            let inverse = &wires[self.wire_ith_inverse(i) * n..][..n];
+
+            // Canonicity: (inverse * (u32::MAX - output_high) - 1) * output_low.
+            let out = chunks.next().unwrap();
+            for p in 0..n {
+                let diff = u32_max - output_high[p];
+                let hi_not_max = inverse[p] * diff - F::ONE;
+                out[p] = hi_not_max * output_low[p];
+            }
+
+            // combined_output - computed_output.
+            let out = chunks.next().unwrap();
+            for p in 0..n {
+                let computed = multiplicand_0[p] * multiplicand_1[p] + addend[p];
+                out[p] = output_high[p] * base32 + output_low[p] - computed;
+            }
+
+            // Limb range products (base-4: x(x-1)(x-2)(x-3) = y(y+2), y = x(x-3))
+            // in the same descending order as `eval_unfiltered`, accumulating
+            // the low/high recompositions along the way.
+            combined_low.fill(F::ZERO);
+            combined_high.fill(F::ZERO);
+            for j in (0..Self::num_limbs()).rev() {
+                let limb = &wires[self.wire_ith_output_jth_limb(i, j) * n..][..n];
+                let out = chunks.next().unwrap();
+                for p in 0..n {
+                    let x = limb[p];
+                    let y = x * (x - three);
+                    out[p] = y * (y + F::TWO);
+                }
+                let combined = if j < midpoint {
+                    &mut combined_low
+                } else {
+                    &mut combined_high
+                };
+                for p in 0..n {
+                    combined[p] = combined[p] * limb_base + limb[p];
+                }
+            }
+            let out = chunks.next().unwrap();
+            for p in 0..n {
+                out[p] = combined_low[p] - output_low[p];
+            }
+            let out = chunks.next().unwrap();
+            for p in 0..n {
+                out[p] = combined_high[p] - output_high[p];
+            }
+        }
+        assert!(chunks.next().is_none());
+        res
     }
 
     fn eval_unfiltered_circuit(
@@ -460,5 +528,22 @@ impl<F: RichField + Extendable<D>, const D: usize> SimpleGenerator<F, D>
             i,
             _phantom: PhantomData,
         })
+    }
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use plonky2::field::goldilocks_field::GoldilocksField;
+    use plonky2::plonk::circuit_data::CircuitConfig;
+
+    use super::*;
+    use crate::gate_batch_testing::assert_base_batch_matches_eval_unfiltered;
+
+    #[test]
+    fn base_batch_matches_eval_unfiltered_across_batch() {
+        let gate = U32ArithmeticGate::<GoldilocksField, 2>::new_from_config(
+            &CircuitConfig::standard_recursion_config(),
+        );
+        assert_base_batch_matches_eval_unfiltered(&gate);
     }
 }

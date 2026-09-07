@@ -43,7 +43,6 @@ use crate::transactions::l2_create_order::L2CreateOrderTx;
 use crate::transactions::l2_create_public_pool::L2CreatePublicPoolTx;
 use crate::transactions::l2_create_staking_pool::L2CreateStakingPoolTx;
 use crate::transactions::l2_create_sub_account::L2CreateSubAccountTx;
-use crate::transactions::l2_force_burn_shares::L2ForceBurnSharesTx;
 use crate::transactions::l2_mint_shares::L2MintSharesTx;
 use crate::transactions::l2_modify_order::L2ModifyOrderTx;
 use crate::transactions::l2_stake_assets::L2StakeAssetsTx;
@@ -215,10 +214,6 @@ where
     #[serde(rename = "2umc")]
     #[serde(default)]
     pub l2_update_market_config_tx: L2UpdateMarketConfigTx,
-
-    #[serde(rename = "2fbs")]
-    #[serde(default)]
-    pub l2_force_burn_shares_tx: L2ForceBurnSharesTx,
 
     #[serde(rename = "2uac")]
     #[serde(default)]

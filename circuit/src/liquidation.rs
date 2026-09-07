@@ -65,7 +65,7 @@ pub fn get_asset_zero_price(
     let quote_extension_multiplier =
         builder.target_to_biguint(order_book.quote_extension_multiplier);
     let index_price_divider = builder.target_to_biguint(margined_asset.index_price_divider);
-    let index_price = builder.target_to_biguint_single_limb_unsafe(margined_asset.index_price);
+    let index_price = builder.target_to_biguint(margined_asset.index_price);
     let liquidation_factor =
         builder.target_to_biguint_single_limb_unsafe(margined_asset.liquidation_factor);
     let asset_margin_tick_big = builder.constant_biguint(&BigUint::from(ASSET_MARGIN_TICK));

@@ -152,7 +152,57 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for U32Subtraction
     }
 
     fn eval_unfiltered_base_batch(&self, vars_base: EvaluationVarsBaseBatch<F>) -> Vec<F> {
-        self.eval_unfiltered_base_batch_packed(vars_base)
+        assert_eq!(1 << Self::limb_bits(), 4);
+        let n = vars_base.len();
+        let wires = vars_base.local_wires;
+        let three = F::from_canonical_usize(3);
+        let limb_base = F::from_canonical_u64(1u64 << Self::limb_bits());
+        let base32 = F::from_canonical_u64(1 << 32u64);
+        let mut res = vec![F::ZERO; n * <Self as Gate<F, D>>::num_constraints(self)];
+        let mut chunks = res.chunks_exact_mut(n);
+        let mut combined_limbs = vec![F::ZERO; n];
+
+        for i in 0..self.num_ops {
+            let input_x = &wires[self.wire_ith_input_x(i) * n..][..n];
+            let input_y = &wires[self.wire_ith_input_y(i) * n..][..n];
+            let input_borrow = &wires[self.wire_ith_input_borrow(i) * n..][..n];
+            let output_result = &wires[self.wire_ith_output_result(i) * n..][..n];
+            let output_borrow = &wires[self.wire_ith_output_borrow(i) * n..][..n];
+
+            let out = chunks.next().unwrap();
+            for p in 0..n {
+                let result_initial = input_x[p] - input_y[p] - input_borrow[p];
+                out[p] = output_result[p] - (result_initial + base32 * output_borrow[p]);
+            }
+
+            // Limb range products (base-4: x(x-1)(x-2)(x-3) = y(y+2), y = x(x-3))
+            // in the same descending order as `eval_unfiltered`, accumulating
+            // the recomposition along the way.
+            combined_limbs.fill(F::ZERO);
+            for j in (0..Self::num_limbs()).rev() {
+                let limb = &wires[self.wire_ith_output_jth_limb(i, j) * n..][..n];
+                let out = chunks.next().unwrap();
+                for p in 0..n {
+                    let x = limb[p];
+                    let y = x * (x - three);
+                    out[p] = y * (y + F::TWO);
+                }
+                for p in 0..n {
+                    combined_limbs[p] = combined_limbs[p] * limb_base + limb[p];
+                }
+            }
+            let out = chunks.next().unwrap();
+            for p in 0..n {
+                out[p] = combined_limbs[p] - output_result[p];
+            }
+
+            let out = chunks.next().unwrap();
+            for p in 0..n {
+                out[p] = output_borrow[p] * (F::ONE - output_borrow[p]);
+            }
+        }
+        assert!(chunks.next().is_none());
+        res
     }
 
     fn eval_unfiltered_circuit(
@@ -466,5 +516,22 @@ mod tests {
             gate.eval_unfiltered(vars).iter().all(|x| x.is_zero()),
             "Gate constraints are not satisfied."
         );
+    }
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use plonky2::field::goldilocks_field::GoldilocksField;
+    use plonky2::plonk::circuit_data::CircuitConfig;
+
+    use super::*;
+    use crate::gate_batch_testing::assert_base_batch_matches_eval_unfiltered;
+
+    #[test]
+    fn base_batch_matches_eval_unfiltered_across_batch() {
+        let gate = U32SubtractionGate::<GoldilocksField, 2>::new_from_config(
+            &CircuitConfig::standard_recursion_config(),
+        );
+        assert_base_batch_matches_eval_unfiltered(&gate);
     }
 }

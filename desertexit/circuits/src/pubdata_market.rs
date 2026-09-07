@@ -6,7 +6,7 @@ use circuit::bigint::bigint::{BigIntTarget, CircuitBuilderBigInt, SignTarget};
 use circuit::bigint::biguint::CircuitBuilderBiguint;
 use circuit::poseidon2::Poseidon2Hash;
 use circuit::types::config::{BIG_U64_LIMBS, BIG_U96_LIMBS, BIGU16_U64_LIMBS, Builder};
-use circuit::types::constants::POSITION_LIST_SIZE;
+use circuit::types::constants::{POSITION_HASH_BUCKET_SIZE, POSITION_LIST_SIZE};
 use circuit::uint::u16::gadgets::arithmetic_u16::CircuitBuilderU16;
 use num::BigInt;
 use plonky2::hash::hash_types::HashOutTarget;
@@ -90,18 +90,30 @@ pub fn all_public_market_details_hash(
     builder: &mut Builder,
     all_market_details: &[PubdataMarketDetailsTarget; POSITION_LIST_SIZE],
 ) -> HashOutTarget {
-    let mut elements = vec![];
-    for market_details in all_market_details.iter() {
-        let mut limbs = market_details.funding_rate_prefix_sum.abs.limbs.clone();
-        limbs.resize(BIGU16_U64_LIMBS, builder.zero_u16());
-        for limb in limbs {
-            elements.push(limb.0);
+    let mut market_details_ext = all_market_details.to_vec();
+    market_details_ext.push(PubdataMarketDetailsTarget {
+        funding_rate_prefix_sum: builder.zero_bigint_u16(),
+        mark_price: builder.zero(),
+        quote_multiplier: builder.zero(),
+    });
+
+    let mut bucket_hash_elements = vec![];
+    for bucket in market_details_ext.chunks(POSITION_HASH_BUCKET_SIZE) {
+        let mut elements = vec![];
+        for market_details in bucket.iter() {
+            let mut limbs = market_details.funding_rate_prefix_sum.abs.limbs.clone();
+            limbs.resize(BIGU16_U64_LIMBS, builder.zero_u16());
+            for limb in limbs {
+                elements.push(limb.0);
+            }
+            elements.extend_from_slice(&[
+                market_details.funding_rate_prefix_sum.sign.target,
+                market_details.mark_price,
+                market_details.quote_multiplier,
+            ]);
         }
-        elements.extend_from_slice(&[
-            market_details.funding_rate_prefix_sum.sign.target,
-            market_details.mark_price,
-            market_details.quote_multiplier,
-        ]);
+        let bucket_hash = builder.hash_n_to_hash_no_pad::<Poseidon2Hash>(elements);
+        bucket_hash_elements.extend_from_slice(&bucket_hash.elements);
     }
-    builder.hash_n_to_hash_no_pad::<Poseidon2Hash>(elements)
+    builder.hash_n_to_hash_no_pad::<Poseidon2Hash>(bucket_hash_elements)
 }

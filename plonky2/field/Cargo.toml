@@ -1,0 +1,31 @@
+[package]
+name = "plonky2_field"
+description = "Finite field arithmetic"
+version = "1.0.0"
+authors = ["Daniel Lubarov <daniel@lubarov.com>", "William Borgeaud <williamborgeaud@gmail.com>", "Jacqueline Nabaglo <j@nab.gl>", "Hamish Ivey-Law <hamish@ivey-law.name>"]
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+itertools = { workspace = true, features = ["use_alloc"] }
+num = { workspace = true, features = ["alloc"] }
+rand = { workspace = true, features = ["getrandom"] }
+serde = { workspace = true, features = ["alloc"] }
+static_assertions = { workspace = true }
+unroll = { workspace = true }
+
+# Local dependencies
+plonky2_util = { version = "1.0.0", path = "../util", default-features = false }
+
+
+# Display math equations properly in documentation
+[package.metadata.docs.rs]
+rustdoc-args = ["--html-in-header", ".cargo/katex-header.html"]
+
+[lints]
+workspace = true

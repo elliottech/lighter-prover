@@ -1,0 +1,101 @@
+[package]
+name = "plonky2"
+description = "Recursive SNARKs based on PLONK and FRI"
+version = "1.1.0"
+authors = ["Daniel Lubarov <daniel@lubarov.com>", "William Borgeaud <williamborgeaud@gmail.com>", "Nicholas Ward <npward@berkeley.edu>"]
+readme = "README.md"
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = ["gate_testing", "parallel", "rand_chacha", "std", "timing"]
+gate_testing = []
+parallel = ["hashbrown/rayon", "plonky2_maybe_rayon/parallel"]
+std = ["anyhow/std", "rand/std", "itertools/use_std"]
+timing = ["std", "dep:web-time"]
+
+[dependencies]
+ahash = { workspace = true }
+anyhow = { workspace = true }
+hashbrown = { workspace = true }
+itertools = { workspace = true }
+keccak-hash = { version = "0.8.0", default-features = false }
+log = { workspace = true }
+num = { workspace = true }
+rand = { workspace = true }
+rand_chacha = { version = "0.3.1", optional = true, default-features = false }
+serde = { workspace = true, features = ["rc"] }
+static_assertions = { workspace = true }
+unroll = { workspace = true }
+web-time = { version = "1.0.0", optional = true }
+
+# Local dependencies
+plonky2_field = { version = "1.0.0", path = "../field", default-features = false }
+plonky2_maybe_rayon = { version = "1.0.0", path = "../maybe_rayon", default-features = false }
+plonky2_util = { version = "1.0.0", path = "../util", default-features = false }
+
+# Plonky3 dependencies for Poseidon2
+p3-poseidon2 = { git = "https://github.com/Plonky3/Plonky3.git", rev = "eeb4e37b20127c4daa871b2bad0df30a7c7380db" }
+p3-goldilocks = { git = "https://github.com/Plonky3/Plonky3.git", rev = "eeb4e37b20127c4daa871b2bad0df30a7c7380db" }
+p3-field = { git = "https://github.com/Plonky3/Plonky3.git", rev = "eeb4e37b20127c4daa871b2bad0df30a7c7380db" }
+p3-symmetric = { git = "https://github.com/Plonky3/Plonky3.git", rev = "eeb4e37b20127c4daa871b2bad0df30a7c7380db" }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.2", default-features = false, features = ["js"] }
+
+[target.'cfg(all(target_arch = "aarch64", target_os = "macos"))'.dependencies]
+metal = "0.33.0"
+objc = "0.2.7"
+
+[dev-dependencies]
+criterion = { version = "0.5.1", default-features = false }
+env_logger = { version = "0.9.0", default-features = false }
+num_cpus = { version = "1.14.0", default-features = false }
+rand = { workspace = true, features = ["getrandom"] }
+rand_chacha = { version = "0.3.1", default-features = false }
+serde_cbor = { version = "0.11.2" }
+serde_json = { version = "1.0" }
+structopt = { version = "0.3.26", default-features = false }
+tynm = { version = "0.1.6", default-features = false }
+
+[target.'cfg(not(target_env = "msvc"))'.dev-dependencies]
+jemallocator = "0.5.0"
+
+[[bin]]
+name = "generate_constants"
+required-features = ["rand_chacha"]
+
+[[bench]]
+name = "field_arithmetic"
+harness = false
+
+[[bench]]
+name = "ffts"
+harness = false
+
+[[bench]]
+name = "hashing"
+harness = false
+
+[[bench]]
+name = "merkle"
+harness = false
+
+[[bench]]
+name = "transpose"
+harness = false
+
+[[bench]]
+name = "reverse_index_bits"
+harness = false
+
+# Display math equations properly in documentation
+[package.metadata.docs.rs]
+rustdoc-args = ["--html-in-header", ".cargo/katex-header.html"]
+
+[lints]
+workspace = true

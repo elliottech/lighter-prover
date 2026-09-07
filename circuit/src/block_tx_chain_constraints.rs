@@ -498,7 +498,17 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
                 current_block_tx_proof,
             )?
         });
-        let proof = circuit_data.prove(pw)?;
+        let proof = {
+            let mut prove_timing = TimingTree::new("BlockTxChainProve", Level::Trace);
+            let proof = plonky2::plonk::prover::prove(
+                &circuit_data.prover_only,
+                &circuit_data.common,
+                pw,
+                &mut prove_timing,
+            )?;
+            prove_timing.print();
+            proof
+        };
         timed!(timing, "verify", { circuit_data.verify(proof.clone())? });
 
         timing.print();

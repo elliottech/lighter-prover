@@ -137,7 +137,62 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for ByteDecomposit
     }
 
     fn eval_unfiltered_base_batch(&self, vars_base: EvaluationVarsBaseBatch<F>) -> Vec<F> {
-        self.eval_unfiltered_base_batch_packed(vars_base)
+        let n = vars_base.len();
+        let wires = vars_base.local_wires;
+        let three = F::from_canonical_usize(3);
+        let four = F::from_canonical_usize(4);
+        let base = F::from_canonical_usize(256);
+        let mut res = vec![F::ZERO; n * <Self as Gate<F, D>>::num_constraints(self)];
+        let mut chunks = res.chunks_exact_mut(n);
+
+        for i in 0..self.num_ops {
+            let aux = self.i_th_aux_limbs(i);
+            // Range products per aux limb: x(x-1)(x-2)(x-3) = y(y+2), y = x(x-3).
+            for limb_wire in aux.clone() {
+                let col = &wires[limb_wire * n..][..n];
+                let out = chunks.next().unwrap();
+                for p in 0..n {
+                    let x = col[p];
+                    let y = x * (x - three);
+                    out[p] = y * (y + F::TWO);
+                }
+            }
+
+            // Each byte equals its four aux limbs combined by powers of 4,
+            // accumulated per point by Horner from the most significant limb.
+            let bytes = self.i_th_limbs(i);
+            for (byte_index, byte_wire) in bytes.clone().enumerate() {
+                let chunk_start = aux.start + 4 * byte_index;
+                let out = chunks.next().unwrap();
+                out.copy_from_slice(&wires[(chunk_start + 3) * n..][..n]);
+                for k in (0..3).rev() {
+                    let limb = &wires[(chunk_start + k) * n..][..n];
+                    for p in 0..n {
+                        out[p] = out[p] * four + limb[p];
+                    }
+                }
+                let byte_col = &wires[byte_wire * n..][..n];
+                for p in 0..n {
+                    out[p] -= byte_col[p];
+                }
+            }
+
+            // The sum equals the bytes combined by powers of 256.
+            let out = chunks.next().unwrap();
+            out.copy_from_slice(&wires[(bytes.end - 1) * n..][..n]);
+            for byte_wire in (bytes.start..bytes.end - 1).rev() {
+                let col = &wires[byte_wire * n..][..n];
+                for p in 0..n {
+                    out[p] = out[p] * base + col[p];
+                }
+            }
+            let sum_col = &wires[self.i_th_sum(i) * n..][..n];
+            for p in 0..n {
+                out[p] -= sum_col[p];
+            }
+        }
+        assert!(chunks.next().is_none());
+        res
     }
 
     fn eval_unfiltered_circuit(
@@ -363,5 +418,15 @@ mod tests {
         type C = PoseidonGoldilocksConfig;
         type F = <C as GenericConfig<D>>::F;
         test_eval_fns::<F, C, _, D>(ByteDecompositionGate::new(1, 1))
+    }
+
+    #[test]
+    fn base_batch_matches_eval_unfiltered_across_batch() {
+        use crate::gate_batch_testing::assert_base_batch_matches_eval_unfiltered;
+
+        for (num_limbs, num_ops) in [(1, 1), (4, 2), (8, 1)] {
+            let gate = ByteDecompositionGate::new(num_limbs, num_ops);
+            assert_base_batch_matches_eval_unfiltered(&gate);
+        }
     }
 }

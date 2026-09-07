@@ -23,7 +23,9 @@ use plonky2::iop::wire::Wire;
 use plonky2::iop::witness::{PartitionWitness, Witness, WitnessWrite};
 use plonky2::plonk::circuit_builder::CircuitBuilder;
 use plonky2::plonk::circuit_data::{CircuitConfig, CommonCircuitData};
-use plonky2::plonk::vars::{EvaluationTargets, EvaluationVars, EvaluationVarsBase};
+use plonky2::plonk::vars::{
+    EvaluationTargets, EvaluationVars, EvaluationVarsBase, EvaluationVarsBaseBatch,
+};
 use plonky2::util::serialization::{Buffer, IoResult, Read, Write};
 
 use crate::utils::ceil_div_usize;
@@ -156,6 +158,71 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for U32AddManyGate
         }
 
         constraints
+    }
+
+    fn eval_unfiltered_base_batch(&self, vars_base: EvaluationVarsBaseBatch<F>) -> Vec<F> {
+        assert_eq!(1 << Self::limb_bits(), 4);
+        let n = vars_base.len();
+        let wires = vars_base.local_wires;
+        let three = F::from_canonical_usize(3);
+        let base_limb = F::from_canonical_u64(1u64 << Self::limb_bits());
+        let base32 = F::from_canonical_u64(1 << 32u64);
+        let mut res = vec![F::ZERO; n * <Self as Gate<F, D>>::num_constraints(self)];
+        let mut chunks = res.chunks_exact_mut(n);
+        let mut combined_result = vec![F::ZERO; n];
+        let mut combined_carry = vec![F::ZERO; n];
+
+        for i in 0..self.num_ops {
+            let output_result = &wires[self.wire_ith_output_result(i) * n..][..n];
+            let output_carry = &wires[self.wire_ith_output_carry(i) * n..][..n];
+
+            // output_carry * 2^32 + output_result - (sum of addends + carry).
+            let out = chunks.next().unwrap();
+            out.copy_from_slice(&wires[self.wire_ith_carry(i) * n..][..n]);
+            for j in 0..self.num_addends {
+                let addend = &wires[self.wire_ith_op_jth_addend(i, j) * n..][..n];
+                for p in 0..n {
+                    out[p] += addend[p];
+                }
+            }
+            for p in 0..n {
+                out[p] = output_carry[p] * base32 + output_result[p] - out[p];
+            }
+
+            // Limb range products (base-4: x(x-1)(x-2)(x-3) = y(y+2), y = x(x-3))
+            // in the same descending order as `eval_unfiltered`, accumulating
+            // the result/carry recompositions along the way.
+            combined_result.fill(F::ZERO);
+            combined_carry.fill(F::ZERO);
+            for j in (0..Self::num_limbs()).rev() {
+                let limb = &wires[self.wire_ith_output_jth_limb(i, j) * n..][..n];
+                let out = chunks.next().unwrap();
+                for p in 0..n {
+                    let x = limb[p];
+                    let y = x * (x - three);
+                    out[p] = y * (y + F::TWO);
+                }
+                let combined = if j < Self::num_result_limbs() {
+                    &mut combined_result
+                } else {
+                    &mut combined_carry
+                };
+                for p in 0..n {
+                    combined[p] = combined[p] * base_limb + limb[p];
+                }
+            }
+
+            let out = chunks.next().unwrap();
+            for p in 0..n {
+                out[p] = combined_result[p] - output_result[p];
+            }
+            let out = chunks.next().unwrap();
+            for p in 0..n {
+                out[p] = combined_carry[p] - output_carry[p];
+            }
+        }
+        assert!(chunks.next().is_none());
+        res
     }
 
     fn eval_unfiltered_base_one(
@@ -395,5 +462,25 @@ impl<F: RichField + Extendable<D>, const D: usize> SimpleGenerator<F, D>
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use plonky2::field::goldilocks_field::GoldilocksField;
+    use plonky2::plonk::circuit_data::CircuitConfig;
+
+    use super::*;
+    use crate::gate_batch_testing::assert_base_batch_matches_eval_unfiltered;
+
+    #[test]
+    fn base_batch_matches_eval_unfiltered_across_batch() {
+        for num_addends in [2, 5, 16] {
+            let gate = U32AddManyGate::<GoldilocksField, 2>::new_from_config(
+                &CircuitConfig::standard_recursion_config(),
+                num_addends,
+            );
+            assert_base_batch_matches_eval_unfiltered(&gate);
+        }
     }
 }
