@@ -25,6 +25,7 @@ use crate::types::constants::*;
 use crate::types::tx_state::TxState;
 use crate::types::tx_type::TxTypeTargets;
 use crate::uint::u32::gadgets::arithmetic_u32::CircuitBuilderU32;
+use crate::utils::CircuitBuilderUtils;
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct L2UpdateMarginTx {
@@ -35,7 +36,7 @@ pub struct L2UpdateMarginTx {
     pub api_key_index: u8,
 
     #[serde(rename = "mi")]
-    pub market_index: u16,
+    pub public_market_index: i64,
 
     #[serde(rename = "u")]
     #[serde(deserialize_with = "deserializers::int_to_biguint")]
@@ -49,8 +50,8 @@ pub struct L2UpdateMarginTx {
 pub struct L2UpdateMarginTxTarget {
     pub account_index: Target,
     pub api_key_index: Target,
-    pub market_index: Target,
-    pub usdc_amount: BigUintTarget, // 60 bits
+    pub public_market_index: Target, // 48 bits
+    pub usdc_amount: BigUintTarget,  // 60 bits
     pub direction: Target,
 
     // helpers
@@ -65,7 +66,7 @@ impl L2UpdateMarginTxTarget {
         L2UpdateMarginTxTarget {
             account_index: builder.add_virtual_target(),
             api_key_index: builder.add_virtual_target(),
-            market_index: builder.add_virtual_target(),
+            public_market_index: builder.add_virtual_target(),
             usdc_amount: builder.add_virtual_biguint_target_safe(BIG_U64_LIMBS),
             direction: builder.add_virtual_target(),
 
@@ -93,7 +94,7 @@ impl TxHash for L2UpdateMarginTxTarget {
             tx_expired_at,
             self.account_index,
             self.api_key_index,
-            self.market_index,
+            self.public_market_index,
         ];
 
         let mut limbs = self.usdc_amount.limbs.clone();
@@ -125,12 +126,21 @@ impl Verify for L2UpdateMarginTxTarget {
             tx_state.api_key.api_key_index,
         );
 
-        builder.conditional_assert_eq(is_enabled, self.market_index, tx_state.market.market_index);
         builder.conditional_assert_eq(
             is_enabled,
-            self.market_index,
-            tx_state.market.perps_market_index,
+            self.public_market_index,
+            tx_state.market.public_market_index,
         );
+        let nil_public_market_index = builder.constant_u64(NIL_PUBLIC_MARKET_INDEX as u64);
+        builder.conditional_assert_not_eq(
+            is_enabled,
+            self.public_market_index,
+            nil_public_market_index,
+        );
+        // The pmi match above guarantees a live market leaf, so market_type is reliable here.
+        let is_perps_market =
+            builder.is_equal_constant(tx_state.market.market_type, MARKET_TYPE_PERPS);
+        builder.conditional_assert_true(is_enabled, is_perps_market);
 
         builder.conditional_assert_eq_constant(
             is_enabled,
@@ -264,7 +274,10 @@ impl<T: Witness<F>, F: PrimeField64> L2UpdateMarginTxTargetWitness<F> for T {
     ) -> Result<()> {
         self.set_target(a.account_index, F::from_canonical_i64(b.account_index))?;
         self.set_target(a.api_key_index, F::from_canonical_u8(b.api_key_index))?;
-        self.set_target(a.market_index, F::from_canonical_u16(b.market_index))?;
+        self.set_target(
+            a.public_market_index,
+            F::from_canonical_i64(b.public_market_index),
+        )?;
         self.set_biguint_target(&a.usdc_amount, &b.usdc_amount)?;
         self.set_target(a.direction, F::from_canonical_u8(b.direction))?;
 

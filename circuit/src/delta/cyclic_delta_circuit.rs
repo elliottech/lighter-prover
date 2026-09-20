@@ -188,6 +188,19 @@ impl CyclicDeltaCircuit {
                 );
             }
         }
+        // Make sure first iteration starts with zero market delta hash
+        let zero_hash = self.builder.zero_hash_out();
+        aggregated_in.market_delta_hash = self.builder.select_hash(
+            self.target.not_first_recursion,
+            &aggregated_in.market_delta_hash,
+            &zero_hash,
+        );
+        // Set -1 remaining market delta count for the first iteration
+        aggregated_in.remaining_market_delta_count = self.builder.select(
+            self.target.not_first_recursion,
+            aggregated_in.remaining_market_delta_count,
+            neg_one,
+        );
 
         (aggregated_in, delta_in, delta_out)
     }
@@ -208,6 +221,12 @@ impl CyclicDeltaCircuit {
                     .connect_hashes(aggregated_in.path_matrix[i][j], delta_in.path_matrix[i][j]);
             }
         }
+        self.builder
+            .connect_hashes(aggregated_in.market_delta_hash, delta_in.market_delta_hash);
+        self.builder.connect(
+            aggregated_in.remaining_market_delta_count,
+            delta_in.remaining_market_delta_count,
+        );
     }
 
     /// Shift the evaluation from the current delta proof by the degree aggregated so far,
@@ -244,6 +263,8 @@ impl CyclicDeltaCircuit {
             path_matrix: delta_out.path_matrix,
             evaluation: *new_evaluation,
             degree: new_degree,
+            market_delta_hash: delta_out.market_delta_hash,
+            remaining_market_delta_count: delta_out.remaining_market_delta_count,
         };
 
         self.target

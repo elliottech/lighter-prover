@@ -9,6 +9,7 @@ use circuit::bigint::div_rem::CircuitBuilderBiguintDivRem;
 use circuit::bool_utils::CircuitBuilderBoolUtils;
 use circuit::byte::split::CircuitBuilderByteSplit;
 use circuit::circuit_logger::CircuitBuilderLogging;
+use circuit::comparison::CircuitBuilderSubtractiveComparison;
 use circuit::hash_utils::CircuitBuilderHashUtils;
 use circuit::keccak::keccak::{CircuitBuilderKeccak, KeccakOutputTarget};
 use circuit::merkle_helpers::{account_index_to_merkle_path, verify_merkle_proof};
@@ -18,9 +19,9 @@ use circuit::types::config::{
 };
 use circuit::types::constants::{
     ACCOUNT_MERKLE_LEVELS, ASSET_LIST_SIZE_BITS, INSURANCE_FUND_ACCOUNT_TYPE,
-    LIGHTER_STAKING_POOL_ACCOUNT_TYPE, MAX_ASSET_INDEX, MIN_ASSET_INDEX, NIL_ACCOUNT_INDEX,
-    POSITION_LIST_SIZE, PUBLIC_POOL_ACCOUNT_TYPE, SHARES_LIST_SIZE, USDC_ASSET_INDEX,
-    USDC_TO_COLLATERAL_MULTIPLIER,
+    LIGHTER_STAKING_POOL_ACCOUNT_TYPE, MARKET_MERKLE_LEVELS, MAX_ASSET_INDEX, MIN_ASSET_INDEX,
+    NIL_ACCOUNT_INDEX, POSITION_LIST_SIZE, PUBLIC_POOL_ACCOUNT_TYPE, SHARES_LIST_SIZE,
+    USDC_ASSET_INDEX, USDC_TO_COLLATERAL_MULTIPLIER,
 };
 use circuit::uint::u32::gadgets::arithmetic_u32::CircuitBuilderU32;
 use circuit::utils::CircuitBuilderUtils;
@@ -28,7 +29,7 @@ use log::Level;
 use num::BigUint;
 use plonky2::field::types::Field;
 use plonky2::hash::hash_types::{HashOut, HashOutTarget, RichField};
-use plonky2::iop::target::Target;
+use plonky2::iop::target::{BoolTarget, Target};
 use plonky2::iop::witness::{PartialWitness, WitnessWrite};
 use plonky2::plonk::circuit_data::{CircuitConfig, CircuitData};
 use plonky2::plonk::proof::ProofWithPublicInputs;
@@ -38,11 +39,19 @@ use serde::Deserialize;
 use serde_with::serde_as;
 
 use crate::pubdata_account::{PubdataAccount, PubdataAccountTarget, PubdataAccountTargetWitness};
+use crate::pubdata_binary_options_position::{
+    PubdataBinaryOptionsPosition, PubdataBinaryOptionsPositionTarget,
+    PubdataBinaryOptionsPositionTargetWitness,
+};
 use crate::pubdata_market::{
     PubdataMarketDetails, PubdataMarketDetailsTarget, all_public_market_details_hash,
 };
 
 pub const DESERT_NUM_ACCOUNTS: usize = 1 + SHARES_LIST_SIZE;
+/// Protocol cap on binary options positions per account, the number of entries proven for the exited account
+pub const DESERT_BINARY_OPTIONS_POSITIONS: usize = 1024;
+/// Market slots are MARKET_MERKLE_LEVELS bits wide, compared at the next multiple of 8
+const MARKET_INDEX_COMPARISON_BITS: usize = MARKET_MERKLE_LEVELS.div_ceil(8) * 8;
 
 #[serde_as]
 #[derive(Debug, Clone, Deserialize)]
@@ -71,6 +80,15 @@ where
     #[serde(rename = "pmda")]
     #[serde_as(as = "[_; POSITION_LIST_SIZE]")]
     pub all_market_details: [PubdataMarketDetails; POSITION_LIST_SIZE],
+    #[serde(rename = "mpdtr")]
+    #[serde(deserialize_with = "circuit::deserializers::hash_out")]
+    pub market_pub_data_tree_root: HashOut<F>,
+
+    /// Binary options positions of the main account sorted by market slot, padded with empty entries
+    #[serde(rename = "bop")]
+    #[serde(deserialize_with = "crate::deserializers::binary_options_positions")]
+    pub binary_options_positions:
+        Box<[PubdataBinaryOptionsPosition; DESERT_BINARY_OPTIONS_POSITIONS]>,
 
     #[serde(rename = "vr")]
     #[serde(deserialize_with = "circuit::deserializers::hash_out")]
@@ -93,6 +111,10 @@ pub struct InnerDesertExitTarget {
         [[HashOutTarget; ACCOUNT_MERKLE_LEVELS]; DESERT_NUM_ACCOUNTS],
 
     pub public_market_details: [PubdataMarketDetailsTarget; POSITION_LIST_SIZE],
+    pub market_pub_data_tree_root: HashOutTarget,
+
+    pub binary_options_positions:
+        Box<[PubdataBinaryOptionsPositionTarget; DESERT_BINARY_OPTIONS_POSITIONS]>,
 
     pub validium_root: HashOutTarget,
     pub state_root: HashOutTarget,
@@ -122,6 +144,10 @@ impl InnerDesertExitCircuit {
                 }),
                 public_market_details: [(); POSITION_LIST_SIZE]
                     .map(|_| PubdataMarketDetailsTarget::new(&mut builder)),
+                market_pub_data_tree_root: builder.add_virtual_hash(),
+                binary_options_positions: Box::new(core::array::from_fn(|_| {
+                    PubdataBinaryOptionsPositionTarget::new(&mut builder)
+                })),
                 validium_root: builder.add_virtual_hash(),
                 state_root: builder.add_virtual_hash(),
             },
@@ -212,6 +238,48 @@ impl InnerDesertExitCircuit {
             .connect(mai_zero_or_one.target, l1_address_zero.target);
     }
 
+    /// Every binary options position of the main account is proven against the account's market pub
+    /// data root together with the published state of its market. Entries are sorted strictly by
+    /// market slot and the non empty ones form a prefix, so no position can be counted twice.
+    fn verify_binary_options_positions(&mut self) {
+        let account_market_pub_data_root = self.target.accounts[0].market_pub_data_root;
+        let market_pub_data_tree_root = self.target.market_pub_data_tree_root;
+
+        let mut previous: Option<(BoolTarget, Target)> = None;
+        for position in self.target.binary_options_positions.iter() {
+            position.verify(
+                &mut self.builder,
+                &account_market_pub_data_root,
+                &market_pub_data_tree_root,
+            );
+
+            let is_non_empty = position.is_non_empty(&mut self.builder);
+            if let Some((previous_is_non_empty, previous_market_index)) = previous {
+                self.builder
+                    .conditional_assert_true(is_non_empty, previous_is_non_empty);
+                self.builder.conditional_assert_lt(
+                    is_non_empty,
+                    previous_market_index,
+                    position.market_index,
+                    MARKET_INDEX_COMPARISON_BITS,
+                );
+            }
+            previous = Some((is_non_empty, position.market_index));
+        }
+    }
+
+    /// Sum of the binary options payouts of the main account in extended collateral
+    fn get_extended_usdc_component_from_binary_options_positions(&mut self) -> BigIntTarget {
+        let mut payouts_sum = self.builder.zero_biguint();
+        for position in self.target.binary_options_positions.iter() {
+            let payout = position.payout(&mut self.builder);
+            payouts_sum = self
+                .builder
+                .add_biguint_non_carry(&payouts_sum, &payout, BIG_U128_LIMBS);
+        }
+        self.builder.biguint_to_bigint(&payouts_sum)
+    }
+
     fn verify_state_root(&mut self) {
         let public_market_details_hash =
             all_public_market_details_hash(&mut self.builder, &self.target.public_market_details);
@@ -219,6 +287,7 @@ impl InnerDesertExitCircuit {
         let state_root = self.builder.hash_n_to_one(&[
             self.target.account_pub_data_tree_root,
             public_market_details_hash,
+            self.target.market_pub_data_tree_root,
             self.target.validium_root,
         ]);
 
@@ -239,10 +308,21 @@ impl InnerDesertExitCircuit {
                 &extended_aggregated_collateral,
                 BIG_U128_LIMBS,
             );
+            let binary_options_usdc_component =
+                self.get_extended_usdc_component_from_binary_options_positions();
+            let usdc_except_pools = self.builder.add_bigint_non_carry(
+                &usdc_except_pools,
+                &binary_options_usdc_component,
+                BIG_U128_LIMBS,
+            );
             let pools_usdc_component = self.get_usdc_component_from_pools();
 
             self.builder
                 .println_bigint(&positions_usdc_component, "Positions usdc Component");
+            self.builder.println_bigint(
+                &binary_options_usdc_component,
+                "Binary Options Positions usdc Component",
+            );
             self.builder
                 .println_bigint(&pools_usdc_component, "Public Pools usdc Component");
 
@@ -469,6 +549,8 @@ impl InnerDesertExitCircuit {
 
         circuit.verify_accounts();
 
+        circuit.verify_binary_options_positions();
+
         circuit.verify_state_root();
 
         circuit.validate_total_balance();
@@ -546,6 +628,18 @@ impl InnerDesertExitCircuit {
             pw.set_target(
                 target.public_market_details[i].quote_multiplier,
                 F::from_canonical_u32(witness.all_market_details[i].quote_multiplier),
+            )?;
+        }
+
+        pw.set_hash_target(
+            target.market_pub_data_tree_root,
+            witness.market_pub_data_tree_root,
+        )?;
+
+        for i in 0..DESERT_BINARY_OPTIONS_POSITIONS {
+            pw.set_pubdata_binary_options_position_target(
+                &target.binary_options_positions[i],
+                &witness.binary_options_positions[i],
             )?;
         }
 

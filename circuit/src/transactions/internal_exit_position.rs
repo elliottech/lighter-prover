@@ -11,16 +11,12 @@ use serde::Deserialize;
 use crate::bigint::big_u16::CircuitBuilderBiguint16;
 use crate::bigint::bigint::CircuitBuilderBigInt;
 use crate::bigint::biguint::CircuitBuilderBiguint;
-use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::liquidation::get_funding_delta_for_position_and_market;
+use crate::matching_engine::release_closed_market_slot_if_drained;
 use crate::tx_interface::{Apply, Verify};
 use crate::types::account_position::{AccountPositionTarget, get_position_unrealized_pnl};
 use crate::types::config::{BIG_U96_LIMBS, Builder, F};
 use crate::types::constants::*;
-use crate::types::market::{MarketTarget, select_market};
-use crate::types::market_details::{
-    MarketDetailsTarget, MarketRiskDetailsTarget, select_market_details, select_market_risk_details,
-};
 use crate::types::tx_state::TxState;
 use crate::types::tx_type::TxTypeTargets;
 use crate::utils::CircuitBuilderUtils;
@@ -86,13 +82,24 @@ impl Verify for InternalExitPositionTxTarget {
             execute_transaction_type,
         );
 
-        let market_expired_status = builder.constant(F::from_canonical_u8(MARKET_STATUS_EXPIRED));
-        builder.conditional_assert_eq(is_enabled, tx_state.market.status, market_expired_status);
+        let market_in_settlement_status =
+            builder.constant(F::from_canonical_u8(MARKET_STATUS_IN_SETTLEMENT));
+        builder.conditional_assert_eq(
+            is_enabled,
+            tx_state.market.status,
+            market_in_settlement_status,
+        );
 
         builder.conditional_assert_eq_constant(
             is_enabled,
             tx_state.market.market_type,
             MARKET_TYPE_PERPS,
+        );
+
+        // A position is exited only once it has no resting order left
+        builder.conditional_assert_zero(
+            is_enabled,
+            tx_state.positions[OWNER_ACCOUNT_ID].total_order_count,
         );
     }
 }
@@ -142,47 +149,19 @@ impl Apply for InternalExitPositionTxTarget {
         );
 
         // Update market details and order book
-        let new_open_interest = builder.sub(tx_state.market_details.open_interest, position_abs);
+        let new_open_interest = builder.sub(tx_state.market.open_interest, position_abs);
+        tx_state.market.open_interest = builder.select(
+            self.success,
+            new_open_interest,
+            tx_state.market.open_interest,
+        );
         tx_state.market_details.open_interest = builder.select(
             self.success,
             new_open_interest,
             tx_state.market_details.open_interest,
         );
 
-        let is_market_has_no_order = builder.is_zero(tx_state.market.total_order_count);
-        let is_market_has_no_position = builder.is_zero(tx_state.market_details.open_interest);
-        let is_expired_market_is_empty_and_enabled = builder.multi_and(&[
-            self.success,
-            is_market_has_no_order,
-            is_market_has_no_position,
-        ]);
-        let empty_market_details = MarketDetailsTarget::empty(builder);
-        tx_state.market_details = select_market_details(
-            builder,
-            is_expired_market_is_empty_and_enabled,
-            &empty_market_details,
-            &tx_state.market_details,
-        );
-        let empty_market_risk_details = MarketRiskDetailsTarget::empty(builder);
-        tx_state.market_risk_details = select_market_risk_details(
-            builder,
-            is_expired_market_is_empty_and_enabled,
-            &empty_market_risk_details,
-            &tx_state.market_risk_details,
-        );
-        let empty_order_book_tree_root = builder.constant_hash(EMPTY_ORDER_BOOK_TREE_ROOT);
-        let empty_order_book = MarketTarget::empty(
-            builder,
-            tx_state.market.market_index,
-            tx_state.market.perps_market_index,
-            empty_order_book_tree_root,
-        );
-        tx_state.market = select_market(
-            builder,
-            is_expired_market_is_empty_and_enabled,
-            &empty_order_book,
-            &tx_state.market,
-        );
+        release_closed_market_slot_if_drained(builder, self.success, tx_state);
 
         let empty_position = AccountPositionTarget::empty(builder);
 

@@ -171,10 +171,10 @@ impl CyclicRecursionCircuit {
         );
 
         // Take initial delta root from block for first recursion
-        batch.new_account_delta_tree_root = self.builder.select_hash(
+        batch.new_delta_root = self.builder.select_hash(
             self.target.not_first_recursion,
-            &batch.new_account_delta_tree_root,
-            &current_block.old_account_delta_tree_root,
+            &batch.new_delta_root,
+            &current_block.old_delta_root,
         );
 
         (batch, segment_info, current_block)
@@ -211,10 +211,8 @@ impl CyclicRecursionCircuit {
             &current_block.old_state_root,
         );
 
-        self.builder.connect_hashes(
-            batch.new_account_delta_tree_root,
-            current_block.old_account_delta_tree_root,
-        );
+        self.builder
+            .connect_hashes(batch.new_delta_root, current_block.old_delta_root);
 
         current_block
             .old_prefix_priority_operation_hash
@@ -356,12 +354,12 @@ impl Circuit<C, F, D> for CyclicRecursionCircuit {
             new_validium_root: current_block.new_validium_root,
             new_state_root: current_block.new_state_root,
 
-            old_account_delta_tree_root: circuit.builder.select_hash(
+            old_delta_root: circuit.builder.select_hash(
                 circuit.target.not_first_recursion,
-                &batch.old_account_delta_tree_root,
-                &current_block.old_account_delta_tree_root,
+                &batch.old_delta_root,
+                &current_block.old_delta_root,
             ),
-            new_account_delta_tree_root: current_block.new_account_delta_tree_root,
+            new_delta_root: current_block.new_delta_root,
 
             on_chain_operations_pub_data_hash,
 

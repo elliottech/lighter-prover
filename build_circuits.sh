@@ -26,7 +26,8 @@ ON_CHAIN_OPERATIONS_LIMIT=1
 PRIORITY_OPERATIONS_LIMIT=1
 CHAIN_ID=${CHAIN_ID:-304} # Default to mainnet if not set
 SRS_FILE=${SRS_FILE:-"./srs_file"} # Path to the SRS file. Source: https://aztec-ignition.s3.amazonaws.com/
-DELTA_ACCOUNT_COUNT=225
+DELTA_ACCOUNT_COUNT=79
+DELTA_MARKET_COUNT=4096
 PUBDATA_MODE=${PUBDATA_MODE:-"blob"}
 
 echo "Using:"
@@ -37,6 +38,7 @@ echo "PRIORITY_OPERATIONS_LIMIT: $PRIORITY_OPERATIONS_LIMIT"
 echo "CHAIN_ID: $CHAIN_ID"
 echo "SRS_FILE: $SRS_FILE"
 echo "DELTA_ACCOUNT_COUNT: $DELTA_ACCOUNT_COUNT"
+echo "DELTA_MARKET_COUNT: $DELTA_MARKET_COUNT"
 echo "PUBDATA_MODE: $PUBDATA_MODE"
 
 # Wait y/Y for user input to continue
@@ -69,7 +71,7 @@ echo "Running recursion circuit builder"
 export recursion_circuit=$(ls -t cyclic-circuit*.bin | head -n 1)
 
 echo "Running delta circuit builder"
-./target/release/build_delta_circuit --account-count $DELTA_ACCOUNT_COUNT
+./target/release/build_delta_circuit --account-count $DELTA_ACCOUNT_COUNT --market-count $DELTA_MARKET_COUNT
 export delta_circuit=$(ls -t delta-circuit*.bin | head -n 1)
 
 echo "Running delta recursion circuit builder"

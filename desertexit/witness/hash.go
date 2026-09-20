@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"math/big"
 
@@ -31,6 +32,15 @@ func getPubDataLeafHash(elem *PubdataAccountWitness) []byte {
 	elementsForPubData = append(elementsForPubData, partialHashForPubData[:]...)
 	elementsForPubData = append(elementsForPubData, accountAddressElements...)
 	elementsForPubData = append(elementsForPubData, g.GoldilocksField(elem.AccountType))
+
+	// Root of the account market pub data tree holding the binary options position sizes
+	marketPubDataTree := newAccountMarketPubDataTree(elem.BinaryOptionsPositions)
+	marketPubDataRoot, err := p2.HashOutFromLittleEndianBytes(marketPubDataTree.Root())
+	if err != nil {
+		panic(fmt.Sprintf("failed to convert account market pub data root to field element, err: %v", err))
+	}
+	elem.MarketPubDataRoot = marketPubDataRoot
+	elementsForPubData = append(elementsForPubData, marketPubDataRoot[:]...)
 
 	// Construct aggregated balances tree and get the root
 	assetDeltaSMTItems := make([]Item, 0)
@@ -62,6 +72,103 @@ func getPubDataLeafHash(elem *PubdataAccountWitness) []byte {
 	elementsForPubData = append(elementsForPubData, aggregatedBalancesRootF[:]...)
 
 	return p2.HashNoPad(elementsForPubData).ToLittleEndianBytes()
+}
+
+// newMarketTree returns an empty MarketTreeHeight deep tree keyed by market slot
+func newMarketTree() SparseMerkleTree {
+	tree, err := NewSparseMerkleTree(NewHasherPool(p2.NewPoseidon2), MarketTreeHeight, NilHash)
+	if err != nil {
+		panic("failed to create new market tree, err:" + err.Error())
+	}
+	return tree
+}
+
+func emptyMarketTreeRoot() p2.HashOut {
+	root, err := p2.HashOutFromLittleEndianBytes(newMarketTree().Root())
+	if err != nil {
+		panic("failed to convert empty market tree root to field elements, err:" + err.Error())
+	}
+	return root
+}
+
+func commitMarketTree(tree SparseMerkleTree, items []Item) {
+	version := Version(1)
+	if err := tree.MultiSetWithVersion(items, version); err != nil {
+		panic("failed to set market tree leaves, err:" + err.Error())
+	}
+	if _, err := tree.Commit(&version); err != nil {
+		panic("failed to commit market tree, err:" + err.Error())
+	}
+}
+
+// newAccountMarketPubDataTree builds the account market pub data tree from the binary options position sizes
+func newAccountMarketPubDataTree(binaryOptionsPositions map[int16]int64) SparseMerkleTree {
+	items := make([]Item, 0, len(binaryOptionsPositions))
+	for marketIndex, size := range binaryOptionsPositions {
+		if size == 0 {
+			continue
+		}
+		if !IsBinaryOptionsMarketSlot(marketIndex) {
+			panic(fmt.Sprintf("binary options position on non binary options market slot %d", marketIndex))
+		}
+		items = append(items, Item{
+			Key: uint64(marketIndex), // nolint:gosec
+			Val: computeBinaryOptionsPositionPubDataLeafHash(size),
+		})
+	}
+	tree := newMarketTree()
+	commitMarketTree(tree, items)
+	return tree
+}
+
+// newMarketPubDataTree builds the market pub data tree from the published binary options market states
+func newMarketPubDataTree(markets map[int16]*PubdataMarketWitness) SparseMerkleTree {
+	items := make([]Item, 0, len(markets))
+	for marketIndex, market := range markets {
+		leafHash := computeMarketPubDataLeafHash(marketIndex, market)
+		if bytes.Equal(leafHash, NilHash) {
+			continue
+		}
+		items = append(items, Item{
+			Key: uint64(marketIndex), // nolint:gosec
+			Val: leafHash,
+		})
+	}
+	tree := newMarketTree()
+	commitMarketTree(tree, items)
+	return tree
+}
+
+// Leaf of the account market pub data tree: only the size is published. Negative sizes are hashed as canonical
+// field elements like the circuit's signed targets.
+func computeBinaryOptionsPositionPubDataLeafHash(size int64) []byte {
+	if size == 0 {
+		return NilHash
+	}
+
+	return p2.HashNoPad([]g.GoldilocksField{
+		g.GoldilocksField(MarketTypeBinaryOptions),
+		g.NonCannonicalGoldilocksField(size),
+	}).ToLittleEndianBytes()
+}
+
+// Leaf of the market pub data tree. Only binary options slots publish market data and the leaf is empty while
+// every published field is zero.
+func computeMarketPubDataLeafHash(marketIndex int16, market *PubdataMarketWitness) []byte {
+	if market == nil || !IsBinaryOptionsMarketSlot(marketIndex) {
+		return NilHash
+	}
+	if market.Status == 0 && market.Price == 0 && market.SettlementCap == 0 && market.QuoteExtensionMultiplier == 0 {
+		return NilHash
+	}
+
+	return p2.HashNoPad([]g.GoldilocksField{
+		g.GoldilocksField(MarketTypeBinaryOptions),
+		g.GoldilocksField(market.Status),
+		g.GoldilocksField(market.Price),
+		g.GoldilocksField(market.SettlementCap),
+		g.GoldilocksField(market.QuoteExtensionMultiplier), // nolint:gosec
+	}).ToLittleEndianBytes()
 }
 
 func computeAssetBalanceLeafHash(balance *big.Int) []byte {

@@ -27,8 +27,8 @@ pub struct L2UpdateMarketConfigTx {
     #[serde(rename = "ki", default)]
     pub api_key_index: u8,
 
-    #[serde(rename = "mi", default)]
-    pub market_index: i16,
+    #[serde(rename = "mi")]
+    pub public_market_index: i64,
     #[serde(rename = "si", default)]
     pub strategy_index: u8,
     #[serde(rename = "mf", default)]
@@ -41,7 +41,7 @@ pub struct L2UpdateMarketConfigTx {
 pub struct L2UpdateMarketConfigTxTarget {
     pub account_index: Target,
     pub api_key_index: Target,
-    pub market_index: Target,
+    pub public_market_index: Target, // 48 bits
     pub strategy_index: Target,
     pub market_flags: Target,
     pub funding_premium_multiplier: Target,
@@ -56,7 +56,7 @@ impl L2UpdateMarketConfigTxTarget {
             account_index: builder.add_virtual_target(),
             api_key_index: builder.add_virtual_target(),
 
-            market_index: builder.add_virtual_target(),
+            public_market_index: builder.add_virtual_target(),
             strategy_index: builder.add_virtual_target(),
             market_flags: builder.add_virtual_target(),
             funding_premium_multiplier: builder.add_virtual_target(),
@@ -90,7 +90,7 @@ impl TxHash for L2UpdateMarketConfigTxTarget {
             tx_expired_at,
             self.account_index,
             self.api_key_index,
-            self.market_index,
+            self.public_market_index,
             self.strategy_index,
             self.market_flags,
             self.funding_premium_multiplier,
@@ -124,12 +124,21 @@ impl Verify for L2UpdateMarketConfigTxTarget {
             tx_state.api_key.api_key_index,
         );
 
-        builder.conditional_assert_eq(is_enabled, self.market_index, tx_state.market.market_index);
         builder.conditional_assert_eq(
             is_enabled,
-            self.market_index,
-            tx_state.market.perps_market_index,
+            self.public_market_index,
+            tx_state.market.public_market_index,
         );
+        let nil_public_market_index = builder.constant_u64(NIL_PUBLIC_MARKET_INDEX as u64);
+        builder.conditional_assert_not_eq(
+            is_enabled,
+            self.public_market_index,
+            nil_public_market_index,
+        );
+        // The pmi match above guarantees a live market leaf, so market_type is reliable here.
+        let is_perps_market =
+            builder.is_equal_constant(tx_state.market.market_type, MARKET_TYPE_PERPS);
+        builder.conditional_assert_true(is_enabled, is_perps_market);
 
         // Make sure market is active
         builder.conditional_assert_eq_constant(
@@ -154,7 +163,7 @@ impl Verify for L2UpdateMarketConfigTxTarget {
         let becomes_isolated_only =
             builder.and_not(new_is_isolated, old_market_flags.is_isolated_only());
 
-        let is_open_interest_zero = builder.is_zero(tx_state.market_details.open_interest);
+        let is_open_interest_zero = builder.is_zero(tx_state.market.open_interest);
         let is_total_order_count_zero = builder.is_zero(tx_state.market.total_order_count);
         let is_no_activity_on_market =
             builder.and(is_open_interest_zero, is_total_order_count_zero);
@@ -218,7 +227,10 @@ impl<T: Witness<F>, F: PrimeField64> L2UpdateMarketConfigTxTargetWitness<F> for 
     ) -> Result<()> {
         self.set_target(a.account_index, F::from_canonical_i64(b.account_index))?;
         self.set_target(a.api_key_index, F::from_canonical_u8(b.api_key_index))?;
-        self.set_target(a.market_index, F::from_canonical_i64(b.market_index as i64))?;
+        self.set_target(
+            a.public_market_index,
+            F::from_canonical_i64(b.public_market_index),
+        )?;
         self.set_target(a.strategy_index, F::from_canonical_u8(b.strategy_index))?;
         self.set_target(a.market_flags, F::from_canonical_i64(b.market_flags))?;
         self.set_target(

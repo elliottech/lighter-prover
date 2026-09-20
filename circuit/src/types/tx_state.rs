@@ -20,10 +20,12 @@ use crate::types::account_delta::AccountDeltaTarget;
 use crate::types::account_margined_asset::AccountMarginedAssetTarget;
 use crate::types::account_position::AccountPositionTarget;
 use crate::types::asset::AssetTarget;
+use crate::types::binary_options_position::BinaryOptionsPositionTarget;
 use crate::types::config::BIG_U96_LIMBS;
 use crate::types::constants::{
-    NB_ACCOUNTS_PER_TX, NB_ASSETS_PER_TX, NB_CLOID_UNIQUENESS_CHECK_PER_TX,
-    NEW_INSTRUCTIONS_MAX_SIZE, ORDER_BASE_AMOUNT_BITS, ORDER_BOOK_MERKLE_LEVELS,
+    MARKET_TYPE_BINARY_OPTIONS, NB_ACCOUNTS_PER_TX, NB_ASSETS_PER_TX,
+    NB_CLOID_UNIQUENESS_CHECK_PER_TX, NEW_INSTRUCTIONS_MAX_SIZE, ORDER_BASE_AMOUNT_BITS,
+    ORDER_BOOK_MERKLE_LEVELS, ORDER_PRICE_BITS,
 };
 use crate::types::margined_asset::MarginedAssetTarget;
 use crate::types::market::MarketTarget;
@@ -58,6 +60,7 @@ pub struct TxState {
     pub assets: [AssetTarget; NB_ASSETS_PER_TX], // First slot is mutable, second and third slot is immutable and read-only
     pub margined_asset: [MarginedAssetTarget; NB_ASSETS_PER_TX], // First two slots are mutable, third slot is immutable and read-only
     pub asset_indices: [Target; NB_ASSETS_PER_TX],
+    pub next_public_market_index: Target,
 
     /***********/
     /* Helpers */
@@ -66,6 +69,8 @@ pub struct TxState {
     pub first_asset_margin_index: Target,
     pub is_new_account: [BoolTarget; NB_ACCOUNTS_PER_TX],
     pub positions: [AccountPositionTarget; NB_ACCOUNTS_PER_TX - 1],
+    /// Binary options positions of the accounts in the tx market (matching its public market index)
+    pub binary_options_positions: [BinaryOptionsPositionTarget; NB_ACCOUNTS_PER_TX - 1],
     pub risk_infos: [RiskInfoTarget; NB_ACCOUNTS_PER_TX - 1],
     /// Store used strategies in the tx. For L2_STRATEGY_TRANSFER, 0 is from_strategy and 1 is to_strategy.
     ///  For other tx types, 0 is first account's strategy 1 is second account's strategy and 2 is third account's strategy (if exists).
@@ -112,6 +117,7 @@ impl Default for TxState {
             assets: core::array::from_fn(|_| AssetTarget::default()),
             margined_asset: core::array::from_fn(|_| MarginedAssetTarget::default()),
             asset_indices: core::array::from_fn(|_| Target::default()),
+            next_public_market_index: Target::default(),
             market: MarketTarget::default(),
             market_details: MarketDetailsTarget::default(), // Only relevant for perps
             market_risk_details: MarketRiskDetailsTarget::default(), // Only relevant for perps
@@ -119,6 +125,9 @@ impl Default for TxState {
             order_book_tree_path: core::array::from_fn(|_| OrderBookNodeTarget::default()),
             is_new_account: core::array::from_fn(|_| BoolTarget::default()),
             positions: core::array::from_fn(|_| AccountPositionTarget::default()),
+            binary_options_positions: core::array::from_fn(|_| {
+                BinaryOptionsPositionTarget::default()
+            }),
             risk_infos: core::array::from_fn(|_| RiskInfoTarget::default()),
             strategies: core::array::from_fn(|_| BigIntTarget::default()),
             is_asset_used_as_margin: core::array::from_fn(|_| {
@@ -211,6 +220,29 @@ impl TxState {
         let should_be_false = builder.multi_and(&assertions);
 
         let should_be_false = builder.or(should_be_false, quote_gt_max_quote_amount);
+
+        // Binary options: the price must stay below the settlement cap and the counterparty's
+        // quote base * (settlement_cap - price) is bounded by the same order quote limit
+        let is_binary_options =
+            builder.is_equal_constant(self.market.market_type, MARKET_TYPE_BINARY_OPTIONS);
+        let price_lt_cap = builder.is_lt(price, self.market.settlement_cap, ORDER_PRICE_BITS);
+        let price_gte_cap = builder.and_not(is_binary_options, price_lt_cap);
+        let should_be_false = builder.or(should_be_false, price_gte_cap);
+
+        let complementary_price = builder.sub(self.market.settlement_cap, price);
+        let zero = builder.zero();
+        let bo_price_lt_cap = builder.and(is_binary_options, price_lt_cap);
+        let complementary_price = builder.select(bo_price_lt_cap, complementary_price, zero);
+        let complementary_price_big =
+            builder.target_to_biguint_single_limb_unsafe(complementary_price);
+        let complementary_quote_big = builder.mul_biguint_non_carry(
+            &base_amount_big,
+            &complementary_price_big,
+            BIG_U96_LIMBS,
+        );
+        let complementary_quote_gt_max_quote_amount =
+            builder.is_gt_biguint(&complementary_quote_big, &max_quote_big);
+        let should_be_false = builder.or(should_be_false, complementary_quote_gt_max_quote_amount);
         builder.not(should_be_false)
     }
 }

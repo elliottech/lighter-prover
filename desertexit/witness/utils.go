@@ -82,8 +82,59 @@ func accountMerkleProofFromBytes(proof [][]byte) (res [AccountTreeHeight]p2.Nume
 	return res, nil
 }
 
-func bytesToAccountDeltas(compressedPubdata []byte) (deltas map[int64]*PubdataAccountWitness, err error) {
+func marketMerkleProofFromBytes(proof [][]byte) (res [MarketTreeHeight]p2.NumericalHashOut, err error) {
+	if len(proof) != MarketTreeHeight {
+		return res, fmt.Errorf("invalid market proof size %d", len(proof))
+	}
+
+	for i := 0; i < MarketTreeHeight; i++ {
+		proof, err := p2.HashOutFromLittleEndianBytes(proof[i])
+		if err != nil {
+			return res, fmt.Errorf("failed to parse proof err: %w", err)
+		}
+		res[i] = proof.ToUint64Array()
+	}
+	return res, nil
+}
+
+// nilMarketMerkleProof is the proof of any leaf of an empty market tree
+func nilMarketMerkleProof() [MarketTreeHeight]p2.NumericalHashOut {
+	proof, err := newMarketTree().GetProof(0)
+	if err != nil {
+		panic("failed to get empty market tree proof, err:" + err.Error())
+	}
+	res, err := marketMerkleProofFromBytes(proof)
+	if err != nil {
+		panic(err)
+	}
+	return res
+}
+
+func bytesToDeltas(blobVersion uint16, compressedPubdata []byte) (
+	marketDeltas []*PubdataMarketDeltaWitness, deltas map[int64]*PubdataAccountWitness, err error,
+) {
 	pdd := NewPubdataDecoder(compressedPubdata)
+	marketDeltas = make([]*PubdataMarketDeltaWitness, 0)
+	if blobVersion >= BlobVersionMarketDeltas {
+		marketDeltaCount := pdd.DecompressTarget()
+		for i := uint64(0); i < marketDeltaCount; i++ {
+			limb := pdd.DecompressTarget()
+			pdd.DecompressTarget() // public market index, not part of the market pub data leaf
+			marketDelta := &PubdataMarketDeltaWitness{
+				MarketIndex: int16(limb & ((1 << MarketIndexBits) - 1)), // nolint:gosec
+			}
+			if blobVersion >= BlobVersionBinaryOptions {
+				marketDelta.Status = uint8((limb >> MarketIndexBits) & ((1 << MarketSlotStatusBits) - 1)) // nolint:gosec
+				marketDelta.Price = uint32(limb >> (MarketIndexBits + MarketSlotStatusBits))              // nolint:gosec
+				marketDelta.SettlementCap = uint32(pdd.DecompressTarget())                                // nolint:gosec
+				marketDelta.QuoteExtensionMultiplier = int64(pdd.DecompressTarget())                      // nolint:gosec
+			} else {
+				// v1 packs a 1-bit active flag above the market index, which is the Active status
+				marketDelta.Status = uint8((limb >> MarketIndexBits) & 1) // nolint:gosec
+			}
+			marketDeltas = append(marketDeltas, marketDelta)
+		}
+	}
 	deltas = make(map[int64]*PubdataAccountWitness)
 	lastAccountIndex := int64(0)
 	isFirstIteration := true
@@ -92,7 +143,7 @@ func bytesToAccountDeltas(compressedPubdata []byte) (deltas map[int64]*PubdataAc
 		{
 			diff := pdd.DecompressTarget()
 			if diff == 0 && !isFirstIteration {
-				return deltas, nil
+				return marketDeltas, deltas, nil
 			}
 			accountDelta.AccountIndex = lastAccountIndex + int64(diff) // nolint:gosec
 			isFirstIteration = false
@@ -152,6 +203,20 @@ func bytesToAccountDeltas(compressedPubdata []byte) (deltas map[int64]*PubdataAc
 					accountDelta.Positions[uint8(marketIndex)].LastFundingRatePrefixSum *= -1 // nolint:gosec
 				}
 			}
+
+			binaryOptionsPositionCount := uint64(0)
+			if blobVersion >= BlobVersionBinaryOptions {
+				binaryOptionsPositionCount = pdd.DecompressTarget()
+			}
+			for i := uint64(0); i < binaryOptionsPositionCount; i++ {
+				marketIndex := int16(pdd.DecompressTarget()) // nolint:gosec
+				val := pdd.DecompressTarget()
+				sizeDeltaNeg, sizeDelta := val&1, int64(val>>1) // nolint:gosec
+				if sizeDeltaNeg == 1 {
+					sizeDelta *= -1
+				}
+				accountDelta.BinaryOptionsPositions[marketIndex] = sizeDelta
+			}
 		}
 		{
 			assetCount := pdd.DecompressTarget()
@@ -191,7 +256,7 @@ func bytesToAccountDeltas(compressedPubdata []byte) (deltas map[int64]*PubdataAc
 		lastAccountIndex = accountDelta.AccountIndex
 	}
 
-	return deltas, nil
+	return marketDeltas, deltas, nil
 }
 
 func readInt64WithSignBytes(data []byte, offset int) (val int64) {
@@ -204,13 +269,13 @@ func readInt64WithSignBytes(data []byte, offset int) (val int64) {
 }
 
 func getBlobBytes(blobBytes string) (
-	markPriceBytes, fundingBytes, quoteMultiplierBytes, accountPubDataBytes []byte, err error,
+	blobVersion uint16, markPriceBytes, fundingBytes, quoteMultiplierBytes, deltaPubDataBytes []byte, err error,
 ) {
 	blobData := [BlobBytesSize]byte{}
 	copy(blobData[:], eth.Hex2Bytes(blobBytes))
 
 	if len(blobData) != BlobBytesSize {
-		return nil, nil, nil, nil, fmt.Errorf("invalid blob data size: %d", len(blobData))
+		return 0, nil, nil, nil, nil, fmt.Errorf("invalid blob data size: %d", len(blobData))
 	}
 	pubData := make([]byte, 0, BlobFilledBytesSize)
 	for i := 0; i < BlobBytesSize; i++ {
@@ -218,12 +283,17 @@ func getBlobBytes(blobBytes string) (
 			pubData = append(pubData, blobData[i])
 		}
 	}
-	markPriceBytes = pubData[BlobVersionByteSize+BlobReservedBytesSize : BlobVersionByteSize+BlobReservedBytesSize+BlobMarkPricesByteSize]
-	fundingBytes = pubData[BlobVersionByteSize+BlobReservedBytesSize+BlobMarkPricesByteSize : BlobVersionByteSize+BlobReservedBytesSize+BlobMarkPricesByteSize+BlobFundingsByteSize]                                                           //nolint:lll
-	quoteMultiplierBytes = pubData[BlobVersionByteSize+BlobReservedBytesSize+BlobMarkPricesByteSize+BlobFundingsByteSize : BlobVersionByteSize+BlobReservedBytesSize+BlobMarkPricesByteSize+BlobFundingsByteSize+BlobQuoteMultipliersByteSize] //nolint:lll
-	accountPubDataBytes = pubData[BlobVersionByteSize+BlobReservedBytesSize+BlobMarkPricesByteSize+BlobFundingsByteSize+BlobQuoteMultipliersByteSize:]
+	markPriceOffset := BlobVersionByteSize + BlobReservedBytesSize
+	fundingOffset := markPriceOffset + BlobMarkPricesByteSize
+	quoteMultiplierOffset := fundingOffset + BlobFundingsByteSize
+	deltaOffset := quoteMultiplierOffset + BlobQuoteMultipliersByteSize
+	blobVersion = binary.BigEndian.Uint16(pubData[BlobVersionIndex:])
+	markPriceBytes = pubData[markPriceOffset:fundingOffset]
+	fundingBytes = pubData[fundingOffset:quoteMultiplierOffset]
+	quoteMultiplierBytes = pubData[quoteMultiplierOffset:deltaOffset]
+	deltaPubDataBytes = pubData[deltaOffset:]
 
-	return markPriceBytes, fundingBytes, quoteMultiplierBytes, accountPubDataBytes, nil
+	return blobVersion, markPriceBytes, fundingBytes, quoteMultiplierBytes, deltaPubDataBytes, nil
 }
 
 func initializeAccountPubDataTree(input *BlobDataInput) (SparseMerkleTree, error) {
@@ -268,9 +338,62 @@ func initializeAccountPubDataTree(input *BlobDataInput) (SparseMerkleTree, error
 	return accountPubDataTree, nil
 }
 
+// getBinaryOptionsPositionWitnesses collects the binary options positions of the main account sorted by market
+// slot, each with its account market pub data proof and market pub data proof.
+// Public pools cannot trade binary options, so only the main account carries them.
+func getBinaryOptionsPositionWitnesses(
+	mainAccount *PubdataAccountWitness,
+	marketPubDatas map[int16]*PubdataMarketWitness,
+	marketPubDataTree SparseMerkleTree,
+) [DesertBinaryOptionsPositions]*PubdataBinaryOptionsPositionWitness {
+	marketIndices := make([]int16, 0, len(mainAccount.BinaryOptionsPositions))
+	for marketIndex, size := range mainAccount.BinaryOptionsPositions {
+		if size != 0 {
+			marketIndices = append(marketIndices, marketIndex)
+		}
+	}
+	if len(marketIndices) > DesertBinaryOptionsPositions {
+		panic(fmt.Sprintf("account %d has %d binary options positions, witness carries at most %d",
+			mainAccount.AccountIndex, len(marketIndices), DesertBinaryOptionsPositions))
+	}
+	sort.Slice(marketIndices, func(i, j int) bool { return marketIndices[i] < marketIndices[j] })
+
+	accountMarketPubDataTree := newAccountMarketPubDataTree(mainAccount.BinaryOptionsPositions)
+
+	var witnesses [DesertBinaryOptionsPositions]*PubdataBinaryOptionsPositionWitness
+	for i := range witnesses {
+		witnesses[i] = EmptyPubdataBinaryOptionsPositionWitness()
+	}
+	for i, marketIndex := range marketIndices {
+		witness := witnesses[i]
+		witness.MarketIndex = marketIndex
+		witness.Size = mainAccount.BinaryOptionsPositions[marketIndex]
+		if market, exists := marketPubDatas[marketIndex]; exists {
+			witness.PubdataMarketWitness = *market
+		}
+
+		accountProof, err := accountMarketPubDataTree.GetProof(uint64(marketIndex)) // nolint:gosec
+		if err != nil {
+			panic(fmt.Sprintf("failed to get account market pub data proof for market %d: %v", marketIndex, err))
+		}
+		if witness.AccountMarketPubDataMerkleProof, err = marketMerkleProofFromBytes(accountProof); err != nil {
+			panic(err)
+		}
+		marketProof, err := marketPubDataTree.GetProof(uint64(marketIndex)) // nolint:gosec
+		if err != nil {
+			panic(fmt.Sprintf("failed to get market pub data proof for market %d: %v", marketIndex, err))
+		}
+		if witness.MarketPubDataMerkleProof, err = marketMerkleProofFromBytes(marketProof); err != nil {
+			panic(err)
+		}
+	}
+	return witnesses
+}
+
 func getUsdcBalanceForWitness(
 	accounts [DesertWitnessAccounts]*PubdataAccountWitness,
 	publicMarketDetails [PositionListSize]*PubdataMarketDetailWitness,
+	binaryOptionsPositions [DesertBinaryOptionsPositions]*PubdataBinaryOptionsPositionWitness,
 ) *big.Int {
 	mainAccount := accounts[0]
 
@@ -281,12 +404,16 @@ func getUsdcBalanceForWitness(
 
 	extendedCollateral := MulBig(usdcBalance, USDCToCollateralMultiplierBig)
 	positionsTavComponent := getPositionsTavComponent(mainAccount.Positions, publicMarketDetails)
+	binaryOptionsTavComponent := getBinaryOptionsPositionsTavComponent(binaryOptionsPositions)
 	publicPoolsTavComponent := getPublicPoolsTavComponent(accounts, publicMarketDetails)
 
-	mainAccountTav := AddBig(AddBig(extendedCollateral, positionsTavComponent), publicPoolsTavComponent)
+	mainAccountTav := AddBig(
+		AddBig(AddBig(extendedCollateral, positionsTavComponent), binaryOptionsTavComponent), publicPoolsTavComponent,
+	)
 
 	fmt.Println("Extended Collateral", extendedCollateral)
 	fmt.Println("Positions TAV Component", positionsTavComponent)
+	fmt.Println("Binary Options Positions TAV Component", binaryOptionsTavComponent)
 	fmt.Println("Public Pools TAV Component", publicPoolsTavComponent)
 	fmt.Println("Main Account TAV (extended)", mainAccountTav)
 
@@ -341,6 +468,36 @@ func getPositionsTavComponent(
 	return AddBig(positionNotionalsSumExtended, fundingsSum)
 }
 
+// getBinaryOptionsPositionsTavComponent values binary options positions like settlement does, in extended
+// collateral units: YES positions pay the published price per share, NO positions the settlement cap minus
+// the price. Active markets publish their default price, in settlement markets their settlement price.
+// Expired markets publish no price and cannot hold positions, they contribute nothing.
+func getBinaryOptionsPositionsTavComponent(
+	binaryOptionsPositions [DesertBinaryOptionsPositions]*PubdataBinaryOptionsPositionWitness,
+) *big.Int {
+	payoutsSum := big.NewInt(0)
+	for _, position := range binaryOptionsPositions {
+		if position.Size == 0 || position.Status == ExpiredMarketStatus {
+			continue
+		}
+		if position.Price > position.SettlementCap {
+			panic(fmt.Sprintf("market %d publishes price %d above settlement cap %d",
+				position.MarketIndex, position.Price, position.SettlementCap))
+		}
+
+		payoutPricePerShare := int64(position.Price)
+		if position.Size < 0 {
+			payoutPricePerShare = int64(position.SettlementCap - position.Price)
+		}
+		payout := MulBig(
+			MulBig(big.NewInt(abs(position.Size)), big.NewInt(payoutPricePerShare)),
+			big.NewInt(position.QuoteExtensionMultiplier),
+		)
+		payoutsSum = AddBig(payoutsSum, payout)
+	}
+	return payoutsSum
+}
+
 func getPublicPoolsTavComponent(
 	accounts [DesertWitnessAccounts]*PubdataAccountWitness,
 	publicMarketDetails [PositionListSize]*PubdataMarketDetailWitness,
@@ -379,21 +536,24 @@ func getPublicPoolsTavComponent(
 }
 
 func allPublicMarketDetailsHash(allMarketsInfoBefore [PositionListSize]*PubdataMarketDetailWitness) p2.HashOut {
+	emptyMarket := &PubdataMarketDetailWitness{
+		MarkPrice:            0,
+		FundingRatePrefixSum: 0,
+		QuoteMultiplier:      0,
+	}
 	elements := make([]g.GoldilocksField, 0)
-	for i := 0; i < PositionListSize; i++ {
-		if allMarketsInfoBefore[i] == nil {
-			elements = append(elements, getPublicMarketDetailsHashParameters(&PubdataMarketDetailWitness{
-				MarkPrice:            0,
-				FundingRatePrefixSum: 0,
-				QuoteMultiplier:      0,
-			})...)
-		} else {
-			elements = append(elements, getPublicMarketDetailsHashParameters(&PubdataMarketDetailWitness{
-				MarkPrice:            allMarketsInfoBefore[i].MarkPrice,
-				FundingRatePrefixSum: allMarketsInfoBefore[i].FundingRatePrefixSum,
-				QuoteMultiplier:      allMarketsInfoBefore[i].QuoteMultiplier,
-			})...)
+	for bucketStart := 0; bucketStart < PositionListSize+1; bucketStart += PositionBucketSize {
+		bucketElements := make([]g.GoldilocksField, 0)
+		for j := 0; j < PositionBucketSize; j++ {
+			marketIdx := bucketStart + j
+			marketInfo := emptyMarket
+			if marketIdx < PositionListSize && allMarketsInfoBefore[marketIdx] != nil {
+				marketInfo = allMarketsInfoBefore[marketIdx]
+			}
+			bucketElements = append(bucketElements, getPublicMarketDetailsHashParameters(marketInfo)...)
 		}
+		bucketHash := p2.HashNoPad(bucketElements)
+		elements = append(elements, bucketHash[:]...)
 	}
 	return p2.HashNoPad(elements)
 }

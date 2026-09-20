@@ -162,7 +162,7 @@ fn main() {
         block.created_at,
         pre_exec_witness.new_state_root,
         pre_exec_witness.new_validium_root,
-        block.old_account_delta_tree_root,
+        block.old_delta_root,
         total_signed_count,
         heavy_seed,
     );
@@ -173,15 +173,12 @@ fn main() {
         block.created_at,
         pre_exec_witness.new_state_root,
         pre_exec_witness.new_validium_root,
-        block.old_account_delta_tree_root,
+        block.old_delta_root,
         total_signed_count,
         light_seed,
     );
 
-    let mut heavy_jump = JumpState::initial(
-        pre_exec_witness.new_state_root,
-        block.old_account_delta_tree_root,
-    );
+    let mut heavy_jump = JumpState::initial(pre_exec_witness.new_state_root, block.old_delta_root);
     let mut light_jump = heavy_jump;
     let mut heavy_tx_prove_total = Duration::ZERO;
     let mut light_tx_prove_total = Duration::ZERO;

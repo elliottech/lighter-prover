@@ -25,4 +25,5 @@ pub mod deserializers;
 pub mod inner_circuit;
 pub mod outer_circuit;
 pub mod pubdata_account;
+pub mod pubdata_binary_options_position;
 pub mod pubdata_market;

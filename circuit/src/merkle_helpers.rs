@@ -80,6 +80,16 @@ pub fn market_index_to_merkle_path(
     bits.try_into().unwrap()
 }
 
+pub fn public_market_index_to_merkle_path(
+    builder: &mut Builder,
+    public_market_index: Target,
+) -> [BoolTarget; PUBLIC_MARKET_INDEX_MERKLE_LEVELS] {
+    let bits = builder.split_le(public_market_index, PUBLIC_MARKET_INDEX_MERKLE_LEVELS);
+
+    assert!(bits.len() == PUBLIC_MARKET_INDEX_MERKLE_LEVELS);
+    bits.try_into().unwrap()
+}
+
 #[track_caller]
 pub fn verify_merkle_proof<const L: usize>(
     builder: &mut Builder,

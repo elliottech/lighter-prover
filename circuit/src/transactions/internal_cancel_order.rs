@@ -11,15 +11,12 @@ use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::comparison::CircuitBuilderSubtractiveComparison;
 use crate::matching_engine::{
     cancel_child_orders, decrement_locked_balance_for_order, decrement_order_count_in_place,
+    release_closed_market_slot_if_drained,
 };
 use crate::tx_interface::{Apply, Verify};
 use crate::types::account_order::{AccountOrderTarget, select_account_order_target};
 use crate::types::config::Builder;
 use crate::types::constants::*;
-use crate::types::market::{MarketTarget, select_market};
-use crate::types::market_details::{
-    MarketDetailsTarget, MarketRiskDetailsTarget, select_market_details, select_market_risk_details,
-};
 use crate::types::order::{
     OrderTarget, get_market_index_and_order_nonce_from_order_index, select_order_target,
 };
@@ -179,11 +176,15 @@ impl Verify for InternalCancelOrderTxTarget {
             );
             let market_expired_status = builder.constant_from_u8(MARKET_STATUS_EXPIRED);
             let is_market_expired = builder.is_equal(tx_state.market.status, market_expired_status);
+            let market_in_settlement_status = builder.constant_from_u8(MARKET_STATUS_IN_SETTLEMENT);
+            let is_market_in_settlement =
+                builder.is_equal(tx_state.market.status, market_in_settlement_status);
 
             let is_valid_execute_transaction =
-                builder.multi_or(&[is_order_expired, is_market_expired]);
+                builder.or(is_order_expired, is_market_in_settlement);
             let is_enabled_and_execute_transaction =
                 builder.and(is_enabled, is_execute_transaction);
+            builder.conditional_assert_false(is_enabled_and_execute_transaction, is_market_expired);
             builder.conditional_assert_true(
                 is_enabled_and_execute_transaction,
                 is_valid_execute_transaction,
@@ -355,44 +356,7 @@ impl Apply for InternalCancelOrderTxTarget {
             &mut tx_state.account_assets[OWNER_ACCOUNT_ID],
         );
 
-        // Handle market expiration
-        let market_expired_status = builder.constant_from_u8(MARKET_STATUS_EXPIRED);
-        let is_market_expired = builder.is_equal(tx_state.market.status, market_expired_status);
-        let is_market_has_no_order = builder.is_zero(tx_state.market.total_order_count);
-        let is_market_has_no_position = builder.is_zero(tx_state.market_details.open_interest);
-        let is_expired_market_is_empty_and_enabled = builder.multi_and(&[
-            update_state,
-            is_market_expired,
-            is_market_has_no_order,
-            is_market_has_no_position,
-        ]);
-        let empty_market_details = MarketDetailsTarget::empty(builder);
-        let empty_order_book_tree_root = builder.constant_hash(EMPTY_ORDER_BOOK_TREE_ROOT);
-        let empty_market = MarketTarget::empty(
-            builder,
-            tx_state.market.market_index,
-            tx_state.market.perps_market_index,
-            empty_order_book_tree_root,
-        );
-        let empty_market_risk_details = MarketRiskDetailsTarget::empty(builder);
-        tx_state.market_details = select_market_details(
-            builder,
-            is_expired_market_is_empty_and_enabled,
-            &empty_market_details,
-            &tx_state.market_details,
-        );
-        tx_state.market = select_market(
-            builder,
-            is_expired_market_is_empty_and_enabled,
-            &empty_market,
-            &tx_state.market,
-        );
-        tx_state.market_risk_details = select_market_risk_details(
-            builder,
-            is_expired_market_is_empty_and_enabled,
-            &empty_market_risk_details,
-            &tx_state.market_risk_details,
-        );
+        release_closed_market_slot_if_drained(builder, update_state, tx_state);
 
         // Trigger cancel child orders if instruction type != cancel all kind
         let cancel_child_orders_flag = builder.and_not(update_state, self.is_cancel_all_kind);

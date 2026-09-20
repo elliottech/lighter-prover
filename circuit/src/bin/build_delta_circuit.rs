@@ -20,6 +20,9 @@ struct Args {
     account_count: usize,
 
     #[arg(long)]
+    market_count: usize,
+
+    #[arg(long)]
     path: Option<std::path::PathBuf>,
 }
 
@@ -30,7 +33,7 @@ fn main() -> Result<()> {
 
     assert!(args.account_count > 0, "Account count is zero");
 
-    let delta_circuit = DeltaCircuit::define(CIRCUIT_CONFIG, args.account_count);
+    let delta_circuit = DeltaCircuit::define(CIRCUIT_CONFIG, args.account_count, args.market_count);
     let delta_circuit_data = delta_circuit.builder.build::<C>();
     info!("DeltaCircuit defined!");
 

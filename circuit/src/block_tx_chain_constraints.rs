@@ -78,7 +78,7 @@ pub trait Circuit<C: GenericConfig<D, F = F>, F: RichField + Extendable<D>, cons
         created_at: i64,
         new_state_root: HashOut<F>,
         new_validium_root: HashOut<F>,
-        new_account_delta_tree_root: HashOut<F>,
+        new_delta_root: HashOut<F>,
         signature_count: u64,
         signature_digest_seed: [F; P3_DIGEST_STATE_WIDTH],
     ) -> ProofWithPublicInputs<F, C, D>;
@@ -258,7 +258,7 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
             &mut circuit.builder,
             is_first_recursion,
             block.new_state_root,
-            block.new_account_delta_tree_root,
+            block.new_delta_root,
         );
         for i in 0..4 {
             circuit.builder.conditional_assert_eq(
@@ -268,8 +268,8 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
             );
             circuit.builder.conditional_assert_eq(
                 is_first_recursion,
-                block.initial_account_delta_tree_root.elements[i],
-                block.new_account_delta_tree_root.elements[i],
+                block.initial_delta_root.elements[i],
+                block.new_delta_root.elements[i],
             );
         }
 
@@ -404,7 +404,7 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
 
             new_validium_root: current_tx.new_validium_root,
             new_state_root: current_tx.new_state_root,
-            new_account_delta_tree_root: current_tx.new_account_delta_tree_root,
+            new_delta_root: current_tx.new_delta_root,
 
             change_pub_key_message,
             transfer_message,
@@ -425,7 +425,7 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
             jump: current_tx.new_jump,
 
             initial_state_root: block.initial_state_root,
-            initial_account_delta_tree_root: block.initial_account_delta_tree_root,
+            initial_delta_root: block.initial_delta_root,
 
             new_public_market_details_hash: current_tx.public_market_details_hash_after,
 
@@ -525,7 +525,7 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
         created_at: i64,
         new_state_root: HashOut<F>,
         new_validium_root: HashOut<F>,
-        old_account_delta_tree_root: HashOut<F>,
+        old_delta_root: HashOut<F>,
         signature_count: u64,
         signature_digest_seed: [F; P3_DIGEST_STATE_WIDTH],
     ) -> ProofWithPublicInputs<F, C, D> {
@@ -534,14 +534,10 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
         nonzero_public_inputs.insert(0, F::from_canonical_u64(block_number));
         nonzero_public_inputs.insert(1, F::from_canonical_u64(created_at as u64));
 
-        for (i, elem) in [
-            new_validium_root,
-            new_state_root,
-            old_account_delta_tree_root,
-        ]
-        .iter()
-        .flat_map(|&hash| hash.elements)
-        .enumerate()
+        for (i, elem) in [new_validium_root, new_state_root, old_delta_root]
+            .iter()
+            .flat_map(|&hash| hash.elements)
+            .enumerate()
         {
             nonzero_public_inputs.insert(2 + i, elem);
         }
@@ -555,7 +551,7 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
             + ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE
             + 1
             + MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX;
-        let initial_jump = JumpState::initial(new_state_root, old_account_delta_tree_root).to_vec();
+        let initial_jump = JumpState::initial(new_state_root, old_delta_root).to_vec();
         for (i, elem) in initial_jump.iter().enumerate() {
             nonzero_public_inputs.insert(jump_index + i, *elem);
         }
@@ -564,7 +560,7 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
         for (i, elem) in new_state_root
             .elements
             .iter()
-            .chain(old_account_delta_tree_root.elements.iter())
+            .chain(old_delta_root.elements.iter())
             .enumerate()
         {
             nonzero_public_inputs.insert(initial_state_root_index + i, *elem);

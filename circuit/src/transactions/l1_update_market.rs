@@ -9,15 +9,13 @@ use plonky2::iop::target::{BoolTarget, Target};
 use plonky2::iop::witness::Witness;
 use serde::Deserialize;
 
-use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::comparison::CircuitBuilderSubtractiveComparison;
+use crate::matching_engine::release_closed_market_slot_if_drained;
 use crate::tx_interface::{Apply, PriorityOperationsPubData, Verify};
 use crate::types::config::{Builder, F};
 use crate::types::constants::*;
-use crate::types::market::{MarketTarget, ensure_spot_market_index, select_market};
-use crate::types::market_details::{
-    MarketDetailsTarget, MarketRiskDetailsTarget, select_market_details, select_market_risk_details,
-};
+use crate::types::market::{MarketTarget, ensure_spot_market_index};
+use crate::types::market_details::{MarketDetailsTarget, MarketRiskDetailsTarget};
 use crate::types::target_pub_data_helper::*;
 use crate::types::tx_state::TxState;
 use crate::types::tx_type::TxTypeTargets;
@@ -130,7 +128,8 @@ impl L1UpdateMarketTxTarget {
     }
 
     fn register_range_checks(&mut self, builder: &mut Builder) {
-        // Market type is asserted equal to tx_state
+        // Market type is asserted equal to tx_state; only perps and spot markets are updated from L1
+        builder.assert_bool(BoolTarget::new_unsafe(self.market_type));
 
         builder.assert_bool(BoolTarget::new_unsafe(self.status));
 
@@ -247,10 +246,10 @@ impl Verify for L1UpdateMarketTxTarget {
         builder.conditional_assert_lte(self.is_enabled, self.taker_fee, fee_tick, 24);
         builder.conditional_assert_lte(self.is_enabled, self.maker_fee, fee_tick, 24);
 
-        // Do not allow updating an already expired market
-        let expired_status = builder.constant_from_u8(MARKET_STATUS_EXPIRED);
-        let order_book_expired = builder.is_equal(tx_state.market.status, expired_status);
-        self.success = builder.and_not(self.success, order_book_expired);
+        // Only an active market can be updated
+        let active_status = builder.constant_from_u8(MARKET_STATUS_ACTIVE);
+        let order_book_active = builder.is_equal(tx_state.market.status, active_status);
+        self.success = builder.and(self.success, order_book_active);
 
         // Verify that the market type in the tx matches the market type in the state
         builder.conditional_assert_eq(self.success, self.market_type, tx_state.market.market_type);
@@ -259,9 +258,19 @@ impl Verify for L1UpdateMarketTxTarget {
 
 impl Apply for L1UpdateMarketTxTarget {
     fn apply(&mut self, builder: &mut Builder, tx_state: &mut TxState) -> BoolTarget {
+        // Expiring a perps or spot market moves its order book into settlement, the slot is
+        // released once every order is cancelled and every position exited
+        let market_status_expired = builder.constant_from_u8(MARKET_STATUS_EXPIRED);
+        let is_market_expired = builder.is_equal(self.status, market_status_expired);
+        let market_status_in_settlement = builder.constant_from_u8(MARKET_STATUS_IN_SETTLEMENT);
+        let order_book_status =
+            builder.select(is_market_expired, market_status_in_settlement, self.status);
+        let insurance_fund_operator_account_index =
+            builder.constant_u64(INSURANCE_FUND_OPERATOR_ACCOUNT_INDEX as u64);
+
         // Update market and market details
         tx_state.market = MarketTarget {
-            status: builder.select(self.success, self.status, tx_state.market.status),
+            status: builder.select(self.success, order_book_status, tx_state.market.status),
             taker_fee: builder.select(self.success, self.taker_fee, tx_state.market.taker_fee),
             maker_fee: builder.select(self.success, self.maker_fee, tx_state.market.maker_fee),
             liquidation_fee: builder.select(
@@ -283,6 +292,11 @@ impl Apply for L1UpdateMarketTxTarget {
                 self.success,
                 self.order_quote_limit,
                 tx_state.market.order_quote_limit,
+            ),
+            market_operator_account_index: builder.select(
+                self.success,
+                insurance_fund_operator_account_index,
+                tx_state.market.market_operator_account_index,
             ),
             ..tx_state.market.clone()
         };
@@ -340,60 +354,13 @@ impl Apply for L1UpdateMarketTxTarget {
             ),
             ..tx_state.market_details.clone()
         };
-
-        // Clear market if expired and empty
-        let market_status_expired = builder.constant_from_u8(MARKET_STATUS_EXPIRED);
-        let is_market_expired = builder.is_equal(self.status, market_status_expired);
-        let no_open_order = builder.is_zero(tx_state.market.total_order_count);
-        let no_open_position = builder.is_zero(tx_state.market_details.open_interest);
-        let clear_perps_market_flag = builder.multi_and(&[
-            self.success,
-            is_market_expired,
-            no_open_order,
-            no_open_position,
-            is_perps_market_type,
-        ]);
-        let is_spot_market_type = builder.not(is_perps_market_type);
-        let clear_spot_market_flag = builder.multi_and(&[
-            self.success,
-            is_market_expired,
-            no_open_order,
-            is_spot_market_type,
-        ]);
-
-        let clear_market_details_flag = clear_perps_market_flag;
-        let clear_order_book_flag = builder.or(clear_perps_market_flag, clear_spot_market_flag);
-
-        let empty_order_book_root = builder.constant_hash(EMPTY_ORDER_BOOK_TREE_ROOT);
-        let empty_market = MarketTarget::empty(
-            builder,
-            tx_state.market.market_index,
-            tx_state.market.perps_market_index,
-            empty_order_book_root,
-        );
-        tx_state.market = select_market(
-            builder,
-            clear_order_book_flag,
-            &empty_market,
-            &tx_state.market,
+        tx_state.market.open_interest_limit = builder.select(
+            update_market_details_flag,
+            self.open_interest_limit,
+            tx_state.market.open_interest_limit,
         );
 
-        // Clear market details if expired and empty
-        let empty_market_detail = MarketDetailsTarget::empty(builder);
-        tx_state.market_details = select_market_details(
-            builder,
-            clear_market_details_flag,
-            &empty_market_detail,
-            &tx_state.market_details,
-        );
-
-        let empty_market_risk_detail = MarketRiskDetailsTarget::empty(builder);
-        tx_state.market_risk_details = select_market_risk_details(
-            builder,
-            clear_market_details_flag,
-            &empty_market_risk_detail,
-            &tx_state.market_risk_details,
-        );
+        release_closed_market_slot_if_drained(builder, self.success, tx_state);
 
         self.success
     }

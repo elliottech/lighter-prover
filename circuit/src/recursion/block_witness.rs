@@ -11,7 +11,9 @@ use crate::types::config::Builder;
 use crate::types::constants::{
     KECCAK_HASH_OUT_BYTE_SIZE, ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE, POSITION_LIST_SIZE,
 };
-use crate::types::market_details::{PublicMarketDetailsTarget, connect_public_market_details};
+use crate::types::market_details::{
+    PublicMarketDetails, PublicMarketDetailsTarget, connect_public_market_details,
+};
 use crate::uint::u8::{CircuitBuilderU8, U8Target};
 use crate::uint::u32::gadgets::arithmetic_u32::U32Target;
 
@@ -25,8 +27,8 @@ pub struct BlockWitnessTarget {
     pub new_validium_root: HashOutTarget,
     pub new_state_root: HashOutTarget,
 
-    pub old_account_delta_tree_root: HashOutTarget,
-    pub new_account_delta_tree_root: HashOutTarget,
+    pub old_delta_root: HashOutTarget,
+    pub new_delta_root: HashOutTarget,
 
     pub on_chain_operations_count: Target,
     pub on_chain_operations_pub_data: Vec<[U8Target; ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE]>,
@@ -50,8 +52,8 @@ impl BlockWitnessTarget {
             old_state_root: builder.add_virtual_hash_public_input(),
             new_validium_root: builder.add_virtual_hash_public_input(),
             new_state_root: builder.add_virtual_hash_public_input(),
-            old_account_delta_tree_root: builder.add_virtual_hash_public_input(),
-            new_account_delta_tree_root: builder.add_virtual_hash_public_input(),
+            old_delta_root: builder.add_virtual_hash_public_input(),
+            new_delta_root: builder.add_virtual_hash_public_input(),
             new_public_market_details: {
                 for market_details in new_public_market_details.iter() {
                     market_details.register_public_input(builder);
@@ -83,8 +85,8 @@ impl BlockWitnessTarget {
         builder.register_public_hashout(self.old_state_root);
         builder.register_public_hashout(self.new_validium_root);
         builder.register_public_hashout(self.new_state_root);
-        builder.register_public_hashout(self.old_account_delta_tree_root);
-        builder.register_public_hashout(self.new_account_delta_tree_root);
+        builder.register_public_hashout(self.old_delta_root);
+        builder.register_public_hashout(self.new_delta_root);
 
         for market_details in self.new_public_market_details.iter() {
             market_details.register_public_input(builder);
@@ -116,8 +118,8 @@ impl BlockWitnessTarget {
     ) -> (Self, usize) {
         let new_public_market_details_index = 22;
 
-        let on_chain_operations_count_index =
-            new_public_market_details_index + POSITION_LIST_SIZE * 5;
+        let on_chain_operations_count_index = new_public_market_details_index
+            + POSITION_LIST_SIZE * PublicMarketDetails::PUBLIC_INPUTS_SIZE;
         let on_chain_operations_pub_data_index = on_chain_operations_count_index + 1;
 
         let priority_operations_count_index =
@@ -148,16 +150,16 @@ impl BlockWitnessTarget {
                 new_state_root: HashOutTarget {
                     elements: [pis[10], pis[11], pis[12], pis[13]],
                 },
-                old_account_delta_tree_root: HashOutTarget {
+                old_delta_root: HashOutTarget {
                     elements: [pis[14], pis[15], pis[16], pis[17]],
                 },
-                new_account_delta_tree_root: HashOutTarget {
+                new_delta_root: HashOutTarget {
                     elements: [pis[18], pis[19], pis[20], pis[21]],
                 },
 
                 new_public_market_details: pis
                     [new_public_market_details_index..on_chain_operations_count_index]
-                    .chunks(5)
+                    .chunks(PublicMarketDetails::PUBLIC_INPUTS_SIZE)
                     .map(|chunk| PublicMarketDetailsTarget {
                         funding_rate_prefix_sum: BigIntTarget {
                             sign: SignTarget::new_unsafe(chunk[0]),
@@ -200,14 +202,8 @@ impl BlockWitnessTarget {
         builder.connect_hashes(self.old_state_root, other.old_state_root);
         builder.connect_hashes(self.new_validium_root, other.new_validium_root);
         builder.connect_hashes(self.new_state_root, other.new_state_root);
-        builder.connect_hashes(
-            self.old_account_delta_tree_root,
-            other.old_account_delta_tree_root,
-        );
-        builder.connect_hashes(
-            self.new_account_delta_tree_root,
-            other.new_account_delta_tree_root,
-        );
+        builder.connect_hashes(self.old_delta_root, other.old_delta_root);
+        builder.connect_hashes(self.new_delta_root, other.new_delta_root);
 
         builder.connect(
             self.on_chain_operations_count,

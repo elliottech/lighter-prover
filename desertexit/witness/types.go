@@ -36,7 +36,8 @@ const (
 
 	NilAccountType = MasterAccount
 
-	DesertWitnessAccounts                   = 17 // 1 main account + 16 public pool shares
+	DesertWitnessAccounts                   = 17   // 1 main account + 16 public pool shares
+	DesertBinaryOptionsPositions            = 1024 // protocol cap on binary options positions per account
 	TreasuryAccountIndex                    = int64(0)
 	InsuranceFundOperatorAccountIndex       = int64(1)
 	AccountTreeHeight                       = 48
@@ -48,6 +49,19 @@ const (
 	NilAccountIndex                         = MaxAccountIndex + 1
 	PositionBucketSize                      = 16
 
+	MarketTreeHeight            = 12
+	MarketIndexBits             = 12
+	MarketSlotStatusBits        = 2
+	MarketTypeBinaryOptions     = 2
+	ExpiredMarketStatus         = uint8(0)
+	ActiveMarketStatus          = uint8(1)
+	InSettlementMarketStatus    = uint8(2)
+	MinBinaryOptionsMarketIndex = int16(1000)
+	MaxBinaryOptionsMarketIndex = int16(2000)
+
+	BlobVersionMarketDeltas      = uint16(1) // market deltas: slot, active flag, public market index
+	BlobVersionBinaryOptions     = uint16(2) // slot status, price, cap, QEM in market deltas; BO position deltas
+	BlobVersionIndex             = 0
 	BlobVersionByteSize          = int64(2)
 	BlobReservedBytesSize        = int64(32)
 	BlobFilledBytesSize          = 4096 * 31
@@ -59,7 +73,7 @@ const (
 	BlobMarkPricesByteSize       = PositionListSize * MarkPriceByteSize
 	BlobFundingsByteSize         = PositionListSize * FundingByteSize
 	BlobMarketsByteSize          = BlobFundingsByteSize + BlobMarkPricesByteSize + BlobQuoteMultipliersByteSize
-	BlobAccountsByteSize         = int(BlobFilledBytesSize - BlobMarketsByteSize - BlobReservedBytesSize - BlobVersionByteSize)
+	BlobDeltasByteSize           = int(BlobFilledBytesSize - BlobMarketsByteSize - BlobReservedBytesSize - BlobVersionByteSize)
 )
 
 var (
@@ -77,6 +91,11 @@ type DesertWitness struct {
 	AccountPubDataMerkleProofs [DesertWitnessAccounts][AccountTreeHeight]p2.NumericalHashOut `json:"mpapd"`
 
 	AllPublicMarketDetails [PositionListSize]*PubdataMarketDetailWitness `json:"pmda"`
+	MarketPubDataTreeRoot  p2.HashOut                                    `json:"mpdtr"`
+
+	// Binary options positions of the main account sorted by market slot, each proven against the account's
+	// market pub data root and the market pub data tree root
+	BinaryOptionsPositions [DesertBinaryOptionsPositions]*PubdataBinaryOptionsPositionWitness `json:"bop"`
 
 	ValidiumRoot p2.HashOut `json:"vr"`
 	StateRoot    p2.HashOut `json:"sr"`
@@ -90,6 +109,34 @@ type PubdataAccountWitness struct {
 	Positions          map[uint8]*PubdataAccountPositionWitness `json:"ap,omitempty"`
 	PublicPoolShares   []*PubdataPublicPoolShareWitness         `json:"pps,omitempty"`
 	PublicPoolInfo     *PubdataPublicPoolInfoWitness            `json:"ppi,omitempty"`
+
+	// Binary options position sizes keyed by market slot, the leaves of the account market pub data tree.
+	// The circuit only needs the root, the main account's positions are carried in DesertWitness.BinaryOptionsPositions.
+	BinaryOptionsPositions map[int16]int64 `json:"-"`
+	MarketPubDataRoot      p2.HashOut      `json:"mpdr"`
+}
+
+// Published binary options market state, the preimage of the market pub data tree leaf
+type PubdataMarketWitness struct {
+	Status                   uint8  `json:"st,omitempty"`
+	Price                    uint32 `json:"p,omitempty"`
+	SettlementCap            uint32 `json:"sc,omitempty"`
+	QuoteExtensionMultiplier int64  `json:"qem,omitempty"`
+}
+
+type PubdataBinaryOptionsPositionWitness struct {
+	MarketIndex int16 `json:"mi"`
+	Size        int64 `json:"s,omitempty"`
+	PubdataMarketWitness
+
+	// Siblings from the leaf up to the root, matching the account pub data proofs
+	AccountMarketPubDataMerkleProof [MarketTreeHeight]p2.NumericalHashOut `json:"mpampd"`
+	MarketPubDataMerkleProof        [MarketTreeHeight]p2.NumericalHashOut `json:"mpmpd"`
+}
+
+type PubdataMarketDeltaWitness struct {
+	MarketIndex int16
+	PubdataMarketWitness
 }
 
 type PubdataAccountPositionWitness struct {
@@ -122,5 +169,21 @@ func EmptyPubdataAccountWitness(accountIndex int64) *PubdataAccountWitness {
 		Positions:          make(map[uint8]*PubdataAccountPositionWitness),
 		PublicPoolShares:   make([]*PubdataPublicPoolShareWitness, 0),
 		PublicPoolInfo:     &PubdataPublicPoolInfoWitness{},
+
+		BinaryOptionsPositions: make(map[int16]int64),
+		MarketPubDataRoot:      emptyMarketTreeRoot(),
 	}
+}
+
+func EmptyPubdataBinaryOptionsPositionWitness() *PubdataBinaryOptionsPositionWitness {
+	proof := nilMarketMerkleProof()
+	return &PubdataBinaryOptionsPositionWitness{
+		MarketIndex:                     MinBinaryOptionsMarketIndex,
+		AccountMarketPubDataMerkleProof: proof,
+		MarketPubDataMerkleProof:        proof,
+	}
+}
+
+func IsBinaryOptionsMarketSlot(marketIndex int16) bool {
+	return marketIndex >= MinBinaryOptionsMarketIndex && marketIndex <= MaxBinaryOptionsMarketIndex
 }

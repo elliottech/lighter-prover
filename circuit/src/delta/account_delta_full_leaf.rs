@@ -15,13 +15,14 @@ use serde::Deserialize;
 use crate::bigint::bigint::{BigIntTarget, CircuitBuilderBigInt, WitnessBigInt};
 use crate::bigint::biguint::{BigUintTarget, CircuitBuilderBiguint, WitnessBigUint};
 use crate::circuit_logger::CircuitBuilderLogging;
-use crate::deserializers;
+use crate::deserializers::{self, MarketDataDeltas};
 use crate::eddsa::gadgets::curve::PartialWitnessCurve;
 use crate::hash_utils::CircuitBuilderHashUtils;
 use crate::poseidon2::Poseidon2Hash;
 use crate::types::account_delta::AccountDeltaTarget;
-use crate::types::account_delta::position_delta::{
-    PositionDelta, PositionDeltaTarget, PositionDeltaTargetWitness,
+use crate::types::account_delta::market_data_delta::{
+    BinaryOptionsDeltaTarget, BinaryOptionsDeltaTargetWitness, MarketDataDeltaTarget,
+    MarketDataDeltaTargetWitness,
 };
 use crate::types::account_delta::public_pool_delta::{
     PublicPoolInfoDelta, PublicPoolInfoDeltaTarget, PublicPoolInfoDeltaWitness,
@@ -29,12 +30,14 @@ use crate::types::account_delta::public_pool_delta::{
 };
 use crate::types::config::{BIG_U96_LIMBS, BIG_U160_LIMBS, Builder};
 use crate::types::constants::{
-    ASSET_LIST_SIZE, ASSET_LIST_SIZE_BITS, NIL_ACCOUNT_INDEX, NIL_MASTER_ACCOUNT_INDEX,
-    POSITION_LIST_SIZE, POSITION_LIST_SIZE_BITS, SHARES_DELTA_LIST_SIZE,
+    ASSET_LIST_SIZE, ASSET_LIST_SIZE_BITS, BINARY_OPTIONS_MARKET_SLOT_COUNT,
+    EMPTY_DELTA_TREE_HASHES, MARKET_MERKLE_LEVELS, MAX_BINARY_OPTIONS_MARKET_INDEX,
+    MIN_BINARY_OPTIONS_MARKET_INDEX, NIL_ACCOUNT_INDEX, NIL_MASTER_ACCOUNT_INDEX,
+    POSITION_LIST_SIZE, SHARES_DELTA_LIST_SIZE,
 };
 
-/// Similar to AccountDelta, but comes with all positions instead of one position and
-/// a position tree root.
+/// Similar to AccountDelta, but comes with all market data deltas (perps positions and binary
+/// options positions) instead of one position and a position tree root.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(bound = "")]
 #[serde(default)]
@@ -50,8 +53,8 @@ pub struct AccountDeltaFullLeaf {
     #[serde(deserialize_with = "deserializers::all_aggregated_asset_deltas")]
     pub aggregated_asset_deltas: [BigInt; ASSET_LIST_SIZE],
     #[serde(rename = "pd")]
-    #[serde(deserialize_with = "deserializers::positions_delta")]
-    pub positions_delta: [PositionDelta; POSITION_LIST_SIZE],
+    #[serde(deserialize_with = "deserializers::market_data_deltas")]
+    pub market_data_deltas: MarketDataDeltas,
     #[serde(rename = "ppsd")]
     #[serde(deserialize_with = "deserializers::public_pool_shares_delta")]
     pub public_pool_shares_delta: [PublicPoolShareDelta; SHARES_DELTA_LIST_SIZE],
@@ -75,7 +78,7 @@ impl Default for AccountDeltaFullLeaf {
             l1_address: BigUint::ZERO,
             account_type: 0,
             aggregated_asset_deltas: array::from_fn(|_| BigInt::ZERO),
-            positions_delta: array::from_fn(|_| PositionDelta::default()),
+            market_data_deltas: MarketDataDeltas::default(),
             public_pool_shares_delta: array::from_fn(|_| PublicPoolShareDelta::default()),
             public_pool_info_delta: PublicPoolInfoDelta::default(),
         }
@@ -88,7 +91,9 @@ pub struct AccountDeltaFullLeafTarget {
     pub l1_address: BigUintTarget,
     pub account_type: Target,
     pub aggregated_asset_deltas: [BigIntTarget; ASSET_LIST_SIZE],
-    pub positions_delta: [PositionDeltaTarget; POSITION_LIST_SIZE],
+    pub perps_deltas: [MarketDataDeltaTarget; POSITION_LIST_SIZE],
+    /// Slot `i` is the binary options market `MIN_BINARY_OPTIONS_MARKET_INDEX + i`.
+    pub binary_options_deltas: [BinaryOptionsDeltaTarget; BINARY_OPTIONS_MARKET_SLOT_COUNT],
     pub public_pool_shares_delta: [PublicPoolShareDeltaTarget; SHARES_DELTA_LIST_SIZE],
     pub public_pool_info_delta: PublicPoolInfoDeltaTarget,
 }
@@ -100,7 +105,8 @@ impl Default for AccountDeltaFullLeafTarget {
             l1_address: BigUintTarget::default(),
             account_type: Target::default(),
             aggregated_asset_deltas: array::from_fn(|_| BigIntTarget::default()),
-            positions_delta: array::from_fn(|_| PositionDeltaTarget::default()),
+            perps_deltas: array::from_fn(|_| MarketDataDeltaTarget::default()),
+            binary_options_deltas: array::from_fn(|_| BinaryOptionsDeltaTarget::default()),
             public_pool_shares_delta: array::from_fn(|_| PublicPoolShareDeltaTarget::default()),
             public_pool_info_delta: PublicPoolInfoDeltaTarget::default(),
         }
@@ -116,7 +122,8 @@ impl AccountDeltaFullLeafTarget {
             aggregated_asset_deltas: array::from_fn(|_| {
                 builder.add_virtual_bigint_target_unsafe(BIG_U96_LIMBS)
             }),
-            positions_delta: array::from_fn(|_| PositionDeltaTarget::new(builder)),
+            perps_deltas: array::from_fn(|_| MarketDataDeltaTarget::new(builder)),
+            binary_options_deltas: array::from_fn(|_| BinaryOptionsDeltaTarget::new(builder)),
             public_pool_shares_delta: array::from_fn(|_| PublicPoolShareDeltaTarget::new(builder)),
             public_pool_info_delta: PublicPoolInfoDeltaTarget::new(builder),
         }
@@ -132,7 +139,7 @@ impl AccountDeltaFullLeafTarget {
             public_pool_info_delta: self.public_pool_info_delta.clone(),
             asset_delta_root: self.get_asset_delta_root(builder),
             position_delta_root: self.get_position_delta_root(builder),
-            positions_delta: PositionDeltaTarget::default(),
+            market_data_delta: MarketDataDeltaTarget::default(),
             partial_hash: HashOutTarget {
                 elements: [Target::default(); NUM_HASH_OUT_ELTS],
             },
@@ -168,23 +175,50 @@ impl AccountDeltaFullLeafTarget {
         level_hashes[0]
     }
 
+    // Root of the MARKET_MERKLE_LEVELS deep account market data delta tree keyed by market slot.
+    // Perps occupy slots `0..=POSITION_LIST_SIZE` (the last one is the nil perps market slot),
+    // binary options occupy `MIN_BINARY_OPTIONS_MARKET_INDEX..=MAX_BINARY_OPTIONS_MARKET_INDEX`,
+    // every other slot is an empty subtree.
     pub fn get_position_delta_root(&self, builder: &mut Builder) -> HashOutTarget {
-        let mut level_hashes = self
-            .positions_delta
+        const _: () = assert!(MAX_BINARY_OPTIONS_MARKET_INDEX < (1 << MARKET_MERKLE_LEVELS));
+        const _: () = assert!(POSITION_LIST_SIZE < MIN_BINARY_OPTIONS_MARKET_INDEX);
+
+        // (slot, node hash) in strictly increasing slot order, slots not listed are empty
+        let mut nodes = self
+            .perps_deltas
             .iter()
-            .map(|p| p.hash(builder))
+            .enumerate()
+            .map(|(slot, p)| (slot, p.hash_perps(builder)))
             .collect::<Vec<_>>();
-        level_hashes.push(builder.zero_hash_out()); // 256th
-        assert!((1 << POSITION_LIST_SIZE_BITS) == level_hashes.len());
-        let mut iter_count = level_hashes.len() / 2;
-        for _ in 0..POSITION_LIST_SIZE_BITS {
-            for j in 0..iter_count {
-                level_hashes[j] =
-                    builder.hash_two_to_one(&level_hashes[2 * j], &level_hashes[2 * j + 1]);
+        nodes.push((POSITION_LIST_SIZE, builder.zero_hash_out())); // nil perps market slot
+        nodes.extend(
+            self.binary_options_deltas
+                .iter()
+                .enumerate()
+                .map(|(i, d)| (MIN_BINARY_OPTIONS_MARKET_INDEX + i, d.hash(builder))),
+        );
+
+        for level in 0..MARKET_MERKLE_LEVELS {
+            let empty = builder.constant_hash(EMPTY_DELTA_TREE_HASHES[level]);
+            let mut parents = Vec::with_capacity(nodes.len() / 2 + 1);
+            let mut i = 0;
+            while i < nodes.len() {
+                let (slot, hash) = nodes[i];
+                i += 1;
+                let (left, right) = if slot % 2 == 1 {
+                    (empty, hash)
+                } else if i < nodes.len() && nodes[i].0 == slot + 1 {
+                    i += 1;
+                    (hash, nodes[i - 1].1)
+                } else {
+                    (hash, empty)
+                };
+                parents.push((slot >> 1, builder.hash_two_to_one(&left, &right)));
             }
-            iter_count /= 2;
+            nodes = parents;
         }
-        level_hashes[0]
+        assert_eq!(nodes.len(), 1);
+        nodes[0].1
     }
 
     pub fn print(&self, builder: &mut Builder, print_assets: bool, tag: &str) {
@@ -227,8 +261,14 @@ impl<T: Witness<F> + PartialWitnessCurve<F>, F: PrimeField64 + Extendable<5> + R
         for i in 0..b.aggregated_asset_deltas.len() {
             self.set_bigint_target(&a.aggregated_asset_deltas[i], &b.aggregated_asset_deltas[i])?;
         }
-        for i in 0..b.positions_delta.len() {
-            self.set_position_delta_target(&a.positions_delta[i], &b.positions_delta[i])?;
+        for i in 0..b.market_data_deltas.perps.len() {
+            self.set_market_data_delta_target(&a.perps_deltas[i], &b.market_data_deltas.perps[i])?;
+        }
+        for i in 0..b.market_data_deltas.binary_options.len() {
+            self.set_binary_options_delta_target(
+                &a.binary_options_deltas[i],
+                &b.market_data_deltas.binary_options[i],
+            )?;
         }
         self.set_public_pool_info_delta(&a.public_pool_info_delta, &b.public_pool_info_delta)?;
         for i in 0..b.public_pool_shares_delta.len() {
@@ -239,5 +279,87 @@ impl<T: Witness<F> + PartialWitnessCurve<F>, F: PrimeField64 + Extendable<5> + R
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use plonky2::field::types::PrimeField64;
+    use plonky2::iop::generator::generate_partial_witness;
+    use plonky2::iop::witness::{PartialWitness, Witness};
+
+    use super::*;
+    use crate::types::config::{C, CIRCUIT_CONFIG};
+    use crate::types::constants::EMPTY_POSITION_DELTA_TREE_ROOT;
+
+    fn position_delta_root(
+        perps: &[(usize, i64, i64)],
+        binary_options: &[(usize, i64)],
+    ) -> [u64; 4] {
+        let mut leaf = AccountDeltaFullLeaf::default();
+        for &(slot, funding_rate_prefix_sum_delta, position_delta) in perps {
+            leaf.market_data_deltas.perps[slot].funding_rate_prefix_sum_delta =
+                BigInt::from(funding_rate_prefix_sum_delta);
+            leaf.market_data_deltas.perps[slot].size_delta = BigInt::from(position_delta);
+        }
+        for &(market_index, size_delta) in binary_options {
+            leaf.market_data_deltas.binary_options
+                [market_index - MIN_BINARY_OPTIONS_MARKET_INDEX]
+                .size_delta = BigInt::from(size_delta);
+        }
+
+        let mut builder = Builder::new(CIRCUIT_CONFIG);
+        let target = AccountDeltaFullLeafTarget::new(&mut builder);
+        let root = target.get_position_delta_root(&mut builder);
+        let mut pw = PartialWitness::new();
+        pw.set_account_delta_leaf_target(&target, &leaf).unwrap();
+        let data = builder.build::<C>();
+        let witness = generate_partial_witness(pw, &data.prover_only, &data.common).unwrap();
+        array::from_fn(|i| witness.get_target(root.elements[i]).to_canonical_u64())
+    }
+
+    /// Expected roots are the 12 level sparse merkle tree roots of the same deltas.
+    #[test]
+    fn position_delta_root_matches_smt() {
+        let empty = EMPTY_POSITION_DELTA_TREE_ROOT
+            .elements
+            .map(|e| e.to_canonical_u64());
+        assert_eq!(position_delta_root(&[], &[]), empty);
+
+        assert_eq!(
+            position_delta_root(&[(0, 123456789, -5), (7, -1, 1 << 40), (254, 0, 77)], &[]),
+            [
+                17268912142426479405,
+                1061622204288693832,
+                4533079881209133628,
+                17351973916199085783
+            ]
+        );
+
+        assert_eq!(
+            position_delta_root(
+                &[],
+                &[(1000, 1), (1001, -2), (1500, 1 << 50), (2000, -(1 << 33))]
+            ),
+            [
+                17055592521599767197,
+                3225394539601077115,
+                12991912779457730388,
+                575801448487009982
+            ]
+        );
+
+        assert_eq!(
+            position_delta_root(
+                &[(3, -(1 << 61), -(1 << 55)), (254, 5, 6)],
+                &[(1000, 9), (1023, -9), (1024, 10), (1999, 11), (2000, 12)],
+            ),
+            [
+                1554745711956725730,
+                7935720410041012139,
+                14764864376122201231,
+                4141581196565293354
+            ]
+        );
     }
 }

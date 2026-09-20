@@ -343,8 +343,8 @@ impl BlockCircuit {
                 pre_exec_witness.new_state_root,
             );
             self.builder.connect_hashes(
-                chain_witness.initial_account_delta_tree_root,
-                self.target.block.old_account_delta_tree_root,
+                chain_witness.initial_delta_root,
+                self.target.block.old_delta_root,
             );
         }
 
@@ -453,8 +453,8 @@ impl BlockCircuit {
         );
         let new_delta_root = self.builder.select_hash(
             is_end_with_heavy,
-            &heavy_tx_chain_witness.new_account_delta_tree_root,
-            &light_tx_chain_witness.new_account_delta_tree_root,
+            &heavy_tx_chain_witness.new_delta_root,
+            &light_tx_chain_witness.new_delta_root,
         );
 
         // The ending chain's exposed roots must be the roots of the block's last active tx
@@ -652,10 +652,10 @@ impl Circuit<C, F, D> for BlockCircuit {
             &heavy_tx_chain_witness.new_state_root,
             &light_tx_chain_witness.new_state_root,
         );
-        let new_account_delta_tree_root = circuit.builder.select_hash(
+        let new_delta_root = circuit.builder.select_hash(
             is_end_with_heavy,
-            &heavy_tx_chain_witness.new_account_delta_tree_root,
-            &light_tx_chain_witness.new_account_delta_tree_root,
+            &heavy_tx_chain_witness.new_delta_root,
+            &light_tx_chain_witness.new_delta_root,
         );
         let new_public_market_details_hash = circuit.builder.select_hash(
             is_end_with_heavy,
@@ -681,8 +681,8 @@ impl Circuit<C, F, D> for BlockCircuit {
             new_validium_root,
             new_state_root,
 
-            old_account_delta_tree_root: circuit.target.block.old_account_delta_tree_root,
-            new_account_delta_tree_root,
+            old_delta_root: circuit.target.block.old_delta_root,
+            new_delta_root,
 
             on_chain_operations_count: heavy_tx_chain_witness.on_chain_operations_count,
             on_chain_operations_pub_data: heavy_tx_chain_witness.on_chain_operations_pub_data,
@@ -739,15 +739,9 @@ impl Circuit<C, F, D> for BlockCircuit {
         )?;
         pw.set_hash_target(target.block.new_state_root, block_witness.new_state_root)?;
 
-        pw.set_hash_target(
-            target.block.new_account_delta_tree_root,
-            block_witness.new_account_delta_tree_root,
-        )?;
+        pw.set_hash_target(target.block.new_delta_root, block_witness.new_delta_root)?;
 
-        pw.set_hash_target(
-            target.block.old_account_delta_tree_root,
-            block_witness.old_account_delta_tree_root,
-        )?;
+        pw.set_hash_target(target.block.old_delta_root, block_witness.old_delta_root)?;
 
         pw.set_target(
             target.block.priority_operations_count,

@@ -171,6 +171,7 @@ impl AccountTarget {
             );
             pub_data_elements.push(self.account_type);
 
+            pub_data_elements.extend_from_slice(&self.market_pub_data_root.elements);
             pub_data_elements.extend_from_slice(&self.aggregated_balances_root.elements);
         }
 
@@ -215,6 +216,7 @@ impl AccountTarget {
             [
                 &self.api_key_root,
                 &self.account_orders_root,
+                &self.market_data_root,
                 &self.asset_root,
             ]
             .iter()
@@ -319,6 +321,7 @@ mod tests {
     use crate::types::config::{C, CIRCUIT_CONFIG, F};
     use crate::types::constants::{
         EMPTY_ACCOUNT_ORDERS_TREE_ROOT, EMPTY_API_KEY_TREE_ROOT, EMPTY_ASSET_TREE_ROOT,
+        EMPTY_MARKET_DATA_TREE_ROOT,
     };
 
     #[ignore]
@@ -391,6 +394,8 @@ mod tests {
                 account_index: 234234324,
                 api_key_root: EMPTY_API_KEY_TREE_ROOT,
                 account_orders_root: EMPTY_ACCOUNT_ORDERS_TREE_ROOT,
+                market_data_root: EMPTY_MARKET_DATA_TREE_ROOT,
+                market_pub_data_root: EMPTY_MARKET_DATA_TREE_ROOT,
                 asset_root: EMPTY_ASSET_TREE_ROOT,
                 aggregated_balances_root: EMPTY_ASSET_TREE_ROOT,
                 ..Account::<F>::default()

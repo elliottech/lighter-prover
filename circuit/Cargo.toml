@@ -51,7 +51,7 @@ p3-field = "0.6.3"
 p3-goldilocks = "0.6.3"
 
 [dev-dependencies]
-flate2 = "1.0"
+zstd = "0.13"
 criterion = { version = "0.5.1", default-features = false }
 num_cpus = { version = "1.14.0", default-features = false }
 rand = { workspace = true, features = [

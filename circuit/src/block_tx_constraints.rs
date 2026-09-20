@@ -91,7 +91,7 @@ pub struct BlockTxTarget {
     // /*************************/
     // /*       PUB DATA        */
     // /*************************/
-    pub new_account_delta_tree_root: HashOutTarget,
+    pub new_delta_root: HashOutTarget,
     pub priority_operations_count: Target,
     pub priority_operations_pub_data: [U8Target; MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX],
     pub on_chain_operations_count: Target,
@@ -135,7 +135,7 @@ impl Default for BlockTxTarget {
             transfer_message: TransferMessageTarget::default(),
             approve_integrator_message: ApproveIntegratorMessageTarget::default(),
 
-            new_account_delta_tree_root: HashOutTarget {
+            new_delta_root: HashOutTarget {
                 elements: core::array::from_fn(|_| Target::default()),
             },
             priority_operations_count: Target::default(),
@@ -168,13 +168,13 @@ impl Circuit<C, F, D> for BlockTxCircuit {
             priority_operations_count,
             priority_operations_pub_data,
             public_market_details_hash_after,
-            account_delta_tree_root_after,
+            delta_root_after,
             tx_signature_data,
         ) = circuit.define_tx_loop(tx_limit, chain_id, mode);
 
         circuit.define_post_tx_batch(
             chain_id,
-            account_delta_tree_root_after,
+            delta_root_after,
             public_market_details_hash_after,
             on_chain_operations_count,
             &on_chain_operations_pub_data,
@@ -281,7 +281,7 @@ impl BlockTxCircuit {
                 // Comment out the following to avoid "generators weren't run"
                 public_market_details_hash_after: builder.add_virtual_hash(),
 
-                new_account_delta_tree_root: builder.add_virtual_hash(),
+                new_delta_root: builder.add_virtual_hash(),
 
                 new_validium_root: builder.add_virtual_hash(),
                 new_state_root: builder.add_virtual_hash(),
@@ -321,7 +321,7 @@ impl BlockTxCircuit {
 
     fn register_public_inputs(&mut self) {
         self.builder
-            .register_public_hashout(self.target.new_account_delta_tree_root);
+            .register_public_hashout(self.target.new_delta_root);
 
         self.builder
             .register_public_hashout(self.target.new_validium_root);
@@ -423,7 +423,7 @@ impl BlockTxCircuit {
 
         let mut tx_signature_data = Vec::with_capacity(tx_limit);
 
-        let mut current_account_delta_tree_root = self.builder.zero_hash_out();
+        let mut current_delta_root = self.builder.zero_hash_out();
         let mut public_market_details_hash_after = self.builder.zero_hash_out();
 
         let mut jump = self.target.old_jump;
@@ -435,7 +435,7 @@ impl BlockTxCircuit {
                 tx_on_chain_operations_pub_data,
                 on_chain_pub_data_exists,
                 tx_public_market_details_hash_after,
-                account_delta_tree_root_after,
+                delta_root_after,
                 account_pk,
                 tx_hash,
                 signature,
@@ -458,7 +458,7 @@ impl BlockTxCircuit {
                 _ => panic!("unknown tx circuit mode: {mode}"),
             };
 
-            current_account_delta_tree_root = account_delta_tree_root_after;
+            current_delta_root = delta_root_after;
             public_market_details_hash_after = tx_public_market_details_hash_after;
 
             jump = Self::define_jump_step(
@@ -468,8 +468,8 @@ impl BlockTxCircuit {
                 tx.tx_type,
                 tx.old_state_root,
                 tx.new_state_root,
-                tx.old_account_delta_tree_root,
-                account_delta_tree_root_after,
+                tx.old_delta_root,
+                delta_root_after,
             );
 
             if mode == TX_HEAVY {
@@ -503,7 +503,7 @@ impl BlockTxCircuit {
             priority_operations_count,
             priority_operations_pub_data,
             public_market_details_hash_after,
-            current_account_delta_tree_root,
+            current_delta_root,
             tx_signature_data,
         )
     }
@@ -609,7 +609,7 @@ impl BlockTxCircuit {
     fn define_post_tx_batch(
         &mut self,
         chain_id: u32,
-        new_account_delta_tree_root: HashOutTarget,
+        new_delta_root: HashOutTarget,
         public_market_details_hash_after: HashOutTarget,
         on_chain_operations_count: Target,
         on_chain_operations_pub_data: &[U8Target; ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE],
@@ -646,10 +646,8 @@ impl BlockTxCircuit {
             priority_operations_pub_data,
         );
 
-        self.builder.connect_hashes(
-            new_account_delta_tree_root,
-            self.target.new_account_delta_tree_root,
-        );
+        self.builder
+            .connect_hashes(new_delta_root, self.target.new_delta_root);
 
         let last_tx = self
             .target

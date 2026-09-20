@@ -33,6 +33,9 @@ use crate::types::approved_integrator::{
     ApprovedIntegrator, ApprovedIntegratorTarget, ApprovedIntegratorWitness,
 };
 use crate::types::asset::{AssetTarget, is_universal_asset};
+use crate::types::binary_options_position::{
+    BinaryOptionsPositionTarget, select_binary_options_position_target,
+};
 use crate::types::config::{BIG_U96_LIMBS, BIG_U128_LIMBS, BIG_U160_LIMBS, Builder};
 use crate::types::constants::*;
 use crate::types::margined_asset::MarginedAssetTarget;
@@ -113,6 +116,14 @@ where
     #[serde(deserialize_with = "deserializers::hash_out")]
     pub aggregated_balances_root: HashOut<F>,
 
+    #[serde(rename = "mdr", default)]
+    #[serde(deserialize_with = "deserializers::hash_out")]
+    pub market_data_root: HashOut<F>,
+
+    #[serde(rename = "mpdr", default)]
+    #[serde(deserialize_with = "deserializers::hash_out")]
+    pub market_pub_data_root: HashOut<F>,
+
     #[serde(rename = "asr", default)]
     #[serde(deserialize_with = "deserializers::hash_out")]
     pub asset_root: HashOut<F>,
@@ -150,6 +161,8 @@ where
             api_key_root: HashOut::ZERO,
             account_orders_root: HashOut::ZERO,
             aggregated_balances_root: HashOut::ZERO,
+            market_data_root: HashOut::ZERO,
+            market_pub_data_root: HashOut::ZERO,
             asset_root: HashOut::ZERO,
 
             partial_hash: HashOut::ZERO,
@@ -168,6 +181,7 @@ pub struct AccountTarget {
     pub margined_assets: [AccountMarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
     pub aggregated_balances: [BigIntTarget; NB_ASSETS_PER_TX],
     pub positions: [AccountPositionTarget; POSITION_LIST_SIZE],
+    pub binary_options_position: BinaryOptionsPositionTarget,
 
     pub approved_integrators: [ApprovedIntegratorTarget; MAX_APPROVED_INTEGRATORS],
     pub pending_unlocks: [PendingUnlockTarget; MAX_PENDING_UNLOCKS],
@@ -181,6 +195,8 @@ pub struct AccountTarget {
     pub api_key_root: HashOutTarget,
     pub account_orders_root: HashOutTarget,
     pub aggregated_balances_root: HashOutTarget,
+    pub market_data_root: HashOutTarget,
+    pub market_pub_data_root: HashOutTarget,
     pub asset_root: HashOutTarget,
 
     pub partial_hash: HashOutTarget,
@@ -200,6 +216,7 @@ impl Default for AccountTarget {
             aggregated_balances: array::from_fn(|_| BigIntTarget::default()),
 
             positions: array::from_fn(|_| AccountPositionTarget::default()),
+            binary_options_position: BinaryOptionsPositionTarget::default(),
 
             approved_integrators: array::from_fn(|_| ApprovedIntegratorTarget::default()),
             pending_unlocks: array::from_fn(|_| PendingUnlockTarget::default()),
@@ -213,6 +230,8 @@ impl Default for AccountTarget {
             api_key_root: HashOutTarget::from([Target::default(); NUM_HASH_OUT_ELTS]),
             account_orders_root: HashOutTarget::from([Target::default(); NUM_HASH_OUT_ELTS]),
             aggregated_balances_root: HashOutTarget::from([Target::default(); NUM_HASH_OUT_ELTS]),
+            market_data_root: HashOutTarget::from([Target::default(); NUM_HASH_OUT_ELTS]),
+            market_pub_data_root: HashOutTarget::from([Target::default(); NUM_HASH_OUT_ELTS]),
             asset_root: HashOutTarget::from([Target::default(); NUM_HASH_OUT_ELTS]),
 
             partial_hash: HashOutTarget {
@@ -240,6 +259,7 @@ impl AccountTarget {
             }),
 
             positions: array::from_fn(|_| AccountPositionTarget::new(builder)),
+            binary_options_position: BinaryOptionsPositionTarget::new(builder),
 
             approved_integrators: array::from_fn(|_| ApprovedIntegratorTarget::new(builder)),
             pending_unlocks: array::from_fn(|_| PendingUnlockTarget::new(builder)),
@@ -253,6 +273,8 @@ impl AccountTarget {
             api_key_root: builder.add_virtual_hash(),
             account_orders_root: builder.add_virtual_hash(),
             aggregated_balances_root: builder.add_virtual_hash(),
+            market_data_root: builder.add_virtual_hash(),
+            market_pub_data_root: builder.add_virtual_hash(),
             asset_root: builder.add_virtual_hash(),
 
             // Unused for maker and taker accounts.
@@ -275,6 +297,7 @@ impl AccountTarget {
             }),
 
             positions: array::from_fn(|_| AccountPositionTarget::default()), // Unused for fee accounts
+            binary_options_position: BinaryOptionsPositionTarget::default(), // Unused for fee accounts
 
             approved_integrators: array::from_fn(|_| ApprovedIntegratorTarget::new(builder)),
             pending_unlocks: array::from_fn(|_| PendingUnlockTarget::new(builder)),
@@ -288,6 +311,8 @@ impl AccountTarget {
             api_key_root: builder.add_virtual_hash(),
             account_orders_root: builder.add_virtual_hash(),
             aggregated_balances_root: builder.add_virtual_hash(),
+            market_data_root: builder.add_virtual_hash(),
+            market_pub_data_root: builder.add_virtual_hash(),
             asset_root: builder.add_virtual_hash(),
 
             partial_hash: builder.add_virtual_hash(), // Hash of positions, public pool shares, and public pool info
@@ -392,6 +417,27 @@ impl AccountTarget {
             );
         }
         res
+    }
+
+    /// Returns the binary options position of this account in the market `public_market_index`.
+    /// A stored position with any other public market index (nil, or a previous market hosted on
+    /// the same slot) reads as the empty position of that market.
+    pub fn get_binary_options_position(
+        &self,
+        builder: &mut Builder,
+        public_market_index: Target,
+    ) -> BinaryOptionsPositionTarget {
+        let is_same_public_market_index = builder.is_equal(
+            self.binary_options_position.public_market_index,
+            public_market_index,
+        );
+        let fresh_position = BinaryOptionsPositionTarget::empty(builder, public_market_index);
+        select_binary_options_position_target(
+            builder,
+            is_same_public_market_index,
+            &self.binary_options_position,
+            &fresh_position,
+        )
     }
 
     pub fn apply_pool_share_delta(
@@ -974,6 +1020,8 @@ impl<T: Witness<F> + PartialWitnessCurve<F>, F: PrimeField64 + Extendable<5> + R
         self.set_public_pool_info(&a.public_pool_info, &b.public_pool_info)?;
         self.set_hash_target(a.api_key_root, b.api_key_root)?;
         self.set_hash_target(a.account_orders_root, b.account_orders_root)?;
+        self.set_hash_target(a.market_data_root, b.market_data_root)?;
+        self.set_hash_target(a.market_pub_data_root, b.market_pub_data_root)?;
         self.set_hash_target(a.asset_root, b.asset_root)?;
         self.set_hash_target(a.aggregated_balances_root, b.aggregated_balances_root)?;
         for i in 0..b.pending_unlocks.len() {

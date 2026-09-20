@@ -24,7 +24,9 @@ use crate::comparison::CircuitBuilderSubtractiveComparison;
 use crate::hash_utils::CircuitBuilderHashUtils;
 use crate::hints::CircuitBuilderHints;
 use crate::signed::signed_target::{CircuitBuilderSigned, SignedTarget};
-use crate::tx_constraints::compute_validium_and_state_root;
+use crate::tx_constraints::{
+    compute_public_market_index_tree_hash, compute_validium_and_state_root,
+};
 use crate::types::asset::{AssetTarget, AssetTargetWitness, all_assets_hash};
 use crate::types::config::{BIGU16_U64_LIMBS, Builder, C, D, F};
 use crate::types::constants::*;
@@ -109,6 +111,9 @@ pub struct BlockPreExecutionTarget {
     pub old_account_tree_root: HashOutTarget,
     pub old_account_pub_data_tree_root: HashOutTarget,
     pub old_market_tree_root: HashOutTarget,
+    pub old_market_pub_data_tree_root: HashOutTarget,
+    pub old_public_market_index_tree_root: HashOutTarget,
+    pub next_public_market_index_before: Target,
     pub old_state_root: HashOutTarget,
 
     pub all_market_risk_details_after: [MarketRiskDetailsTarget; POSITION_LIST_SIZE], // Public
@@ -218,6 +223,18 @@ impl Circuit<C, F, D> for BlockPreExecutionCircuit {
             block.old_account_pub_data_tree_root,
         )?;
         pw.set_hash_target(target.old_market_tree_root, block.old_market_tree_root)?;
+        pw.set_hash_target(
+            target.old_market_pub_data_tree_root,
+            block.old_market_pub_data_tree_root,
+        )?;
+        pw.set_hash_target(
+            target.old_public_market_index_tree_root,
+            block.old_public_market_index_tree_root,
+        )?;
+        pw.set_target(
+            target.next_public_market_index_before,
+            F::from_canonical_i64(block.next_public_market_index_before),
+        )?;
         pw.set_state_metadata_target(&target.state_metadata_target, &block.state_metadata)?;
 
         pw.set_hash_target(target.old_state_root, block.old_state_root)?;
@@ -267,6 +284,9 @@ impl BlockPreExecutionCircuit {
                 old_account_tree_root: builder.add_virtual_hash(),
                 old_account_pub_data_tree_root: builder.add_virtual_hash(),
                 old_market_tree_root: builder.add_virtual_hash(),
+                old_market_pub_data_tree_root: builder.add_virtual_hash(),
+                old_public_market_index_tree_root: builder.add_virtual_hash(),
+                next_public_market_index_before: builder.add_virtual_target(),
                 old_state_root: builder.add_virtual_hash(),
 
                 state_metadata_target: StateMetadataTarget::new(&mut builder),
@@ -344,6 +364,11 @@ impl BlockPreExecutionCircuit {
             );
         let old_market_details_tree_root =
             get_market_details_tree_root(&mut self.builder, &current_all_market_details);
+        let old_public_market_index_tree_hash = compute_public_market_index_tree_hash(
+            &mut self.builder,
+            self.target.old_public_market_index_tree_root,
+            self.target.next_public_market_index_before,
+        );
 
         let (_, old_state_root) = compute_validium_and_state_root(
             &mut self.builder,
@@ -357,6 +382,8 @@ impl BlockPreExecutionCircuit {
             self.target.old_account_pub_data_tree_root,
             old_market_details_tree_root,
             self.target.old_market_tree_root,
+            self.target.old_market_pub_data_tree_root,
+            old_public_market_index_tree_hash,
             old_state_metadata_hash,
         );
 
@@ -490,11 +517,17 @@ impl BlockPreExecutionCircuit {
             );
             let (interest_rate_minus_average_premium_abs, interest_rate_minus_average_premium_sign) =
                 builder.abs(interest_rate_minus_average_premium);
+            let scaled_funding_clamp_small = builder.mul(
+                market_details.funding_premium_multiplier,
+                market_details.funding_clamp_small,
+            );
+            let (funding_clamp_small, _) = builder.div_rem(
+                scaled_funding_clamp_small,
+                funding_premium_multiplier_tick,
+                FUNDING_PREMIUM_MULTIPLIER_BITS,
+            );
             let interest_rate_minus_average_premium_clamped_abs = builder.min(
-                &[
-                    interest_rate_minus_average_premium_abs,
-                    market_details.funding_clamp_small,
-                ],
+                &[interest_rate_minus_average_premium_abs, funding_clamp_small],
                 FUNDING_RATE_BITS,
             );
             let interest_rate_minus_average_premium_clamped =
@@ -761,6 +794,11 @@ impl BlockPreExecutionCircuit {
             all_market_details_hashes(&mut self.builder, all_market_risk_details_after);
         let new_market_details_tree_root =
             get_market_details_tree_root(&mut self.builder, all_market_details_after);
+        let public_market_index_tree_hash = compute_public_market_index_tree_hash(
+            &mut self.builder,
+            self.target.old_public_market_index_tree_root,
+            self.target.next_public_market_index_before,
+        );
 
         let (new_validium_root, new_state_root) = compute_validium_and_state_root(
             &mut self.builder,
@@ -774,6 +812,8 @@ impl BlockPreExecutionCircuit {
             self.target.old_account_pub_data_tree_root,
             new_market_details_tree_root,
             self.target.old_market_tree_root,
+            self.target.old_market_pub_data_tree_root,
+            public_market_index_tree_hash,
             new_state_metadata_hash,
         );
 

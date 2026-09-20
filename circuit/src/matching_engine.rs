@@ -10,7 +10,8 @@ use plonky2::field::types::Field;
 use plonky2::iop::target::{BoolTarget, Target};
 
 use crate::apply_trade::{
-    ApplySpotTradeParams, ApplyTradeParams, apply_perps_trade, apply_spot_trade,
+    ApplyBinaryOptionsTradeParams, ApplySpotTradeParams, ApplyTradeParams,
+    apply_binary_options_trade, apply_perps_trade, apply_spot_trade,
 };
 use crate::bigint::big_u16::CircuitBuilderBiguint16;
 use crate::bigint::bigint::{BigIntTarget, CircuitBuilderBigInt, SignTarget};
@@ -29,11 +30,15 @@ use crate::types::account_asset::AccountAssetTarget;
 use crate::types::account_order::{AccountOrderTarget, OrderFlags, select_account_order_target};
 use crate::types::account_position::AccountPositionTarget;
 use crate::types::asset::is_universal_asset;
+use crate::types::binary_options_position::select_binary_options_position_target;
 use crate::types::config::{BIG_U96_LIMBS, Builder, F};
 use crate::types::constants::*;
 use crate::types::margined_asset::MarginedAssetTarget;
-use crate::types::market::MarketTarget;
-use crate::types::market_details::MarketFlags;
+use crate::types::market::{MarketTarget, select_market};
+use crate::types::market_details::{
+    MarketDetailsTarget, MarketFlags, MarketRiskDetailsTarget, select_market_details,
+    select_market_risk_details,
+};
 use crate::types::order::{
     OrderTarget, get_market_index_and_order_nonce_from_order_index, select_order_target,
 };
@@ -215,7 +220,10 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
     let _false = builder._false();
 
     let is_perps = builder.is_equal_constant(tx_state.market.market_type, MARKET_TYPE_PERPS);
-    let is_spot = builder.not(is_perps);
+    let is_non_perps = builder.not(is_perps);
+    let is_binary_options =
+        builder.is_equal_constant(tx_state.market.market_type, MARKET_TYPE_BINARY_OPTIONS);
+    let is_spot = builder.is_equal_constant(tx_state.market.market_type, MARKET_TYPE_SPOT);
 
     let is_taker_ask = tx_state.register_stack[0].pending_is_ask;
     let is_taker_bid = builder.not(is_taker_ask);
@@ -373,6 +381,24 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
         );
     }
 
+    // A frozen binary options book never matches: ioc orders are cancelled, limit orders rest untouched
+    {
+        let is_frozen = BoolTarget::new_unsafe(tx_state.market.is_frozen);
+        let binary_options_frozen_flag =
+            builder.multi_and(&[update_status_flags, is_binary_options, is_frozen]);
+        builder.conditional_assert_true(binary_options_frozen_flag, order_leaf_is_empty);
+        let cancel_flag = builder.and(binary_options_frozen_flag, is_ioc);
+        let insert_flag = builder.and_not(binary_options_frozen_flag, is_ioc);
+        builder.conditional_assert_true(insert_flag, limit_flag);
+
+        cancel_taker_order =
+            builder.select_bool(cancel_flag, update_status_flags, cancel_taker_order);
+        insert_taker_order =
+            builder.select_bool(insert_flag, update_status_flags, insert_taker_order);
+        update_status_flags =
+            builder.select_bool(binary_options_frozen_flag, _false, update_status_flags);
+    }
+
     // Empty order book side for ioc order - cancel the taker order
     {
         let flag = builder.multi_and(&[update_status_flags, is_ioc, is_opposite_side_empty]);
@@ -409,6 +435,17 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
 
         insert_taker_order = builder.select_bool(flag, update_status_flags, insert_taker_order);
         update_status_flags = builder.select_bool(flag, _false, update_status_flags);
+    }
+
+    {
+        let taker_price_lte_maker_price = builder.not(taker_price_gt_maker_price);
+        let taker_price_crosses_maker_price = builder.select_bool(
+            is_taker_ask,
+            taker_price_lte_maker_price,
+            taker_price_gte_maker_price,
+        );
+        let flag = builder.and(update_status_flags, limit_flag);
+        builder.conditional_assert_true(flag, taker_price_crosses_maker_price);
     }
 
     // After this point, order is not empty
@@ -448,8 +485,13 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
     let integrator_taker_fee_collector_index = tx_state.register_stack[0].generic_field_1;
     let is_integrator_taker_fee_disabled =
         is_integrator_fee_disabled(builder, integrator_taker_fee_collector_index);
+    // generic_field_2 holds order flags only when the pending register is an order
+    // being matched; gate on update_status_flags so other pending registers
+    // (e.g. TRANSFER_ASSET) don't flow into the order-flags bit decomposition.
+    let is_taker_order_flags_set =
+        builder.and(update_status_flags, is_integrator_taker_fee_disabled);
     let taker_order_flags_value = builder.select(
-        is_integrator_taker_fee_disabled,
+        is_taker_order_flags_set,
         tx_state.register_stack[0].generic_field_2,
         zero,
     );
@@ -496,6 +538,7 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
     // Handle self trade case where account indices match but there's integrator fee specified (reduce both sides)
     {
         let flag = builder.and_not(is_account_index_equal, is_integrator_taker_fee_disabled);
+        let flag = builder.and(update_status_flags, flag);
 
         // Order expiry first
         {
@@ -879,6 +922,35 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
         &mut cancel_maker_order,
     );
 
+    // Binary options markets only support spot-style order types
+    {
+        let flag = builder.and(update_status_flags, is_binary_options);
+        builder.conditional_assert_false(flag, is_liquidation_order);
+    }
+
+    let apply_binary_options_trade_params = ApplyBinaryOptionsTradeParams {
+        taker_bo_position: &tx_state.binary_options_positions[TAKER_ACCOUNT_ID],
+        maker_bo_position: &tx_state.binary_options_positions[MAKER_ACCOUNT_ID],
+        fee_account_is_taker: tx_state.fee_account_is_taker,
+        fee_account_is_maker: tx_state.fee_account_is_maker,
+    };
+    let (
+        new_taker_bo_position,
+        new_maker_bo_position,
+        taker_bo_usdc_delta,
+        maker_bo_usdc_delta,
+        fee_bo_usdc_delta,
+        bo_new_open_interest,
+        is_taker_bo_position_valid,
+        is_maker_bo_position_valid,
+        is_bo_open_interest_valid,
+    ) = apply_binary_options_trade(
+        builder,
+        update_status_flags,
+        &apply_trade_params,
+        &apply_binary_options_trade_params,
+    );
+
     let apply_spot_trade_params = ApplySpotTradeParams {
         assets: &tx_state
             .assets
@@ -905,6 +977,25 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
         &apply_spot_trade_params,
     );
 
+    // Binary options trades settle entirely in USDC: both market assets are USDC and the
+    // spot deltas above are zero, so the binary options deltas flow through the first slot,
+    // where every single-asset tx carries USDC
+    let taker_base_balance_delta = builder.select_bigint(
+        is_binary_options,
+        &taker_bo_usdc_delta,
+        &taker_base_balance_delta,
+    );
+    let maker_base_balance_delta = builder.select_bigint(
+        is_binary_options,
+        &maker_bo_usdc_delta,
+        &maker_base_balance_delta,
+    );
+    let fee_base_balance_delta = builder.select_bigint(
+        is_binary_options,
+        &fee_bo_usdc_delta,
+        &fee_base_balance_delta,
+    );
+
     let (
         total_supplied_amounts,
         taker_asset_balances,
@@ -915,7 +1006,7 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
         maker_strategy_balance,
         new_taker_risk_info_spot,
         new_maker_risk_info_spot,
-    ) = is_valid_spot_trade(
+    ) = is_valid_non_perps_trade(
         builder,
         &mut update_status_flags,
         tx_state,
@@ -928,6 +1019,24 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
         &mut cancel_taker_order,
         &mut cancel_maker_order,
     );
+
+    // Cancel orders leading to invalid binary options positions or open interest
+    {
+        let is_bo = builder.and(update_status_flags, is_binary_options);
+
+        let both_valid = builder.and(is_taker_bo_position_valid, is_bo_open_interest_valid);
+        let cancel_taker = builder.not(both_valid);
+        let cancel_taker_flag = builder.and(is_bo, cancel_taker);
+        cancel_taker_order =
+            builder.select_bool(cancel_taker_flag, update_status_flags, cancel_taker_order);
+
+        let cancel_maker_flag = builder.and_not(is_bo, is_maker_bo_position_valid);
+        cancel_maker_order =
+            builder.select_bool(cancel_maker_flag, update_status_flags, cancel_maker_order);
+
+        let cancel_any = builder.or(cancel_taker_flag, cancel_maker_flag);
+        update_status_flags = builder.and_not(update_status_flags, cancel_any);
+    }
 
     let new_taker_risk_info = RiskInfoTarget {
         current_risk_parameters: RiskParametersTarget::select(
@@ -1022,10 +1131,11 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
         let fee_account_is_taker = builder.and(update_status_flags, tx_state.fee_account_is_taker);
         let fee_account_is_maker = builder.and(update_status_flags, tx_state.fee_account_is_maker);
 
-        // Update account assets for spot
+        // Update account assets for spot and binary options
         {
-            // Fee account is maker or taker case is already handled in [`apply_spot_trade`], so here we just apply deltas
-            let update_assets_flag = builder.and(update_status_flags, is_spot);
+            // Fee account is maker or taker case is already handled in [`apply_spot_trade`] and
+            // [`apply_binary_options_trade`], so here we just apply deltas
+            let update_assets_flag = builder.and(update_status_flags, is_non_perps);
             let _spot = builder.constant_u64(PRODUCT_TYPE_SPOT);
 
             tx_state.account_assets[TAKER_ACCOUNT_ID][BASE_ASSET_ID].balance = builder
@@ -1140,8 +1250,16 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
 
         // Update market, register, order leaf, account order leaf
         {
-            tx_state.market_details.open_interest = builder.select(
+            let new_open_interest =
+                builder.select(is_binary_options, bo_new_open_interest, new_open_interest);
+            tx_state.market.open_interest = builder.select(
                 update_status_flags,
+                new_open_interest,
+                tx_state.market.open_interest,
+            );
+            let update_perps_market_details_flag = builder.and(update_status_flags, is_perps);
+            tx_state.market_details.open_interest = builder.select(
+                update_perps_market_details_flag,
                 new_open_interest,
                 tx_state.market_details.open_interest,
             );
@@ -1284,6 +1402,22 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
                 &new_maker_position,
                 &tx_state.positions[MAKER_ACCOUNT_ID],
             );
+
+            let update_bo_position_flag = builder.and(update_status_flags, is_binary_options);
+            tx_state.binary_options_positions[TAKER_ACCOUNT_ID] =
+                select_binary_options_position_target(
+                    builder,
+                    update_bo_position_flag,
+                    &new_taker_bo_position,
+                    &tx_state.binary_options_positions[TAKER_ACCOUNT_ID],
+                );
+            tx_state.binary_options_positions[MAKER_ACCOUNT_ID] =
+                select_binary_options_position_target(
+                    builder,
+                    update_bo_position_flag,
+                    &new_maker_bo_position,
+                    &tx_state.binary_options_positions[MAKER_ACCOUNT_ID],
+                );
         }
 
         // Update margins for perps
@@ -1757,6 +1891,76 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
             maker_asset_index = builder.select(flag, spot_maker_asset_index, maker_asset_index);
         }
 
+        // Binary options
+        // Both sides pay USDC fees on their own cash outlay: the buyer on the quote,
+        // the seller on payout minus quote
+        {
+            let flag = builder.and(flag, is_binary_options);
+
+            strategy_index = builder.select(flag, default_strategy_index, strategy_index);
+            let route_type_spot = builder.constant_u64(ROUTE_TYPE_SPOT);
+            route_type = builder.select(flag, route_type_spot, route_type);
+
+            let fee_tick = builder.constant_u64(FEE_TICK);
+            let (quote_fee_multiplier, _) = builder.div_rem(
+                tx_state.market.quote_extension_multiplier,
+                fee_tick,
+                FEE_BITS,
+            );
+            let quote_fee_multiplier_big = builder.target_to_biguint(quote_fee_multiplier);
+
+            // Gate the trade amounts so the payout >= quote invariant, which only holds for
+            // binary options markets, is not asserted for other market types
+            let gated_trade_quote = builder.mul_bool(flag, trade_quote);
+            let trade_quote_big = builder.target_to_biguint(gated_trade_quote);
+            let buyer_fee_base = builder.mul_biguint_non_carry(
+                &trade_quote_big,
+                &quote_fee_multiplier_big,
+                BIG_U96_LIMBS,
+            );
+
+            let settlement_cap_big = builder.target_to_biguint(tx_state.market.settlement_cap);
+            let cap_fee_multiplier = builder.mul_biguint_non_carry(
+                &settlement_cap_big,
+                &quote_fee_multiplier_big,
+                BIG_U96_LIMBS,
+            );
+            let gated_trade_base = builder.mul_bool(flag, trade_base);
+            let trade_base_big = builder.target_to_biguint(gated_trade_base);
+            let payout_fee_base =
+                builder.mul_biguint_non_carry(&trade_base_big, &cap_fee_multiplier, BIG_U96_LIMBS);
+            let seller_fee_base = builder.sub_biguint(&payout_fee_base, &buyer_fee_base);
+
+            let usdc_extension_multiplier =
+                &tx_state.assets[USDC_BASE_ASSET_ID].extension_multiplier;
+
+            let taker_fee_base =
+                builder.select_biguint(is_taker_ask, &seller_fee_base, &buyer_fee_base);
+            let extended_taker_fee = builder.mul_biguint_non_carry(
+                &taker_fee_base,
+                &integrator_taker_fee_big,
+                BIG_U96_LIMBS,
+            );
+            let (bo_taker_fee_amount, _) =
+                builder.div_rem_biguint(&extended_taker_fee, usdc_extension_multiplier);
+            taker_fee_amount =
+                builder.select_biguint(flag, &bo_taker_fee_amount, &taker_fee_amount);
+            taker_asset_index = builder.select(flag, usdc_asset_index, taker_asset_index);
+
+            let maker_fee_base =
+                builder.select_biguint(is_taker_ask, &buyer_fee_base, &seller_fee_base);
+            let extended_maker_fee = builder.mul_biguint_non_carry(
+                &maker_fee_base,
+                &integrator_maker_fee_big,
+                BIG_U96_LIMBS,
+            );
+            let (bo_maker_fee_amount, _) =
+                builder.div_rem_biguint(&extended_maker_fee, usdc_extension_multiplier);
+            maker_fee_amount =
+                builder.select_biguint(flag, &bo_maker_fee_amount, &maker_fee_amount);
+            maker_asset_index = builder.select(flag, usdc_asset_index, maker_asset_index);
+        }
+
         let max_integrator_fee_amount = builder.constant_usize(MAX_INTEGRATOR_FEE_AMOUNT);
         let taker_fee = builder.biguint_to_target_safe(&taker_fee_amount);
         let taker_fee = builder.min(
@@ -1865,10 +2069,8 @@ fn is_valid_perps_trade(
         tx_state.market_risk_details.mark_price,
         tx_state.market_risk_details.quote_multiplier,
     );
-    let old_open_interest_notional = builder.mul(
-        tx_state.market_details.open_interest,
-        open_interest_notional_mult,
-    );
+    let old_open_interest_notional =
+        builder.mul(tx_state.market.open_interest, open_interest_notional_mult);
     let new_open_interest_notional = builder.mul(new_open_interest, open_interest_notional_mult);
 
     let is_taker_insurance_fund = builder.is_equal_constant(
@@ -1883,7 +2085,7 @@ fn is_valid_perps_trade(
     let is_not_insurance_fund_trade = builder.not(is_insurance_fund_trade);
     let is_market_open_interest_notional_full = builder.is_gt(
         old_open_interest_notional,
-        tx_state.market_details.open_interest_limit,
+        tx_state.market.open_interest_limit,
         64,
     );
     let is_market_open_interest_full_and_is_taker_not_reduce = builder.and(
@@ -1901,7 +2103,7 @@ fn is_valid_perps_trade(
 
     let new_open_interest_notional_gt_limit = builder.is_gt(
         new_open_interest_notional,
-        tx_state.market_details.open_interest_limit,
+        tx_state.market.open_interest_limit,
         64,
     );
 
@@ -2032,7 +2234,7 @@ fn is_valid_perps_trade(
     *update_status_flags = builder.and_not(*update_status_flags, *cancel_maker_order);
 }
 
-fn is_valid_spot_trade(
+fn is_valid_non_perps_trade(
     builder: &mut Builder,
     update_status_flags: &mut BoolTarget,
     tx_state: &TxState,
@@ -2057,8 +2259,10 @@ fn is_valid_spot_trade(
 ) {
     let _spot = builder.constant_u64(PRODUCT_TYPE_SPOT);
     let _perps = builder.constant_u64(PRODUCT_TYPE_PERPS);
-    let is_spot = builder.is_equal_constant(tx_state.market.market_type, MARKET_TYPE_SPOT);
-    let is_enabled = builder.and(*update_status_flags, is_spot);
+    // Spot and binary options trades both settle through asset balances, so they share
+    // the balance and risk validations below
+    let is_perps = builder.is_equal_constant(tx_state.market.market_type, MARKET_TYPE_PERPS);
+    let is_enabled = builder.and_not(*update_status_flags, is_perps);
 
     let is_taker_unified = tx_state.accounts[TAKER_ACCOUNT_ID].is_unified_mode();
     let is_maker_unified = tx_state.accounts[MAKER_ACCOUNT_ID].is_unified_mode();
@@ -2811,14 +3015,24 @@ pub fn increment_order_count_in_place(
         flag.target,
     );
 
-    let is_spot = builder.is_equal_constant(tx_state.market.market_type, MARKET_TYPE_SPOT);
-    let increment_flag = builder.and(is_spot, flag);
+    let is_perps = builder.is_equal_constant(tx_state.market.market_type, MARKET_TYPE_PERPS);
+    let is_non_perps = builder.not(is_perps);
+    let increment_flag = builder.and(is_non_perps, flag);
     tx_state.accounts[TAKER_ACCOUNT_ID].total_non_cross_order_count = builder.add(
         tx_state.accounts[TAKER_ACCOUNT_ID].total_non_cross_order_count,
         increment_flag.target,
     );
 
-    let flag = builder.and_not(flag, is_spot); // Early return for spot
+    // Binary options orders are never triggered, so every resting order counts towards the position
+    let is_binary_options =
+        builder.is_equal_constant(tx_state.market.market_type, MARKET_TYPE_BINARY_OPTIONS);
+    let bo_increment_flag = builder.and(is_binary_options, flag);
+    tx_state.binary_options_positions[TAKER_ACCOUNT_ID].total_order_count = builder.add(
+        tx_state.binary_options_positions[TAKER_ACCOUNT_ID].total_order_count,
+        bo_increment_flag.target,
+    );
+
+    let flag = builder.and_not(flag, is_non_perps); // Early return for spot and binary options
 
     // Fix the market-default margin mode and lock margin_set_flag before the order-count
     // increments below so is_empty still holds.
@@ -2829,6 +3043,7 @@ pub fn increment_order_count_in_place(
         flag,
         account_type,
         market_flags.default_margin_mode,
+        tx_state.market.public_market_index,
     );
 
     let trigger_status_parent_order = builder.constant_from_u8(TRIGGER_STATUS_PARENT_ORDER);
@@ -2873,14 +3088,23 @@ pub fn decrement_order_count_in_place(
         flag.target,
     );
 
-    let is_spot = builder.is_equal_constant(tx_state.market.market_type, MARKET_TYPE_SPOT);
-    let decrement_flag = builder.and(is_spot, flag);
+    let is_perps = builder.is_equal_constant(tx_state.market.market_type, MARKET_TYPE_PERPS);
+    let is_non_perps = builder.not(is_perps);
+    let decrement_flag = builder.and(is_non_perps, flag);
     tx_state.accounts[account_slot].total_non_cross_order_count = builder.sub(
         tx_state.accounts[account_slot].total_non_cross_order_count,
         decrement_flag.target,
     );
 
-    let flag = builder.and_not(flag, is_spot); // Early return for spot
+    let is_binary_options =
+        builder.is_equal_constant(tx_state.market.market_type, MARKET_TYPE_BINARY_OPTIONS);
+    let bo_decrement_flag = builder.and(is_binary_options, flag);
+    tx_state.binary_options_positions[account_slot].total_order_count = builder.sub(
+        tx_state.binary_options_positions[account_slot].total_order_count,
+        bo_decrement_flag.target,
+    );
+
+    let flag = builder.and_not(flag, is_non_perps); // Early return for spot and binary options
 
     let trigger_status_parent_order = builder.constant_from_u8(TRIGGER_STATUS_PARENT_ORDER);
     let is_not_trigger_status_parent_order =
@@ -3202,6 +3426,51 @@ fn get_trigger_child_order_instruction(
     }
 }
 
+/// Turns a market in settlement that has no resting order and no open interest left into a
+/// settled leaf so its slot can be reused. Every market type closes through the in settlement
+/// status. Only perps markets carry market details, the details of the other market types are
+/// already empty.
+pub fn release_closed_market_slot_if_drained(
+    builder: &mut Builder,
+    is_enabled: BoolTarget,
+    tx_state: &mut TxState,
+) {
+    let is_market_in_settlement =
+        builder.is_equal_constant(tx_state.market.status, MARKET_STATUS_IN_SETTLEMENT as u64);
+    let is_market_has_no_order = builder.is_zero(tx_state.market.total_order_count);
+    let is_market_has_no_position = builder.is_zero(tx_state.market.open_interest);
+    let release_slot_flag = builder.multi_and(&[
+        is_enabled,
+        is_market_in_settlement,
+        is_market_has_no_order,
+        is_market_has_no_position,
+    ]);
+    let empty_order_book_tree_root = builder.constant_hash(EMPTY_ORDER_BOOK_TREE_ROOT);
+    let settled_market =
+        MarketTarget::settled(builder, &tx_state.market, empty_order_book_tree_root);
+    tx_state.market = select_market(
+        builder,
+        release_slot_flag,
+        &settled_market,
+        &tx_state.market,
+    );
+
+    let empty_market_details = MarketDetailsTarget::empty(builder);
+    tx_state.market_details = select_market_details(
+        builder,
+        release_slot_flag,
+        &empty_market_details,
+        &tx_state.market_details,
+    );
+    let empty_market_risk_details = MarketRiskDetailsTarget::empty(builder);
+    tx_state.market_risk_details = select_market_risk_details(
+        builder,
+        release_slot_flag,
+        &empty_market_risk_details,
+        &tx_state.market_risk_details,
+    );
+}
+
 pub fn cancel_child_orders(
     builder: &mut Builder,
     is_enabled: BoolTarget,
@@ -3337,7 +3606,7 @@ pub fn execute_matching_light(builder: &mut Builder, tx_state: &mut TxState) {
     let _false = builder._false();
 
     let is_perps = builder.is_equal_constant(tx_state.market.market_type, MARKET_TYPE_PERPS);
-    let is_spot = builder.not(is_perps);
+    let is_spot = builder.is_equal_constant(tx_state.market.market_type, MARKET_TYPE_SPOT);
 
     let is_taker_ask = tx_state.register_stack[0].pending_is_ask;
 
@@ -3417,6 +3686,23 @@ pub fn execute_matching_light(builder: &mut Builder, tx_state: &mut TxState) {
             tx_state.account_order.index_1,
             tx_state.register_stack[0].pending_client_order_index,
         );
+    }
+
+    // A frozen binary options book never matches: ioc orders are cancelled, limit orders rest untouched
+    {
+        let is_binary_options =
+            builder.is_equal_constant(tx_state.market.market_type, MARKET_TYPE_BINARY_OPTIONS);
+        let is_frozen = BoolTarget::new_unsafe(tx_state.market.is_frozen);
+        let frozen_flag = builder.multi_and(&[update_status_flags, is_binary_options, is_frozen]);
+        builder.conditional_assert_true(frozen_flag, order_leaf_is_empty);
+        let cancel_flag = builder.and(frozen_flag, is_ioc);
+        let insert_flag = builder.and_not(frozen_flag, is_ioc);
+
+        cancel_taker_order =
+            builder.select_bool(cancel_flag, update_status_flags, cancel_taker_order);
+        insert_taker_order =
+            builder.select_bool(insert_flag, update_status_flags, insert_taker_order);
+        update_status_flags = builder.select_bool(frozen_flag, _false, update_status_flags);
     }
 
     // Empty order book side for ioc order - cancel the taker order

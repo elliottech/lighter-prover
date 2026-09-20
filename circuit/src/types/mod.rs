@@ -12,6 +12,7 @@ pub mod api_key;
 pub mod approve_integrator;
 pub mod approved_integrator;
 pub mod asset;
+pub mod binary_options_position;
 pub mod change_pub_key;
 pub mod config;
 pub mod constants;

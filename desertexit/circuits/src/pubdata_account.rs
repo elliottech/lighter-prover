@@ -18,7 +18,7 @@ use circuit::utils::CircuitBuilderUtils;
 use num::{BigInt, BigUint};
 use plonky2::field::extension::Extendable;
 use plonky2::field::types::PrimeField64;
-use plonky2::hash::hash_types::{HashOutTarget, RichField};
+use plonky2::hash::hash_types::{HashOut, HashOutTarget, NUM_HASH_OUT_ELTS, RichField};
 use plonky2::iop::target::{BoolTarget, Target};
 use plonky2::iop::witness::Witness;
 use serde::Deserialize;
@@ -150,6 +150,10 @@ pub struct PubdataAccount {
     pub public_pool_shares: [PubdataPublicPoolShare; SHARES_LIST_SIZE],
     #[serde(rename = "ppi")]
     pub public_pool_info: PubdataPublicPoolInfo,
+    /// Root of the account market pub data tree holding the binary options position sizes
+    #[serde(rename = "mpdr")]
+    #[serde(deserialize_with = "circuit::deserializers::hash_out")]
+    pub market_pub_data_root: HashOut<F>,
 }
 
 impl Default for PubdataAccount {
@@ -162,6 +166,7 @@ impl Default for PubdataAccount {
             positions: array::from_fn(|_| PubdataAccountPosition::default()),
             public_pool_shares: array::from_fn(|_| PubdataPublicPoolShare::default()),
             public_pool_info: PubdataPublicPoolInfo::default(),
+            market_pub_data_root: EMPTY_MARKET_DATA_TREE_ROOT,
         }
     }
 }
@@ -175,6 +180,7 @@ pub struct PubdataAccountTarget {
     pub positions: [PubdataAccountPositionTarget; POSITION_LIST_SIZE],
     pub public_pool_shares: [PubdataPublicPoolShareTarget; SHARES_LIST_SIZE],
     pub public_pool_info: PubdataPublicPoolInfoTarget,
+    pub market_pub_data_root: HashOutTarget,
 }
 
 impl Default for PubdataAccountTarget {
@@ -187,6 +193,9 @@ impl Default for PubdataAccountTarget {
             positions: array::from_fn(|_| PubdataAccountPositionTarget::default()),
             public_pool_shares: array::from_fn(|_| PubdataPublicPoolShareTarget::default()),
             public_pool_info: PubdataPublicPoolInfoTarget::default(),
+            market_pub_data_root: HashOutTarget {
+                elements: [Target::default(); NUM_HASH_OUT_ELTS],
+            },
         }
     }
 }
@@ -203,6 +212,7 @@ impl PubdataAccountTarget {
             positions: array::from_fn(|_| PubdataAccountPositionTarget::new(builder)),
             public_pool_shares: array::from_fn(|_| PubdataPublicPoolShareTarget::new(builder)),
             public_pool_info: PubdataPublicPoolInfoTarget::new(builder),
+            market_pub_data_root: builder.add_virtual_hash(),
         }
     }
 
@@ -295,6 +305,7 @@ impl PubdataAccountTarget {
                     .collect::<Vec<_>>(),
             );
             pub_data_elements.push(self.account_type);
+            pub_data_elements.extend_from_slice(&self.market_pub_data_root.elements);
 
             let asset_delta_root = self.get_asset_delta_root(builder);
             pub_data_elements.extend_from_slice(&asset_delta_root.elements);
@@ -360,6 +371,14 @@ impl<T: Witness<F> + PartialWitnessCurve<F>, F: PrimeField64 + Extendable<5> + R
             a.public_pool_info.operator_shares,
             F::from_canonical_i64(b.public_pool_info.operator_shares),
         )?;
+
+        let market_pub_data_root = HashOut {
+            elements: b
+                .market_pub_data_root
+                .elements
+                .map(|element| F::from_canonical_u64(element.to_canonical_u64())),
+        };
+        self.set_hash_target(a.market_pub_data_root, market_pub_data_root)?;
 
         Ok(())
     }

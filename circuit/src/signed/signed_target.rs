@@ -102,7 +102,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilderSigned<F, D> fo
         */
 
         let threshold = self.constant(F::from_canonical_u64((1 << POSITIVE_THRESHOLD_BIT) - 1));
-        let is_lte = self.is_lte(signed_target.target, threshold, 60);
+        let is_lte = self.is_lte(signed_target.target, threshold, 64);
         let rhs = self.mul_sub(is_lte.target, two, one);
 
         let is_not_zero = self.is_not_zero(signed_target.target);

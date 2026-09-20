@@ -287,32 +287,26 @@ impl AccountOrderTarget {
     }
 
     pub fn is_empty(&self, builder: &mut Builder) -> BoolTarget {
-        // Adding following fields does not overflow Goldilocks, as long as
-        // these fields are guaranteed by business logic to fit these sizes.
-        let added = builder.add_many([
-            self.client_order_index,             // 48 bits
-            self.initial_base_amount,            // 48 bits
-            self.price,                          // 32 bits
-            self.nonce,                          // 48 bits
-            self.remaining_base_amount,          // 48 bits
-            self.is_ask.target,                  // 1 bit
-            self.order_type,                     // max 8
-            self.time_in_force,                  // 2 bits
-            self.reduce_only,                    // 1 bit
-            self.trigger_price,                  // 32 bits
-            self.expiry,                         // 48 bits
-            self.trigger_status,                 // 2 bits
-            self.integrator_fee_collector_index, // 48 bits
-            self.integrator_taker_fee,           // 32 bits
-            self.integrator_maker_fee,           // 32 bits
-        ]);
-        // Order indexes are 63 bits
         let assertions = [
-            builder.is_zero(added),
             builder.is_zero(self.order_index),
+            builder.is_zero(self.client_order_index),
+            builder.is_zero(self.initial_base_amount),
+            builder.is_zero(self.price),
+            builder.is_zero(self.nonce),
+            builder.is_zero(self.remaining_base_amount),
+            builder.is_zero(self.is_ask.target),
+            builder.is_zero(self.order_type),
+            builder.is_zero(self.time_in_force),
+            builder.is_zero(self.reduce_only),
+            builder.is_zero(self.trigger_price),
+            builder.is_zero(self.expiry),
+            builder.is_zero(self.trigger_status),
             builder.is_zero(self.to_trigger_order_index0),
             builder.is_zero(self.to_trigger_order_index1),
             builder.is_zero(self.to_cancel_order_index0),
+            builder.is_zero(self.integrator_fee_collector_index),
+            builder.is_zero(self.integrator_taker_fee),
+            builder.is_zero(self.integrator_maker_fee),
             builder.is_zero(self.order_flags),
             builder.is_zero(self.order_version),
         ];

@@ -31,8 +31,8 @@ pub struct L1CreateOrderTx {
     #[serde(rename = "ai")]
     pub account_index: i64, // 48 bits
 
-    #[serde(rename = "mi")]
-    pub market_index: u16,
+    #[serde(rename = "pmi")]
+    pub public_market_index: i64,
 
     #[serde(rename = "b")]
     pub base_amount: i64, // 48 bits
@@ -51,7 +51,7 @@ pub struct L1CreateOrderTxTarget {
     pub master_account_index: Target,
     pub account_index: Target, // 48 bits
 
-    pub market_index: Target, // 8 bits
+    pub public_market_index: Target, // 48 bits
 
     pub base_amount: Target, // 48 bits
     pub price: Target,       // 32 bits
@@ -71,7 +71,7 @@ impl L1CreateOrderTxTarget {
         Self {
             master_account_index: builder.add_virtual_target(),
             account_index: builder.add_virtual_target(),
-            market_index: builder.add_virtual_target(),
+            public_market_index: builder.add_virtual_target(),
             base_amount: builder.add_virtual_target(),
             price: builder.add_virtual_target(),
             is_ask: builder.add_virtual_bool_target_safe(),
@@ -99,7 +99,7 @@ impl L1CreateOrderTxTarget {
         BaseRegisterInfoTarget {
             instruction_type: builder.constant_from_u8(INSERT_ORDER),
 
-            market_index: self.market_index,
+            market_index: tx_state.market.market_index,
             account_index: self.account_index,
 
             pending_size: self.calculated_base_amount,
@@ -134,16 +134,33 @@ impl Verify for L1CreateOrderTxTarget {
         self.is_enabled = tx_type.is_l1_create_order;
         self.success = tx_type.is_l1_create_order;
 
-        builder.conditional_assert_eq(
-            self.is_enabled,
-            self.market_index,
+        builder.register_range_check(self.public_market_index, PUBLIC_MARKET_INDEX_BITS);
+        let is_tx_public_market_index_nil =
+            builder.is_equal_constant(self.public_market_index, NIL_PUBLIC_MARKET_INDEX as u64);
+        builder.conditional_assert_false(self.is_enabled, is_tx_public_market_index_nil);
+
+        // A nil public market index in the witness must come with an empty market, so the
+        // nil leaf in the public market index tree proves that no such market exists.
+        let is_market_public_market_index_nil = builder.is_equal_constant(
+            tx_state.market.public_market_index,
+            NIL_PUBLIC_MARKET_INDEX as u64,
+        );
+        let is_enabled_and_public_market_index_nil =
+            builder.and(self.is_enabled, is_market_public_market_index_nil);
+        builder.conditional_assert_eq_constant(
+            is_enabled_and_public_market_index_nil,
             tx_state.market.market_index,
+            NIL_MARKET_INDEX as u64,
         );
+
+        // Otherwise the witness market must be the one the transaction targets.
+        self.success = builder.and_not(self.success, is_market_public_market_index_nil);
         builder.conditional_assert_eq(
-            self.is_enabled,
-            self.market_index,
-            tx_state.market.perps_market_index,
+            self.success,
+            tx_state.market.public_market_index,
+            self.public_market_index,
         );
+
         builder.conditional_assert_eq(
             self.is_enabled,
             self.account_index,
@@ -202,12 +219,9 @@ impl Verify for L1CreateOrderTxTarget {
         let is_order_book_active = builder.is_equal(tx_state.market.status, active_market_status);
         self.success = builder.and(self.success, is_order_book_active);
 
-        // Spot is disallowed
-        builder.conditional_assert_eq_constant(
-            self.is_enabled,
-            tx_state.market.market_type,
-            MARKET_TYPE_PERPS,
-        );
+        let is_perps_market =
+            builder.is_equal_constant(tx_state.market.market_type, MARKET_TYPE_PERPS);
+        self.success = builder.and(self.success, is_perps_market);
 
         // Oracle prices should be set for the market
         let is_index_price_non_zero = builder.is_not_zero(tx_state.market_details.index_price);
@@ -280,7 +294,7 @@ impl PriorityOperationsPubData for L1CreateOrderTxTarget {
             add_pub_data_type_target(builder, bytes, PRIORITY_PUB_DATA_TYPE_L1_CREATE_ORDER),
             add_target(builder, bytes, self.account_index, 48),
             add_target(builder, bytes, self.master_account_index, 48),
-            add_target(builder, bytes, self.market_index, 16),
+            add_target(builder, bytes, self.public_market_index, 64),
             add_target(builder, bytes, self.base_amount, 48),
             add_target(builder, bytes, self.price, 32),
             add_byte_target_unsafe(bytes, self.is_ask.target),
@@ -315,7 +329,10 @@ impl<T: Witness<F>, F: PrimeField64> L1CreateOrderTxTargetWitness<F> for T {
             F::from_canonical_i64(b.master_account_index),
         )?;
         self.set_target(a.account_index, F::from_canonical_i64(b.account_index))?;
-        self.set_target(a.market_index, F::from_canonical_u16(b.market_index))?;
+        self.set_target(
+            a.public_market_index,
+            F::from_canonical_i64(b.public_market_index),
+        )?;
         self.set_target(a.base_amount, F::from_canonical_i64(b.base_amount))?;
         self.set_target(a.price, F::from_canonical_u32(b.price))?;
         self.set_bool_target(a.is_ask, b.is_ask == 1)?;

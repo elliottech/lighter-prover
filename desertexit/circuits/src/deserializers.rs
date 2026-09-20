@@ -10,8 +10,9 @@ use plonky2::field::types::Field;
 use plonky2::hash::hash_types::HashOut;
 use serde::de::{Deserialize, Deserializer};
 
-use crate::inner_circuit::DESERT_NUM_ACCOUNTS;
+use crate::inner_circuit::{DESERT_BINARY_OPTIONS_POSITIONS, DESERT_NUM_ACCOUNTS};
 use crate::pubdata_account::PubdataAccountPosition;
+use crate::pubdata_binary_options_position::PubdataBinaryOptionsPosition;
 
 type ProofData = Vec<Vec<[u64; 4]>>;
 
@@ -40,6 +41,26 @@ where
         }
     }
     Ok(proof)
+}
+
+pub fn binary_options_positions<'de, D>(
+    deserializer: D,
+) -> Result<Box<[PubdataBinaryOptionsPosition; DESERT_BINARY_OPTIONS_POSITIONS]>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let elements: Vec<PubdataBinaryOptionsPosition> = Deserialize::deserialize(deserializer)?;
+    if elements.len() != DESERT_BINARY_OPTIONS_POSITIONS {
+        return Err(serde::de::Error::custom(format!(
+            "Expected {} binary options positions, got {}",
+            DESERT_BINARY_OPTIONS_POSITIONS,
+            elements.len()
+        )));
+    }
+    let positions: [PubdataBinaryOptionsPosition; DESERT_BINARY_OPTIONS_POSITIONS] = elements
+        .try_into()
+        .map_err(|_| serde::de::Error::custom("Failed to convert binary options positions"))?;
+    Ok(Box::new(positions))
 }
 
 pub fn aggregated_assets<'de, D>(deserializer: D) -> Result<[BigInt; ASSET_LIST_SIZE], D::Error>

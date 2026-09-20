@@ -12,6 +12,7 @@ use crate::eddsa::gadgets::base_field::QuinticExtensionTarget;
 use crate::eddsa::schnorr::hash_to_quintic_extension_circuit;
 use crate::matching_engine::{
     cancel_child_orders, decrement_locked_balance_for_order, decrement_order_count_in_place,
+    release_closed_market_slot_if_drained,
 };
 use crate::tx_interface::{Apply, TxHash, Verify};
 use crate::types::account_order::{AccountOrderTarget, select_account_order_target};
@@ -22,6 +23,7 @@ use crate::types::order::{
 };
 use crate::types::tx_state::TxState;
 use crate::types::tx_type::TxTypeTargets;
+use crate::utils::CircuitBuilderUtils;
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
@@ -33,7 +35,7 @@ pub struct L2CancelOrderTx {
     pub api_key_index: u8,
 
     #[serde(rename = "m")]
-    pub market_index: u16,
+    pub public_market_index: i64,
 
     #[serde(rename = "i")]
     pub index: i64, // cloindex or oindex
@@ -41,10 +43,10 @@ pub struct L2CancelOrderTx {
 
 #[derive(Debug, Clone)]
 pub struct L2CancelOrderTxTarget {
-    pub account_index: Target, // 48 bits
-    pub api_key_index: Target, // 8 bits
-    pub market_index: Target,  // 8 bits
-    pub index: Target,         // 56 bits - cloindex or oindex
+    pub account_index: Target,       // 48 bits
+    pub api_key_index: Target,       // 8 bits
+    pub public_market_index: Target, // 48 bits
+    pub index: Target,               // 56 bits - cloindex or oindex
 
     // Output
     pub success: BoolTarget,
@@ -55,7 +57,7 @@ impl L2CancelOrderTxTarget {
         L2CancelOrderTxTarget {
             account_index: builder.add_virtual_target(),
             api_key_index: builder.add_virtual_target(),
-            market_index: builder.add_virtual_target(),
+            public_market_index: builder.add_virtual_target(),
             index: builder.add_virtual_target(),
 
             // Output
@@ -79,7 +81,7 @@ impl TxHash for L2CancelOrderTxTarget {
             tx_expired_at,
             self.account_index,
             self.api_key_index,
-            self.market_index,
+            self.public_market_index,
             self.index,
         ];
 
@@ -121,23 +123,28 @@ impl Verify for L2CancelOrderTxTarget {
             builder,
             tx_state.account_order.index_0,
         );
-        let is_valid_market_index = builder.is_equal(market_index_from_order, self.market_index);
+        let is_valid_market_index =
+            builder.is_equal(market_index_from_order, tx_state.market.market_index);
 
         let is_account_order_empty = tx_state.account_order.is_empty(builder);
         let is_account_order_present = builder.not(is_account_order_empty);
         self.success =
             builder.multi_and(&[is_enabled, is_account_order_present, is_valid_market_index]);
 
-        // We load market only if transaction is successful. Because user may give invalid order index and/or market index. We only cancel orders from active markets
-        // to prevent any issues on market closing.
+        // We load market only if transaction is successful. Because user may give invalid order index and/or market index.
+        // Cancels are allowed on closed markets as well: draining the last order of a closed market releases its
+        // slot, see release_closed_market_slot_if_drained.
         builder.conditional_assert_eq(
             self.success,
-            self.market_index,
-            tx_state.market.market_index,
+            self.public_market_index,
+            tx_state.market.public_market_index,
         );
-        let is_order_book_active =
-            builder.is_equal_constant(tx_state.market.status, MARKET_STATUS_ACTIVE as u64);
-        builder.conditional_assert_true(self.success, is_order_book_active);
+        let nil_public_market_index = builder.constant_u64(NIL_PUBLIC_MARKET_INDEX as u64);
+        builder.conditional_assert_not_eq(
+            self.success,
+            self.public_market_index,
+            nil_public_market_index,
+        );
 
         // Verify that we load the correct order from orderbook
         builder.conditional_assert_eq(
@@ -192,11 +199,13 @@ impl Apply for L2CancelOrderTxTarget {
             &mut tx_state.account_assets[OWNER_ACCOUNT_ID],
         );
 
+        release_closed_market_slot_if_drained(builder, self.success, tx_state);
+
         cancel_child_orders(
             builder,
             self.success,
             tx_state,
-            self.market_index,
+            tx_state.market.market_index,
             tx_state.account_order.owner_account_index,
             tx_state.account_order.to_trigger_order_index0,
             tx_state.account_order.to_trigger_order_index1,
@@ -248,7 +257,10 @@ impl<T: Witness<F>, F: PrimeField64> L2CancelOrderTxTargetWitness<F> for T {
         self.set_target(a.account_index, F::from_canonical_i64(b.account_index))?;
         self.set_target(a.api_key_index, F::from_canonical_u8(b.api_key_index))?;
         self.set_target(a.index, F::from_canonical_i64(b.index))?;
-        self.set_target(a.market_index, F::from_canonical_u16(b.market_index))?;
+        self.set_target(
+            a.public_market_index,
+            F::from_canonical_i64(b.public_market_index),
+        )?;
 
         Ok(())
     }

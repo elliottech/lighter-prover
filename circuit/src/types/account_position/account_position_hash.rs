@@ -23,6 +23,7 @@ impl AccountPositionTarget {
             self.total_order_count,
             self.total_position_tied_order_count,
             self.margin_set_flag,
+            self.public_market_index,
         ]);
     }
 

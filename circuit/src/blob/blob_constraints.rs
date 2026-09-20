@@ -59,7 +59,7 @@ where
     pub blob_polynomial_opening_x: [u8; KECCAK_HASH_OUT_BYTE_SIZE],
     pub blob_polynomial_opening_y: [u8; KECCAK_HASH_OUT_BYTE_SIZE],
 
-    pub account_delta_tree_root: HashOut<F>,
+    pub delta_root: HashOut<F>,
     pub public_market_details: [PublicMarketDetails; POSITION_LIST_SIZE],
 }
 
@@ -98,7 +98,7 @@ pub struct BlobEvaluationCircuit {
 
 #[derive(Clone, Debug)]
 pub struct BlobEvaluationTarget {
-    pub account_delta_tree_root: HashOutTarget,
+    pub delta_root: HashOutTarget,
     pub public_market_details: [PublicMarketDetailsTarget; POSITION_LIST_SIZE],
     pub blob_bytes: Box<[U8Target; BLOB_DATA_BYTES_COUNT]>, // 0 byte at the beginning of each 32 byte limb is omitted
     pub kzg_versioned_hash: KeccakOutputTarget,
@@ -162,14 +162,14 @@ impl BlobEvaluationTarget {
             .unwrap();
 
         offset += POSITION_LIST_SIZE * PublicMarketDetails::PUBLIC_INPUTS_SIZE;
-        let account_delta_tree_root = HashOutTarget {
+        let delta_root = HashOutTarget {
             elements: public_inputs[offset..offset + NUM_HASH_OUT_ELTS]
                 .try_into()
                 .unwrap(),
         };
 
         Self {
-            account_delta_tree_root,
+            delta_root,
             public_market_details,
             blob_bytes,
             kzg_versioned_hash,
@@ -235,7 +235,7 @@ impl Circuit<C, F, D> for BlobEvaluationCircuit {
             pw.set_u8_target(target.blob_bytes[i], blob.blob_bytes[i])?;
         }
 
-        pw.set_hash_target(target.account_delta_tree_root, blob.account_delta_tree_root)?;
+        pw.set_hash_target(target.delta_root, blob.delta_root)?;
         for i in 0..POSITION_LIST_SIZE {
             pw.set_public_market_details_target(
                 &target.public_market_details[i],
@@ -263,7 +263,7 @@ impl BlobEvaluationCircuit {
                 kzg_versioned_hash: builder.add_virtual_keccak_output_target_unsafe(),
                 blob_polynomial_opening_x: builder.add_virtual_keccak_output_target_unsafe(),
                 blob_polynomial_opening_y: builder.add_virtual_keccak_output_target_unsafe(),
-                account_delta_tree_root: builder.add_virtual_hash(),
+                delta_root: builder.add_virtual_hash(),
 
                 public_market_details,
             },
@@ -283,8 +283,7 @@ impl BlobEvaluationCircuit {
         self.target.public_market_details.iter().for_each(|md| {
             md.register_public_input(&mut self.builder);
         });
-        self.builder
-            .register_public_hashout(self.target.account_delta_tree_root);
+        self.builder.register_public_hashout(self.target.delta_root);
     }
 
     pub fn verify_pce_evaluation(&mut self) {
@@ -314,11 +313,8 @@ impl BlobEvaluationCircuit {
         let reserved_hash = self._get_version_and_reserved_bytes_hash();
         let market_data_hash = self._get_market_data_hash();
 
-        self.builder.hash_n_to_one(&[
-            reserved_hash,
-            market_data_hash,
-            self.target.account_delta_tree_root,
-        ])
+        self.builder
+            .hash_n_to_one(&[reserved_hash, market_data_hash, self.target.delta_root])
     }
 
     /// Commits to version bytes and the reserved section.

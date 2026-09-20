@@ -33,7 +33,7 @@ where
 
     pub new_validium_root: HashOut<F>,
     pub new_state_root: HashOut<F>,
-    pub new_account_delta_tree_root: HashOut<F>,
+    pub new_delta_root: HashOut<F>,
 
     pub change_pub_key_message: ChangePubKeyMessage<F>,
     pub transfer_message: TransferMessage,
@@ -50,7 +50,7 @@ where
     pub jump: JumpState<F>,
 
     pub initial_state_root: HashOut<F>,
-    pub initial_account_delta_tree_root: HashOut<F>,
+    pub initial_delta_root: HashOut<F>,
 
     pub signature_count: F, // Initial count given
     pub signature_digest_seed: [F; P3_DIGEST_STATE_WIDTH], // Initial seed
@@ -78,10 +78,7 @@ where
             .field("created_at", &self.created_at)
             .field("new_validium_root", &self.new_validium_root)
             .field("new_state_root", &self.new_state_root)
-            .field(
-                "new_account_delta_tree_root",
-                &self.new_account_delta_tree_root,
-            )
+            .field("new_delta_root", &self.new_delta_root)
             .field("on_chain_operations_count", &self.on_chain_operations_count)
             .field("on_chain_operations_pub_data", &on_chain_pub_data)
             .field("priority_operations_count", &self.priority_operations_count)
@@ -140,7 +137,7 @@ where
                 public_inputs[8],
                 public_inputs[9],
             ]),
-            new_account_delta_tree_root: HashOut::<F>::from([
+            new_delta_root: HashOut::<F>::from([
                 public_inputs[10],
                 public_inputs[11],
                 public_inputs[12],
@@ -188,7 +185,7 @@ where
                 public_inputs[initial_state_root_index + 2],
                 public_inputs[initial_state_root_index + 3],
             ]),
-            initial_account_delta_tree_root: HashOut::<F>::from([
+            initial_delta_root: HashOut::<F>::from([
                 public_inputs[initial_delta_root_index],
                 public_inputs[initial_delta_root_index + 1],
                 public_inputs[initial_delta_root_index + 2],
@@ -217,9 +214,9 @@ pub struct BlockTxChainWitnessTarget {
     pub new_validium_root: HashOutTarget,
     pub new_state_root: HashOutTarget,
 
-    // Initialized in cyclic_base_proof with a block witness's old_account_delta_tree_root,
-    // but represents the new_account_delta_tree_root of the previously executed cyclic group.
-    pub new_account_delta_tree_root: HashOutTarget,
+    // Initialized in cyclic_base_proof with a block witness's old_delta_root,
+    // but represents the new_delta_root of the previously executed cyclic group.
+    pub new_delta_root: HashOutTarget,
 
     pub change_pub_key_message: ChangePubKeyMessageTarget,
     pub transfer_message: TransferMessageTarget,
@@ -236,7 +233,7 @@ pub struct BlockTxChainWitnessTarget {
     pub jump: JumpStateTarget,
 
     pub initial_state_root: HashOutTarget,
-    pub initial_account_delta_tree_root: HashOutTarget,
+    pub initial_delta_root: HashOutTarget,
 
     pub signature_digest_state: [Target; P3_DIGEST_STATE_WIDTH],
     pub signature_count: Target,
@@ -251,7 +248,7 @@ impl BlockTxChainWitnessTarget {
             created_at: builder.add_virtual_public_input(),
             new_validium_root: builder.add_virtual_hash_public_input(),
             new_state_root: builder.add_virtual_hash_public_input(),
-            new_account_delta_tree_root: builder.add_virtual_hash_public_input(),
+            new_delta_root: builder.add_virtual_hash_public_input(),
             new_public_market_details_hash: builder.add_virtual_hash_public_input(),
             change_pub_key_message: ChangePubKeyMessageTarget::new_public(builder),
             transfer_message: TransferMessageTarget::new_public(builder),
@@ -274,7 +271,7 @@ impl BlockTxChainWitnessTarget {
                 .unwrap(), // safe because it is connected to public witness from tx circuit which range-checked its output
             jump: JumpStateTarget::new_public(builder),
             initial_state_root: builder.add_virtual_hash_public_input(),
-            initial_account_delta_tree_root: builder.add_virtual_hash_public_input(),
+            initial_delta_root: builder.add_virtual_hash_public_input(),
             signature_digest_state: core::array::from_fn(|_| builder.add_virtual_public_input()),
             signature_count: builder.add_virtual_public_input(),
             signed_so_far: builder.add_virtual_public_input(),
@@ -335,7 +332,7 @@ impl BlockTxChainWitnessTarget {
                     elements: [pis[6], pis[7], pis[8], pis[9]],
                 },
 
-                new_account_delta_tree_root: HashOutTarget {
+                new_delta_root: HashOutTarget {
                     elements: [pis[10], pis[11], pis[12], pis[13]],
                 },
 
@@ -378,7 +375,7 @@ impl BlockTxChainWitnessTarget {
                         pis[initial_state_root_index + 3],
                     ],
                 },
-                initial_account_delta_tree_root: HashOutTarget {
+                initial_delta_root: HashOutTarget {
                     elements: [
                         pis[initial_delta_root_index],
                         pis[initial_delta_root_index + 1],
@@ -406,10 +403,7 @@ impl BlockTxChainWitnessTarget {
 
         builder.connect_hashes(self.new_validium_root, other.new_validium_root);
         builder.connect_hashes(self.new_state_root, other.new_state_root);
-        builder.connect_hashes(
-            self.new_account_delta_tree_root,
-            other.new_account_delta_tree_root,
-        );
+        builder.connect_hashes(self.new_delta_root, other.new_delta_root);
 
         ChangePubKeyMessageTarget::connect(
             builder,
@@ -449,10 +443,7 @@ impl BlockTxChainWitnessTarget {
         JumpStateTarget::connect(builder, &self.jump, &other.jump);
 
         builder.connect_hashes(self.initial_state_root, other.initial_state_root);
-        builder.connect_hashes(
-            self.initial_account_delta_tree_root,
-            other.initial_account_delta_tree_root,
-        );
+        builder.connect_hashes(self.initial_delta_root, other.initial_delta_root);
 
         for (a, b) in self
             .signature_digest_state

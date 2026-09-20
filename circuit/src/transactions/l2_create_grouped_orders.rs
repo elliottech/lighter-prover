@@ -31,7 +31,7 @@ use crate::utils::CircuitBuilderUtils;
 #[serde(default)]
 pub struct TxOrder {
     #[serde(rename = "mi")]
-    pub market_index: u16,
+    pub public_market_index: i64,
 
     #[serde(rename = "oi")]
     pub client_order_index: i64, // 48 bits (user-assigned or 0)
@@ -79,10 +79,10 @@ pub struct L2CreateGroupedOrdersTx {
 
 #[derive(Debug, Clone)]
 pub struct TxOrderTarget {
-    pub market_index: Target,       // 8 bits
-    pub client_order_index: Target, // 48 bits
-    pub base_amount: Target,        // 48 bits
-    pub price: Target,              // 32 bits
+    pub public_market_index: Target, // 48 bits
+    pub client_order_index: Target,  // 48 bits
+    pub base_amount: Target,         // 48 bits
+    pub price: Target,               // 32 bits
     pub is_ask: BoolTarget,
     pub order_type: Target,
     pub time_in_force: Target,
@@ -99,7 +99,7 @@ pub struct L2CreateGroupedOrdersTxTarget {
     pub orders: [TxOrderTarget; MAX_NB_GROUPED_ORDERS],
 
     // helpers
-    pub market_index: Target,
+    pub public_market_index: Target,
     pub order_count: Target,
     pub base_amounts: [Target; MAX_NB_GROUPED_ORDERS],
     pub order_exists: [BoolTarget; MAX_NB_GROUPED_ORDERS],
@@ -114,7 +114,7 @@ pub struct L2CreateGroupedOrdersTxTarget {
 impl L2CreateGroupedOrdersTxTarget {
     pub fn new(builder: &mut Builder) -> Self {
         let orders: [TxOrderTarget; 3] = array::from_fn(|_| TxOrderTarget {
-            market_index: builder.add_virtual_target(),
+            public_market_index: builder.add_virtual_target(),
             client_order_index: builder.add_virtual_target(),
             base_amount: builder.add_virtual_target(),
             price: builder.add_virtual_target(),
@@ -132,7 +132,7 @@ impl L2CreateGroupedOrdersTxTarget {
             orders,
 
             // helpers
-            market_index: Target::default(),
+            public_market_index: Target::default(),
             order_count: Target::default(),
             base_amounts: [Target::default(), Target::default(), Target::default()],
             order_exists: [
@@ -301,7 +301,7 @@ impl TxHash for L2CreateGroupedOrdersTxTarget {
         let num_orders = builder.select(is_otoco, three, two);
 
         let mut aggregated_order_hash = builder.hash_n_to_hash_no_pad::<Poseidon2Hash>(vec![
-            self.orders[0].market_index,
+            self.orders[0].public_market_index,
             self.orders[0].client_order_index,
             self.orders[0].base_amount,
             self.orders[0].price,
@@ -318,7 +318,7 @@ impl TxHash for L2CreateGroupedOrdersTxTarget {
             let is_equal = builder.is_equal(_i, num_orders);
             flag = builder.and_not(flag, is_equal);
             let order_hash = builder.hash_n_to_hash_no_pad::<Poseidon2Hash>(vec![
-                self.orders[i].market_index,
+                self.orders[i].public_market_index,
                 self.orders[i].client_order_index,
                 self.orders[i].base_amount,
                 self.orders[i].price,
@@ -367,13 +367,22 @@ impl Verify for L2CreateGroupedOrdersTxTarget {
         let is_enabled = tx_type.is_l2_create_grouped_orders;
         self.success = is_enabled;
 
-        self.market_index = self.orders[0].market_index;
-        builder.conditional_assert_eq(is_enabled, self.market_index, tx_state.market.market_index);
+        self.public_market_index = self.orders[0].public_market_index;
         builder.conditional_assert_eq(
             is_enabled,
-            self.market_index,
-            tx_state.market.perps_market_index,
+            self.public_market_index,
+            tx_state.market.public_market_index,
         );
+        let nil_public_market_index = builder.constant_u64(NIL_PUBLIC_MARKET_INDEX as u64);
+        builder.conditional_assert_not_eq(
+            is_enabled,
+            self.public_market_index,
+            nil_public_market_index,
+        );
+        // The pmi match above guarantees a live market leaf, so market_type is reliable here.
+        let is_perps_market =
+            builder.is_equal_constant(tx_state.market.market_type, MARKET_TYPE_PERPS);
+        builder.conditional_assert_true(is_enabled, is_perps_market);
 
         builder.conditional_assert_eq(
             is_enabled,
@@ -401,18 +410,21 @@ impl Verify for L2CreateGroupedOrdersTxTarget {
             );
             let flag = builder.and_not(is_enabled, is_taker_insurance_fund);
 
-            let is_taker_isolated = builder.is_equal_constant(
-                tx_state.positions[TAKER_ACCOUNT_ID].margin_mode,
-                ISOLATED_MARGIN as u64,
+            let mut taker_position = tx_state.positions[TAKER_ACCOUNT_ID].clone();
+            let always = builder._true();
+            taker_position.init_if_empty(
+                builder,
+                always,
+                tx_state.accounts[TAKER_ACCOUNT_ID].account_type,
+                market_flags.default_margin_mode,
+                tx_state.market.public_market_index,
             );
-            let is_taker_cross = builder.is_equal_constant(
-                tx_state.positions[TAKER_ACCOUNT_ID].margin_mode,
-                CROSS_MARGIN as u64,
-            );
-            let is_margin_set = builder.is_equal_constant(
-                tx_state.positions[TAKER_ACCOUNT_ID].margin_set_flag,
-                MARGIN_SET as u64,
-            );
+            let is_taker_isolated =
+                builder.is_equal_constant(taker_position.margin_mode, ISOLATED_MARGIN as u64);
+            let is_taker_cross =
+                builder.is_equal_constant(taker_position.margin_mode, CROSS_MARGIN as u64);
+            let is_margin_set =
+                builder.is_equal_constant(taker_position.margin_set_flag, MARGIN_SET as u64);
 
             // Pools can't trade on isolated-only markets
             let pool_on_isolated_only =
@@ -502,7 +514,11 @@ impl Verify for L2CreateGroupedOrdersTxTarget {
             self.order_exists[i] = order_exists;
             let flag = builder.and(is_enabled, self.order_exists[i]);
 
-            builder.conditional_assert_eq(flag, self.market_index, self.orders[i].market_index);
+            builder.conditional_assert_eq(
+                flag,
+                self.public_market_index,
+                self.orders[i].public_market_index,
+            );
 
             // Assert reduce only is 0 or 1
             builder.assert_bool(BoolTarget::new_unsafe(self.orders[i].reduce_only));
@@ -769,7 +785,7 @@ impl Apply for L2CreateGroupedOrdersTxTarget {
                     insert_order,
                     execute_transaction,
                 ),
-                market_index: self.orders[i].market_index,
+                market_index: tx_state.market.market_index,
                 account_index: self.account_index,
 
                 pending_size: self.base_amounts[i],
@@ -937,8 +953,8 @@ impl<T: Witness<F>, F: PrimeField64> L2CreateGroupedOrdersTxTargetWitness<F> for
         self.set_target(a.grouping_type, F::from_canonical_u8(b.grouping_type))?;
         for i in 0..MAX_NB_GROUPED_ORDERS {
             self.set_target(
-                a.orders[i].market_index,
-                F::from_canonical_u16(b.orders[i].market_index),
+                a.orders[i].public_market_index,
+                F::from_canonical_i64(b.orders[i].public_market_index),
             )?;
             self.set_target(
                 a.orders[i].client_order_index,

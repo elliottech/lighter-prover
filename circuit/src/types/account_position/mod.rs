@@ -3,7 +3,5 @@
 
 pub mod account_position;
 pub mod account_position_hash;
-pub mod account_position_with_delta;
 
 pub use account_position::*;
-pub use account_position_with_delta::*;

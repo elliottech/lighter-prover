@@ -261,8 +261,7 @@ impl L1CreateMarketTxTarget {
         let market_status_expired = builder.constant_from_u8(MARKET_STATUS_EXPIRED);
         let market_is_not_expired =
             builder.is_not_equal(tx_state.market_risk_details.status, market_status_expired);
-        let is_market_open_interest_not_zero =
-            builder.is_not_zero(tx_state.market_details.open_interest);
+        let is_market_open_interest_not_zero = builder.is_not_zero(tx_state.market.open_interest);
         let not_expired_or_nonzero_open_interest =
             builder.multi_or(&[market_is_not_expired, is_market_open_interest_not_zero]);
         let should_be_false = builder.and(flag, not_expired_or_nonzero_open_interest);
@@ -355,6 +354,23 @@ impl Verify for L1CreateMarketTxTarget {
         let order_book_is_inactive =
             builder.multi_and(&[order_book_is_expired, order_book_total_order_count_zero]);
         self.success = builder.and(self.success, order_book_is_inactive);
+
+        // pmi exhaustion check
+        let is_next_public_market_index_exhausted = builder.is_equal_constant(
+            tx_state.next_public_market_index,
+            MAX_PUBLIC_MARKET_INDEX as u64 + 1,
+        );
+        self.success = builder.and_not(self.success, is_next_public_market_index_exhausted);
+
+        // The assignable range starts above the nil public market index: values up to 255 are
+        // reserved for legacy slot stamping and the nil sentinel.
+        let nil_public_market_index = builder.constant_u64(NIL_PUBLIC_MARKET_INDEX as u64);
+        let is_next_public_market_index_above_nil = builder.is_gt(
+            tx_state.next_public_market_index,
+            nil_public_market_index,
+            56,
+        );
+        self.success = builder.and(self.success, is_next_public_market_index_above_nil);
     }
 }
 
@@ -362,22 +378,26 @@ impl Apply for L1CreateMarketTxTarget {
     fn apply(&mut self, builder: &mut Builder, tx_state: &mut TxState) -> BoolTarget {
         let is_perps_market_type = builder.is_equal_constant(self.market_type, MARKET_TYPE_PERPS);
         let nil_market_index = builder.constant_u64(NIL_MARKET_INDEX as u64);
+        let assigned_public_market_index = tx_state.next_public_market_index;
+        let (ask_nonce, bid_nonce) = tx_state.market.next_market_nonces(builder);
 
         let market_after = MarketTarget {
             market_index: self.market_index,
+            public_market_index: assigned_public_market_index,
             perps_market_index: builder.select(
                 is_perps_market_type,
                 self.market_index,
                 nil_market_index,
             ),
+            binary_options_market_index: nil_market_index,
 
             status: builder.constant_u8(MARKET_STATUS_ACTIVE).0,
             market_type: self.market_type,
             base_asset_id: self.base_asset_id,
             quote_asset_id: self.quote_asset_id,
 
-            ask_nonce: builder.constant_i64(FIRST_ASK_NONCE),
-            bid_nonce: builder.constant_i64(FIRST_BID_NONCE),
+            ask_nonce,
+            bid_nonce,
 
             taker_fee: self.taker_fee,
             maker_fee: self.maker_fee,
@@ -389,9 +409,29 @@ impl Apply for L1CreateMarketTxTarget {
             min_quote_amount: self.min_quote_amount,
             order_quote_limit: self.order_quote_limit,
 
+            start_timestamp: builder.zero(),
+            end_timestamp: builder.zero(),
+            open_interest: builder.zero(),
+            open_interest_limit: self.open_interest_limit,
+            outcome: builder.zero(),
+            market_operator_account_index: builder
+                .constant_u64(INSURANCE_FUND_OPERATOR_ACCOUNT_INDEX as u64),
+            settlement_cap: builder.zero(),
+            settlement_type: builder.zero(),
+            settlement_price: builder.zero(),
+            default_price: builder.zero(),
+            is_frozen: builder.zero(),
+
             order_book_root: builder.constant_hash(EMPTY_ORDER_BOOK_TREE_ROOT),
         };
         tx_state.market = select_market(builder, self.success, &market_after, &tx_state.market);
+
+        let next_public_market_index_after = builder.add_one(tx_state.next_public_market_index);
+        tx_state.next_public_market_index = builder.select(
+            self.success,
+            next_public_market_index_after,
+            assigned_public_market_index,
+        );
 
         let update_market_details_flag = builder.and(self.success, is_perps_market_type);
         let market_details_after = MarketDetailsTarget {

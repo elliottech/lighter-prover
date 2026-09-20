@@ -3,7 +3,7 @@
 
 use anyhow::Result;
 use hashbrown::HashMap;
-use plonky2::field::types::{Field, PrimeField64};
+use plonky2::field::types::{Field, Field64, PrimeField64};
 use plonky2::iop::target::{BoolTarget, Target};
 use plonky2::iop::witness::Witness;
 use serde::Deserialize;
@@ -29,7 +29,7 @@ pub const ATTR_INTEGRATOR_FEE_COLLECTOR_INDEX: usize = 1;
 pub const ATTR_INTEGRATOR_TAKER_FEE: usize = 2;
 pub const ATTR_INTEGRATOR_MAKER_FEE: usize = 3;
 pub const ATTR_SKIP_TX_NONCE: usize = 4;
-pub const ATTR_CANCEL_ALL_MARKET_INDEX: usize = 5;
+pub const ATTR_CANCEL_ALL_PUBLIC_MARKET_INDEX: usize = 5;
 pub const ATTR_SELF_TRADE_BEHAVIOR_MODE: usize = 6;
 pub const ATTR_SELF_TRADE_EQUALITY_MODE: usize = 7;
 pub const ATTR_ORDER_VERSION: usize = 8;
@@ -48,7 +48,7 @@ lazy_static! {
         m.insert(ATTR_INTEGRATOR_TAKER_FEE, 24);
         m.insert(ATTR_INTEGRATOR_MAKER_FEE, 24);
         m.insert(ATTR_SKIP_TX_NONCE, 1);
-        m.insert(ATTR_CANCEL_ALL_MARKET_INDEX, MARKET_INDEX_BITS);
+        m.insert(ATTR_CANCEL_ALL_PUBLIC_MARKET_INDEX, PUBLIC_MARKET_INDEX_BITS);
         m.insert(ATTR_SELF_TRADE_BEHAVIOR_MODE, 8);
         m.insert(ATTR_SELF_TRADE_EQUALITY_MODE, 8);
         m.insert(ATTR_ORDER_VERSION, TIMESTAMP_BITS);
@@ -61,12 +61,15 @@ lazy_static! {
             ATTR_INTEGRATOR_FEE_COLLECTOR_INDEX,
             NIL_ACCOUNT_INDEX as u64,
         );
-        m.insert(ATTR_INTEGRATOR_TAKER_FEE, FEE_TICK );
-        m.insert(ATTR_INTEGRATOR_MAKER_FEE, FEE_TICK );
+        m.insert(ATTR_INTEGRATOR_TAKER_FEE, FEE_TICK);
+        m.insert(ATTR_INTEGRATOR_MAKER_FEE, FEE_TICK);
         m.insert(ATTR_SKIP_TX_NONCE, 1u64);
-        m.insert(ATTR_CANCEL_ALL_MARKET_INDEX, NIL_MARKET_INDEX as u64);
+        m.insert(
+            ATTR_CANCEL_ALL_PUBLIC_MARKET_INDEX,
+            MAX_PUBLIC_MARKET_INDEX as u64,
+        );
         m.insert(ATTR_SELF_TRADE_BEHAVIOR_MODE, SELF_TRADE_BEHAVIOR_REDUCE);
-        m.insert(ATTR_SELF_TRADE_EQUALITY_MODE, SELF_TRADE_EQUALITY_MASTER_ACCOUNT_INDEX );
+        m.insert(ATTR_SELF_TRADE_EQUALITY_MODE, SELF_TRADE_EQUALITY_MASTER_ACCOUNT_INDEX);
         m.insert(ATTR_ORDER_VERSION, MAX_ORDER_VERSION as u64);
         m
     };
@@ -77,7 +80,7 @@ lazy_static! {
             F::ZERO, // Integrator Taker Fee
             F::ZERO, // Integrator Maker Fee
             F::ZERO, // Skip Tx Nonce
-            F::from_canonical_u8(NIL_MARKET_INDEX), // Cancel All Market Index
+            F::from_canonical_i64(NIL_PUBLIC_MARKET_INDEX), // Cancel All Public Market Index
             F::ZERO, // Self-trade behavior mode
             F::ZERO, // Self-trade equality mode
             F::ZERO, // Order Modify Nonce

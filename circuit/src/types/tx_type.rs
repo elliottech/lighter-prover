@@ -51,6 +51,10 @@ pub struct TxTypeTargets {
     pub is_l2_approve_integrator: BoolTarget,
     pub is_l2_update_account_asset_config: BoolTarget,
     pub is_l2_update_asset_config: BoolTarget,
+    pub is_l2_create_market: BoolTarget,
+    pub is_l2_settle_outcome: BoolTarget,
+    pub is_l2_update_market: BoolTarget,
+    pub is_l2_update_market_slot: BoolTarget,
 
     pub is_internal_claim_order: BoolTarget,
     pub is_internal_cancel_order: BoolTarget,
@@ -62,6 +66,7 @@ pub struct TxTypeTargets {
     pub is_internal_pending_unlock: BoolTarget,
     pub is_internal_transfer: BoolTarget,
     pub is_internal_liquidate_spot: BoolTarget,
+    pub is_internal_settle_binary_options_position: BoolTarget,
 
     pub is_layer1: BoolTarget,
     pub is_layer2: BoolTarget,
@@ -152,6 +157,14 @@ impl TxTypeTargets {
             builder.is_equal_constant(tx_type, TX_TYPE_L2_UPDATE_ACCOUNT_ASSET_CONFIG as u64);
         let is_l2_update_asset_config =
             builder.is_equal_constant(tx_type, TX_TYPE_L2_UPDATE_ASSET_CONFIG as u64);
+        let is_l2_create_market =
+            builder.is_equal_constant(tx_type, TX_TYPE_L2_CREATE_MARKET as u64);
+        let is_l2_settle_outcome =
+            builder.is_equal_constant(tx_type, TX_TYPE_L2_SETTLE_OUTCOME as u64);
+        let is_l2_update_market =
+            builder.is_equal_constant(tx_type, TX_TYPE_L2_UPDATE_MARKET as u64);
+        let is_l2_update_market_slot =
+            builder.is_equal_constant(tx_type, TX_TYPE_L2_UPDATE_MARKET_SLOT as u64);
 
         let is_internal_claim_order =
             builder.is_equal_constant(tx_type, TX_TYPE_INTERNAL_CLAIM_ORDER as u64);
@@ -173,6 +186,10 @@ impl TxTypeTargets {
             builder.is_equal_constant(tx_type, TX_TYPE_INTERNAL_INTEGRATOR_OPERATIONS as u64);
         let is_internal_liquidate_spot =
             builder.is_equal_constant(tx_type, TX_TYPE_INTERNAL_LIQUIDATE_SPOT as u64);
+        let is_internal_settle_binary_options_position = builder.is_equal_constant(
+            tx_type,
+            TX_TYPE_INTERNAL_SETTLE_BINARY_OPTIONS_POSITION as u64,
+        );
 
         // Using BoolTarget::new_unsafe is safe here because each target is guaranteed to be a boolean and
         // we are validating that their sum (valid_tx_type) is true(one). Because there are less than field order
@@ -214,6 +231,10 @@ impl TxTypeTargets {
             is_l2_approve_integrator.target,
             is_l2_update_account_asset_config.target,
             is_l2_update_asset_config.target,
+            is_l2_create_market.target,
+            is_l2_settle_outcome.target,
+            is_l2_update_market.target,
+            is_l2_update_market_slot.target,
             is_internal_claim_order.target,
             is_internal_cancel_order.target,
             is_internal_deleverage.target,
@@ -224,6 +245,7 @@ impl TxTypeTargets {
             is_internal_pending_unlock.target,
             is_internal_transfer.target,
             is_internal_liquidate_spot.target,
+            is_internal_settle_binary_options_position.target,
         ]));
         builder.assert_true(is_valid_tx_type);
 
@@ -252,6 +274,10 @@ impl TxTypeTargets {
             is_l2_approve_integrator.target,
             is_l2_update_account_asset_config.target,
             is_l2_update_asset_config.target,
+            is_l2_create_market.target,
+            is_l2_settle_outcome.target,
+            is_l2_update_market.target,
+            is_l2_update_market_slot.target,
         ]));
 
         let is_layer1 = BoolTarget::new_unsafe(builder.add_many(vec![
@@ -331,6 +357,10 @@ impl TxTypeTargets {
             is_l2_approve_integrator,
             is_l2_update_account_asset_config,
             is_l2_update_asset_config,
+            is_l2_create_market,
+            is_l2_settle_outcome,
+            is_l2_update_market,
+            is_l2_update_market_slot,
 
             is_internal_claim_order,
             is_internal_cancel_order,
@@ -342,6 +372,7 @@ impl TxTypeTargets {
             is_internal_pending_unlock,
             is_internal_transfer,
             is_internal_liquidate_spot,
+            is_internal_settle_binary_options_position,
 
             is_layer1,
             is_layer2,
@@ -474,7 +505,7 @@ impl TxTypeTargets {
         builder.assert_false(is_staking_pool_tx);
 
         // If sender is the insurance fund operator, only public pool related transactions,
-        // transfers and withdrawals are allowed.
+        // transfers, withdrawals, config updates and market lifecycle transactions are allowed.
         let is_insurance_fund_operator = builder.is_equal_constant(
             verify_inputs.tx_sender_account_partial.account_index,
             INSURANCE_FUND_OPERATOR_ACCOUNT_INDEX as u64,
@@ -488,6 +519,10 @@ impl TxTypeTargets {
             self.is_l2_update_public_pool,
             self.is_l2_update_market_config,
             self.is_l2_update_asset_config,
+            self.is_l2_update_market_slot,
+            self.is_l2_create_market,
+            self.is_l2_settle_outcome,
+            self.is_l2_update_market,
         ]);
         let check_insurance_fund_operator_tx =
             builder.and(is_insurance_fund_operator, self.is_layer2);

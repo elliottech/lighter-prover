@@ -11,11 +11,13 @@ use crate::bigint::biguint::{BigUintTarget, CircuitBuilderBiguint};
 use crate::bigint::comparison::CircuitBuilderBiguintSubtractiveComparison;
 use crate::bigint::div_rem::CircuitBuilderBiguintDivRem;
 use crate::bool_utils::CircuitBuilderBoolUtils;
+use crate::comparison::CircuitBuilderSubtractiveComparison;
 use crate::hints::CircuitBuilderHints;
 use crate::liquidation::get_funding_delta_for_position_and_market;
 use crate::signed::signed_target::{CircuitBuilderSigned, SignedTarget};
 use crate::types::account_position::{AccountPositionTarget, get_position_unrealized_pnl};
 use crate::types::asset::AssetTarget;
+use crate::types::binary_options_position::BinaryOptionsPositionTarget;
 use crate::types::config::{
     BIG_U64_LIMBS, BIG_U96_LIMBS, BIG_U128_LIMBS, BIGU16_U64_LIMBS, Builder, F,
 };
@@ -232,12 +234,14 @@ pub fn apply_perps_trade(
         is_enabled,
         input.taker_account_type,
         market_flags.default_margin_mode,
+        input.market.public_market_index,
     );
     old_maker_position.init_if_empty(
         builder,
         is_enabled,
         input.maker_account_type,
         market_flags.default_margin_mode,
+        input.market.public_market_index,
     );
 
     let is_taker_position_isolated =
@@ -632,7 +636,7 @@ pub fn apply_perps_trade(
         builder.add_signed(taker_open_interest_delta, maker_open_interest_delta);
     // Result should be non-negative because open interest is sum of the absolute values of the positions and we are potentially only reducing previously added positions
     let new_open_interest = builder.add_signed(
-        SignedTarget::new_unsafe(input.market_details.open_interest),
+        SignedTarget::new_unsafe(input.market.open_interest),
         open_interest_delta,
     );
 
@@ -675,6 +679,7 @@ pub fn calculate_position_change(
     let position_delta_bigint =
         builder.signed_target_to_bigint_u16(position_delta, BIGU16_U64_LIMBS);
     let mut new_position = AccountPositionTarget {
+        public_market_index: position.public_market_index,
         last_funding_rate_prefix_sum: market_details.funding_rate_prefix_sum.clone(),
         position: builder.add_bigint_u16_non_carry(
             &position.position,
@@ -1081,4 +1086,310 @@ pub fn calculate_isolated_margin_change(
     );
 
     builder.select_bigint(is_enabled, &result, &zero_bigint)
+}
+
+pub struct ApplyBinaryOptionsTradeParams<'a> {
+    pub taker_bo_position: &'a BinaryOptionsPositionTarget,
+    pub maker_bo_position: &'a BinaryOptionsPositionTarget,
+    pub fee_account_is_taker: BoolTarget,
+    pub fee_account_is_maker: BoolTarget,
+}
+
+struct BinaryOptionsPositionChange {
+    close_amount: Target,
+    open_amount: Target,
+    new_position: BinaryOptionsPositionTarget,
+    is_valid: BoolTarget,
+}
+
+// Computes the new binary options position for an account trading `trade_base` shares
+// in the direction given by `is_ask` (asks sell YES shares, so the size delta is negative).
+// `close_amount` is the part of the trade that reduces the existing position and `open_amount`
+// is the part that increases the exposure in the direction of the size delta.
+fn calculate_binary_options_position_change(
+    builder: &mut Builder,
+    old_position: &BinaryOptionsPositionTarget,
+    is_ask: BoolTarget,
+    trade_base: Target,
+    trade_quote: Target,
+    settlement_cap: Target,
+) -> BinaryOptionsPositionChange {
+    let one = builder.one();
+    let neg_one = builder.neg_one();
+
+    let old_abs = builder.biguint_u16_to_target(&old_position.size.abs);
+    let delta_sign = builder.select(is_ask, neg_one, one);
+    let neg_delta_sign = builder.neg(delta_sign);
+    let is_opposite_direction = builder.is_equal(old_position.size.sign.target, neg_delta_sign);
+
+    let min_old_abs_trade_base = builder.min(&[old_abs, trade_base], POSITION_SIZE_BITS);
+    let close_amount = builder.mul_bool(is_opposite_direction, min_old_abs_trade_base);
+    let open_amount = builder.sub(trade_base, close_amount);
+
+    // The entry quote of the closed part is realized pro-rata, the same way perps positions realize PnL
+    let entry_quote_big = builder.target_to_biguint(old_position.entry_quote);
+    let has_close = builder.is_not_zero(close_amount);
+    let close_amount_big = builder.target_to_biguint(close_amount);
+    let closed_entry_quote_numerator =
+        builder.mul_biguint_non_carry(&entry_quote_big, &close_amount_big, BIG_U128_LIMBS);
+    let close_divisor = builder.select(has_close, old_abs, one);
+    let close_divisor_big = builder.target_to_biguint(close_divisor);
+    let closed_entry_quote = builder.div_biguint_trimmed(
+        &closed_entry_quote_numerator,
+        &close_divisor_big,
+        BIG_U64_LIMBS,
+    );
+    let closed_entry_quote = builder.biguint_to_bigint(&closed_entry_quote);
+    let entry_quote_int = builder.biguint_to_bigint(&entry_quote_big);
+    let entry_quote_after_close = builder.sub_bigint(&entry_quote_int, &closed_entry_quote);
+
+    // The opened part costs the pro-rata trade quote for YES exposure and the settlement cap
+    // payout minus the pro-rata trade quote for NO exposure
+    let has_open = builder.is_not_zero(open_amount);
+    let open_amount_big = builder.target_to_biguint(open_amount);
+    let trade_quote_big = builder.target_to_biguint(trade_quote);
+    let open_quote_numerator =
+        builder.mul_biguint_non_carry(&trade_quote_big, &open_amount_big, BIG_U128_LIMBS);
+    let open_divisor = builder.select(has_open, trade_base, one);
+    let open_divisor_big = builder.target_to_biguint(open_divisor);
+    let open_quote =
+        builder.div_biguint_trimmed(&open_quote_numerator, &open_divisor_big, BIG_U64_LIMBS);
+    let open_quote_int = builder.biguint_to_bigint(&open_quote);
+
+    let settlement_cap_big = builder.target_to_biguint(settlement_cap);
+    let open_payout_quote =
+        builder.mul_biguint_non_carry(&open_amount_big, &settlement_cap_big, BIG_U128_LIMBS);
+    let open_payout_quote_int = builder.biguint_to_bigint(&open_payout_quote);
+    let no_open_cost =
+        builder.sub_bigint_non_carry(&open_payout_quote_int, &open_quote_int, BIG_U128_LIMBS);
+    let open_cost = builder.select_bigint(is_ask, &no_open_cost, &open_quote_int);
+
+    let new_entry_quote_int =
+        builder.add_bigint_non_carry(&entry_quote_after_close, &open_cost, BIG_U128_LIMBS);
+
+    // Entry quotes exceeding the maximum are stored as max + 1 so that the position is
+    // reported as invalid and the trade is rejected by the matching flow
+    let max_position_quote = (1u64 << POSITION_SIZE_BITS) - 1;
+    let max_position_quote_big = builder.constant_biguint(&BigUint::from(max_position_quote));
+    let max_position_quote_plus_one_big =
+        builder.constant_biguint(&BigUint::from(max_position_quote + 1));
+    let is_entry_quote_valid =
+        builder.is_lte_biguint(&new_entry_quote_int.abs, &max_position_quote_big);
+    let clamped_entry_quote =
+        builder.min_biguint(&new_entry_quote_int.abs, &max_position_quote_plus_one_big);
+    let new_entry_quote = builder.biguint_to_target_safe(&clamped_entry_quote);
+
+    let size_delta = SignedTarget::new_unsafe(builder.mul(delta_sign, trade_base));
+    let size_delta = builder.signed_target_to_bigint_u16(size_delta, BIGU16_U64_LIMBS);
+    let new_size =
+        builder.add_bigint_u16_non_carry(&old_position.size, &size_delta, BIGU16_U64_LIMBS);
+    let new_size_abs = builder.biguint_u16_to_target(&new_size.abs);
+    let max_position_size = builder.constant_u64((1 << POSITION_SIZE_BITS) - 1);
+    let is_size_valid = builder.is_lte(new_size_abs, max_position_size, 64);
+
+    let is_valid = builder.and(is_entry_quote_valid, is_size_valid);
+
+    BinaryOptionsPositionChange {
+        close_amount,
+        open_amount,
+        new_position: BinaryOptionsPositionTarget {
+            entry_quote: new_entry_quote,
+            size: new_size,
+            ..old_position.clone()
+        },
+        is_valid,
+    }
+}
+
+// Binary options trades are fully collateralized in USDC.
+// Each share pays out at most the settlement cap, depending on the settlement price and the position side.
+// The buyer pays price*size and receives back the escrowed payout for any NO exposure it closes,
+// while the seller receives price*size and escrows the payout for any NO exposure it opens.
+pub fn apply_binary_options_trade(
+    builder: &mut Builder,
+    is_enabled: BoolTarget,
+    input: &ApplyTradeParams,
+    bo_input: &ApplyBinaryOptionsTradeParams,
+) -> (
+    BinaryOptionsPositionTarget, // new taker position
+    BinaryOptionsPositionTarget, // new maker position
+    BigIntTarget,                // taker USDC balance delta
+    BigIntTarget,                // maker USDC balance delta
+    BigIntTarget,                // fee USDC balance delta
+    Target,                      // new open interest
+    BoolTarget,                  // is new taker position valid
+    BoolTarget,                  // is new maker position valid
+    BoolTarget,                  // is new open interest valid
+) {
+    let zero = builder.zero();
+
+    let is_binary_options =
+        builder.is_equal_constant(input.market.market_type, MARKET_TYPE_BINARY_OPTIONS);
+    let is_enabled = builder.and(is_enabled, is_binary_options);
+    let is_disabled = builder.not(is_enabled);
+
+    let trade_quote_is_negative = builder.is_negative(input.trade_quote);
+    builder.conditional_assert_false(is_enabled, trade_quote_is_negative);
+    let is_taker_fee_negative = builder.is_negative(input.taker_fee);
+    let is_maker_fee_negative = builder.is_negative(input.maker_fee);
+    let is_fee_negative = builder.or(is_taker_fee_negative, is_maker_fee_negative);
+    builder.conditional_assert_false(is_enabled, is_fee_negative);
+
+    let trade_base = builder.select(is_enabled, input.trade_base, zero);
+    let trade_quote = builder.select(is_enabled, input.trade_quote.target, zero);
+
+    // All amounts below are in quote ticks and scaled by the quote extension multiplier once at
+    // the end, since size extension multiplier == cap * quote extension multiplier
+    let settlement_cap_big = builder.target_to_biguint(input.market.settlement_cap);
+    let trade_quote_big = builder.target_to_biguint(trade_quote);
+    let trade_quote_int = builder.biguint_to_bigint(&trade_quote_big);
+    let trade_base_big = builder.target_to_biguint(trade_base);
+    let trade_payout =
+        builder.mul_biguint_non_carry(&trade_base_big, &settlement_cap_big, BIG_U128_LIMBS);
+
+    let is_taker_ask = input.is_taker_ask;
+    let is_maker_ask = builder.not(is_taker_ask);
+
+    let taker_change = calculate_binary_options_position_change(
+        builder,
+        bo_input.taker_bo_position,
+        is_taker_ask,
+        trade_base,
+        trade_quote,
+        input.market.settlement_cap,
+    );
+    let maker_change = calculate_binary_options_position_change(
+        builder,
+        bo_input.maker_bo_position,
+        is_maker_ask,
+        trade_base,
+        trade_quote,
+        input.market.settlement_cap,
+    );
+
+    let buyer_close_amount = builder.select(
+        is_taker_ask,
+        maker_change.close_amount,
+        taker_change.close_amount,
+    );
+    let seller_open_amount = builder.select(
+        is_taker_ask,
+        taker_change.open_amount,
+        maker_change.open_amount,
+    );
+
+    let buyer_close_amount_big = builder.target_to_biguint(buyer_close_amount);
+    let buyer_close_payout =
+        builder.mul_biguint_non_carry(&buyer_close_amount_big, &settlement_cap_big, BIG_U128_LIMBS);
+    let buyer_close_payout_int = builder.biguint_to_bigint(&buyer_close_payout);
+    let buyer_quote_delta =
+        builder.sub_bigint_non_carry(&buyer_close_payout_int, &trade_quote_int, BIG_U128_LIMBS);
+
+    let seller_open_amount_big = builder.target_to_biguint(seller_open_amount);
+    let seller_open_payout =
+        builder.mul_biguint_non_carry(&seller_open_amount_big, &settlement_cap_big, BIG_U128_LIMBS);
+    let seller_open_payout_int = builder.biguint_to_bigint(&seller_open_payout);
+    let seller_quote_delta =
+        builder.sub_bigint_non_carry(&trade_quote_int, &seller_open_payout_int, BIG_U128_LIMBS);
+
+    let taker_quote_delta =
+        builder.select_bigint(is_taker_ask, &seller_quote_delta, &buyer_quote_delta);
+    let maker_quote_delta =
+        builder.select_bigint(is_taker_ask, &buyer_quote_delta, &seller_quote_delta);
+
+    // Each side pays fees on its own cash outlay: the buyer on the quote it pays for its
+    // YES exposure, the seller on the payout minus quote it escrows for its NO exposure.
+    // quote extension multiplier % FEE_TICK == 0, so fee * (multiplier / FEE_TICK) is exact.
+    let taker_fee_non_zero = builder.is_not_zero(input.taker_fee.target);
+    let maker_fee_non_zero = builder.is_not_zero(input.maker_fee.target);
+    let fees_enabled = builder.or(taker_fee_non_zero, maker_fee_non_zero);
+    let trade_payout_int = builder.biguint_to_bigint(&trade_payout);
+    let seller_fee_base =
+        builder.sub_bigint_non_carry(&trade_payout_int, &trade_quote_int, BIG_U128_LIMBS);
+    let taker_fee_base = builder.select_bigint(is_taker_ask, &seller_fee_base, &trade_quote_int);
+    let maker_fee_base = builder.select_bigint(is_taker_ask, &trade_quote_int, &seller_fee_base);
+
+    let fee_tick = builder.constant_u64(FEE_TICK);
+    let (quote_fee_multiplier, _) =
+        builder.div_rem(input.market.quote_extension_multiplier, fee_tick, FEE_BITS);
+    let [taker_fee_delta, maker_fee_delta] = [
+        (&taker_fee_base, input.taker_fee),
+        (&maker_fee_base, input.maker_fee),
+    ]
+    .map(|(fee_base, fee)| {
+        let fee = builder.mul_bool(fees_enabled, fee.target);
+        let extended_fee_multiplier = builder.mul(fee, quote_fee_multiplier);
+        let extended_fee_multiplier_big = builder.target_to_biguint(extended_fee_multiplier);
+        builder.mul_bigint_with_biguint_non_carry(
+            fee_base,
+            &extended_fee_multiplier_big,
+            BIG_U128_LIMBS,
+        )
+    });
+
+    let quote_multiplier_big = builder.target_to_biguint(input.market.quote_extension_multiplier);
+    let [mut taker_usdc_delta, mut maker_usdc_delta] = [
+        (&taker_quote_delta, &taker_fee_delta),
+        (&maker_quote_delta, &maker_fee_delta),
+    ]
+    .map(|(quote_delta, fee_delta)| {
+        let extended_delta = builder.mul_bigint_with_biguint_non_carry(
+            quote_delta,
+            &quote_multiplier_big,
+            BIG_U128_LIMBS,
+        );
+        builder.sub_bigint_non_carry(&extended_delta, fee_delta, BIG_U128_LIMBS)
+    });
+
+    let total_fee_delta =
+        builder.add_bigint_non_carry(&taker_fee_delta, &maker_fee_delta, BIG_U128_LIMBS);
+
+    // If the fee account is the taker or the maker, fold the fee income into that side's delta
+    let fee_to_taker = builder.mul_bigint_by_bool(&total_fee_delta, bo_input.fee_account_is_taker);
+    taker_usdc_delta =
+        builder.add_bigint_non_carry(&taker_usdc_delta, &fee_to_taker, BIG_U128_LIMBS);
+    let fee_to_maker = builder.mul_bigint_by_bool(&total_fee_delta, bo_input.fee_account_is_maker);
+    maker_usdc_delta =
+        builder.add_bigint_non_carry(&maker_usdc_delta, &fee_to_maker, BIG_U128_LIMBS);
+
+    let fee_account_is_taker_or_maker =
+        builder.or(bo_input.fee_account_is_taker, bo_input.fee_account_is_maker);
+    let fee_account_is_different = builder.not(fee_account_is_taker_or_maker);
+    let fee_usdc_delta = builder.mul_bigint_by_bool(&total_fee_delta, fee_account_is_different);
+
+    // Open interest counts both sides, e.g. a YES position of 100 against a NO position of -100
+    // is 200 open interest
+    let open_amounts = builder.add(taker_change.open_amount, maker_change.open_amount);
+    let close_amounts = builder.add(taker_change.close_amount, maker_change.close_amount);
+    let open_interest_delta = SignedTarget::new_unsafe(builder.sub(open_amounts, close_amounts));
+    let new_open_interest = builder.add(input.market.open_interest, open_interest_delta.target);
+    let new_open_interest =
+        builder.select(is_enabled, new_open_interest, input.market.open_interest);
+
+    // The open interest limit is interpreted against the double-counted open interest, in quote ticks
+    let is_open_interest_increased = builder.is_positive(open_interest_delta);
+    let new_open_interest_big = builder.target_to_biguint(new_open_interest);
+    let new_escrow =
+        builder.mul_biguint_non_carry(&new_open_interest_big, &settlement_cap_big, BIG_U128_LIMBS);
+    let open_interest_limit_big = builder.target_to_biguint(input.market.open_interest_limit);
+    let is_escrow_lte_limit = builder.is_lte_biguint(&new_escrow, &open_interest_limit_big);
+    let _true = builder._true();
+    let is_open_interest_valid =
+        builder.select_bool(is_open_interest_increased, is_escrow_lte_limit, _true);
+
+    let is_taker_position_valid = builder.or(is_disabled, taker_change.is_valid);
+    let is_maker_position_valid = builder.or(is_disabled, maker_change.is_valid);
+    let is_open_interest_valid = builder.or(is_disabled, is_open_interest_valid);
+
+    (
+        taker_change.new_position,
+        maker_change.new_position,
+        taker_usdc_delta,
+        maker_usdc_delta,
+        fee_usdc_delta,
+        new_open_interest,
+        is_taker_position_valid,
+        is_maker_position_valid,
+        is_open_interest_valid,
+    )
 }

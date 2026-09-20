@@ -47,10 +47,12 @@ pub struct RiskParametersTarget {
 }
 
 impl RiskInfoTarget {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         builder: &mut Builder,
         account: &AccountTarget,
         position: &AccountPositionTarget,
+        market_public_market_index: Target,
         current_market_details: &MarketRiskDetailsTarget,
         all_market_risk_details: &[MarketRiskDetailsTarget; POSITION_LIST_SIZE],
         all_margined_assets: &[MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
@@ -60,6 +62,7 @@ impl RiskInfoTarget {
             builder,
             account,
             position,
+            market_public_market_index,
             current_market_details,
             all_market_risk_details,
             all_margined_assets,
@@ -68,10 +71,12 @@ impl RiskInfoTarget {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new_light(
         builder: &mut Builder,
         account: &AccountTarget,
         position: &AccountPositionTarget,
+        market_public_market_index: Target,
         current_market_details: &MarketRiskDetailsTarget,
         all_market_risk_details: &[MarketRiskDetailsTarget; POSITION_LIST_SIZE],
         all_margined_assets: &[MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
@@ -81,6 +86,7 @@ impl RiskInfoTarget {
             builder,
             account,
             position,
+            market_public_market_index,
             current_market_details,
             all_market_risk_details,
             all_margined_assets,
@@ -94,6 +100,7 @@ impl RiskInfoTarget {
         builder: &mut Builder,
         account: &AccountTarget,
         position: &AccountPositionTarget,
+        market_public_market_index: Target,
         current_market_details: &MarketRiskDetailsTarget,
         all_market_risk_details: &[MarketRiskDetailsTarget; POSITION_LIST_SIZE],
         all_margined_assets: &[MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
@@ -116,9 +123,15 @@ impl RiskInfoTarget {
             light,
         );
 
+        let is_public_market_index_matching =
+            builder.is_equal(position.public_market_index, market_public_market_index);
+        let is_isolated = builder.and(
+            position.is_isolated_unsafe(),
+            is_public_market_index_matching,
+        );
         let current_risk_parameters = RiskParametersTarget::select(
             builder,
-            position.is_isolated_unsafe(),
+            is_isolated,
             &isolated_risk_parameters,
             &cross_risk_parameters,
         );

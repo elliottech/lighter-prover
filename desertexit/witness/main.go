@@ -47,9 +47,13 @@ func main() {
 		allPublicMarketDetails[i] = &PubdataMarketDetailWitness{}
 	}
 
+	// Published market state keyed by market slot, the market pub data tree leaves. Market deltas carry the
+	// full published state so the latest delta of a slot wins.
+	marketPubDatas := make(map[int16]*PubdataMarketWitness)
+
 	for i, blobBytes := range input.BlobBytes {
 		// Get bytes from blob
-		markPriceBytes, fundingBytes, quoteMultiplierBytes, accountPubDataBytes, err := getBlobBytes(blobBytes)
+		blobVersion, markPriceBytes, fundingBytes, quoteMultiplierBytes, deltaPubDataBytes, err := getBlobBytes(blobBytes)
 		if err != nil {
 			panic("failed to reverse compute blob data, err:" + err.Error())
 		}
@@ -61,11 +65,14 @@ func main() {
 			allPublicMarketDetails[j].QuoteMultiplier = binary.BigEndian.Uint16(quoteMultiplierBytes[j*QuoteMultiplierByteSize:])
 		}
 
-		// Parse account deltas and build account pub data objects
-		accountDeltas, err := bytesToAccountDeltas(accountPubDataBytes)
+		// Parse market and account deltas and build the pub data objects
+		marketDeltas, accountDeltas, err := bytesToDeltas(blobVersion, deltaPubDataBytes)
 		if err != nil {
 			fmt.Printf("failed to decompress pubdata, %v", err)
 			panic("failed to decompress pubdata, err:" + err.Error())
+		}
+		for _, marketDelta := range marketDeltas {
+			marketPubDatas[marketDelta.MarketIndex] = &marketDelta.PubdataMarketWitness
 		}
 
 		// Construct hashes to be set in the pub data tree
@@ -94,6 +101,12 @@ func main() {
 							Position:                 posDelta.Position,
 						}
 					}
+				}
+				if existingDelta.BinaryOptionsPositions == nil {
+					existingDelta.BinaryOptionsPositions = make(map[int16]int64)
+				}
+				for marketIndex, sizeDelta := range delta.BinaryOptionsPositions {
+					existingDelta.BinaryOptionsPositions[marketIndex] += sizeDelta
 				}
 				for assetIndex, balanceDelta := range delta.AggregatedBalances {
 					if existingBalance, balanceExists := existingDelta.AggregatedBalances[assetIndex]; balanceExists {
@@ -184,9 +197,13 @@ func main() {
 	lastValidiumRoot, _ := p2.HashOutFromLittleEndianBytes(eth.Hex2Bytes(input.LastValidiumRoot))
 	allPublicMarketDetailsHash := allPublicMarketDetailsHash(allPublicMarketDetails)
 
+	marketPubDataTree := newMarketPubDataTree(marketPubDatas)
+	marketPubDataTreeRoot, _ := p2.HashOutFromLittleEndianBytes(marketPubDataTree.Root())
+	binaryOptionsPositions := getBinaryOptionsPositionWitnesses(mainAccount, marketPubDatas, marketPubDataTree)
+
 	totalBalance := big.NewInt(0)
 	if assetIndex == USDCAssetIndex {
-		totalBalance = getUsdcBalanceForWitness(accounts, allPublicMarketDetails)
+		totalBalance = getUsdcBalanceForWitness(accounts, allPublicMarketDetails, binaryOptionsPositions)
 	} else if assetBal, exists := accounts[0].AggregatedBalances[assetIndex]; exists {
 		totalBalance = assetBal
 	}
@@ -201,9 +218,13 @@ func main() {
 		AccountPubDataMerkleProofs: accountPubDataMerkleProofs,
 
 		AllPublicMarketDetails: allPublicMarketDetails,
+		MarketPubDataTreeRoot:  marketPubDataTreeRoot,
+		BinaryOptionsPositions: binaryOptionsPositions,
 
 		ValidiumRoot: lastValidiumRoot,
-		StateRoot:    p2.HashNToOne([]p2.HashOut{accountPubDataTreeRoot, allPublicMarketDetailsHash, lastValidiumRoot}),
+		StateRoot: p2.HashNToOne([]p2.HashOut{
+			accountPubDataTreeRoot, allPublicMarketDetailsHash, marketPubDataTreeRoot, lastValidiumRoot,
+		}),
 	}
 	jsonBytes, err := json.Marshal(desertWitness)
 	if err != nil {

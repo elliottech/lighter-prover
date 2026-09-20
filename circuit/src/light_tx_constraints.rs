@@ -17,7 +17,8 @@ use crate::matching_engine::execute_matching_light;
 use crate::merkle_helpers::{
     account_client_order_index_to_merkle_path, account_index_to_merkle_path,
     account_order_index_to_merkle_path, api_key_index_to_merkle_path, asset_index_to_merkle_path,
-    recalculate_root, try_verify_merkle_proof, verify_merkle_proof,
+    market_index_to_merkle_path, public_market_index_to_merkle_path, recalculate_root,
+    try_verify_merkle_proof, verify_merkle_proof,
 };
 use crate::order_book_tree_helpers::order_indexes_to_merkle_path;
 use crate::tx_attributes::ATTR_SKIP_TX_NONCE;
@@ -25,7 +26,7 @@ use crate::tx_constraints::{TxTarget, compute_validium_and_state_root};
 use crate::types::account::AccountTarget;
 use crate::types::account_margined_asset::AccountMarginedAssetTarget;
 use crate::types::account_position::{
-    AccountPositionTarget, PositionWithDelta, random_access_account_position,
+    AccountPositionTarget, random_access_account_position, random_access_positions,
 };
 use crate::types::asset::{AssetTarget, random_access_assets};
 use crate::types::config::Builder;
@@ -115,14 +116,11 @@ impl TxTarget {
             ),
         ];
 
-        let positions_with_pub_data_before: [PositionWithDelta; 1] =
-            PositionWithDelta::new_positions_with_pub_data_from_accounts(
-                builder,
-                self.market_before.perps_market_index,
-                &self.accounts_before[..1],
-                &self.accounts_delta_before[..1],
-            );
-        let owner_position_before = positions_with_pub_data_before[0].position.clone();
+        let [owner_position_before] = random_access_positions(
+            builder,
+            self.market_before.perps_market_index,
+            [&self.accounts_before[OWNER_ACCOUNT_ID].positions[..]],
+        );
 
         let account_margined_assets_before: [[AccountMarginedAssetTarget; NB_ASSETS_PER_TX]; 1] =
             AccountTarget::get_margined_asset_balances(
@@ -198,10 +196,15 @@ impl TxTarget {
             market_risk_details: market_risk_details_before.clone(),
             order: self.order_before.clone(),
             order_book_tree_path: self.order_book_tree_path.clone(),
+            next_public_market_index: self.next_public_market_index_before,
             positions: [
                 owner_position_before.clone(),
                 AccountPositionTarget::default(),
             ],
+            binary_options_positions: array::from_fn(|i| {
+                self.accounts_before[i]
+                    .get_binary_options_position(builder, self.market_before.public_market_index)
+            }),
             risk_infos: [owner_risk_info_before.clone(), RiskInfoTarget::default()],
             strategies: core::array::from_fn(|_| zero_bigint.clone()),
             is_asset_used_as_margin: core::array::from_fn(|_| is_asset_used_as_margin),
@@ -255,6 +258,8 @@ impl TxTarget {
         execute_matching_light(builder, tx_state);
         tx_state.push_instruction_stack::<INSERT_MAX_ONE_REGISTER>(builder);
 
+        self.apply_account_market_delta(builder, tx_state);
+
         self.apply_light_position_diff(
             builder,
             tx_state,
@@ -271,14 +276,19 @@ impl TxTarget {
             margined_assets_hash,
             market_risk_details_hash,
             public_market_details_hash,
+            public_market_index_tree_hash,
             _,
         ) = self.verify_old_state_root(builder, state_metadata_hash);
+
+        self.verify_light_public_market_index_merkle_proof(builder, tx_state);
 
         self.verify_light_api_key_merkle_proof(builder, tx_state);
 
         self.verify_light_account_orders_merkle_proof(builder, tx_state);
 
         self.verify_light_assets_merkle_proofs(builder, tx_state, &old_owner_asset_hashes);
+
+        self.verify_light_account_market_data_merkle_proof(builder, tx_state);
 
         let current_account_tree_root = self.verify_light_account_merkle_proof(
             builder,
@@ -311,10 +321,18 @@ impl TxTarget {
             self.old_account_pub_data_tree_root,
             current_market_details_tree_root,
             current_market_tree_root,
+            self.old_market_pub_data_tree_root,
+            public_market_index_tree_hash,
             state_metadata_hash,
         );
         builder.connect_hashes(self.new_validium_root, new_validium_root);
         builder.connect_hashes(self.new_state_root, new_state_root);
+
+        let old_delta_root = builder.hash_two_to_one(
+            &self.old_account_delta_tree_root,
+            &self.old_market_delta_hash,
+        );
+        builder.connect_hashes(self.old_delta_root, old_delta_root);
 
         (
             [builder.zero_u8(); MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX],
@@ -322,7 +340,7 @@ impl TxTarget {
             [builder.zero_u8(); ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE],
             builder._false(),
             public_market_details_hash,
-            self.old_account_delta_tree_root,
+            self.old_delta_root,
             account_pk,
             tx_hash,
             self.signature.clone(),
@@ -399,9 +417,8 @@ impl TxTarget {
             .get_relevant_usdc_collateral(builder, strategy_index);
 
         let partial_account = AccountTarget {
-            positions: self.accounts_before[OWNER_ACCOUNT_ID].positions.clone(),
             margined_assets,
-            ..AccountTarget::default()
+            ..self.accounts_before[OWNER_ACCOUNT_ID].clone()
         };
 
         let all_market_details =
@@ -429,6 +446,7 @@ impl TxTarget {
             builder,
             &partial_account,
             owner_position_before,
+            self.market_before.public_market_index,
             &current_market_details,
             &all_market_details,
             all_margined_assets_before,
@@ -548,6 +566,42 @@ impl TxTarget {
         }
     }
 
+    /// Light-path variant of `verify_public_market_index_merkle_proof`. Light transactions
+    /// (l2 create/cancel/modify order, internal claim order) never mutate the market's public
+    /// market index, the market index, or the next public market index, so the leaf is only
+    /// verified against the old root and the old combined tree hash is reused for the new state
+    /// root.
+    fn verify_light_public_market_index_merkle_proof(
+        &self,
+        builder: &mut Builder,
+        tx_state: &TxState,
+    ) {
+        let is_public_market_index_nil = builder.is_equal_constant(
+            self.market_before.public_market_index,
+            NIL_PUBLIC_MARKET_INDEX as u64,
+        );
+        let public_market_index_merkle_path =
+            public_market_index_to_merkle_path(builder, self.market_before.public_market_index);
+
+        let leaf = self.public_market_index_tree_leaf_hash(
+            builder,
+            is_public_market_index_nil,
+            self.market_before.market_index,
+        );
+        verify_merkle_proof(
+            builder,
+            &self.old_public_market_index_tree_root,
+            leaf,
+            self.public_market_index_tree_merkle_proof,
+            public_market_index_merkle_path,
+        );
+
+        builder.connect(
+            tx_state.next_public_market_index,
+            self.next_public_market_index_before,
+        );
+    }
+
     fn verify_light_api_key_merkle_proof(&self, builder: &mut Builder, tx_state: &mut TxState) {
         let api_key_before_hash = self.api_key_before.hash(builder);
         let api_key_merkle_path =
@@ -567,6 +621,36 @@ impl TxTarget {
             new_api_key_hash,
             self.api_key_tree_merkle_proof,
             api_key_merkle_path,
+        );
+    }
+
+    // The account market data tree is keyed by the binary options market slot, transactions on
+    // other market types prove the nil market index leaf
+    fn verify_light_account_market_data_merkle_proof(
+        &self,
+        builder: &mut Builder,
+        tx_state: &mut TxState,
+    ) {
+        let merkle_path =
+            market_index_to_merkle_path(builder, self.market_before.binary_options_market_index);
+
+        let old_hash = self.accounts_before[OWNER_ACCOUNT_ID]
+            .binary_options_position
+            .hash(builder);
+        verify_merkle_proof(
+            builder,
+            &self.accounts_before[OWNER_ACCOUNT_ID].market_data_root,
+            old_hash,
+            self.account_market_data_tree_merkle_proofs[OWNER_ACCOUNT_ID],
+            merkle_path,
+        );
+
+        let new_hash = tx_state.binary_options_positions[OWNER_ACCOUNT_ID].hash(builder);
+        tx_state.accounts[OWNER_ACCOUNT_ID].market_data_root = recalculate_root(
+            builder,
+            new_hash,
+            self.account_market_data_tree_merkle_proofs[OWNER_ACCOUNT_ID],
+            merkle_path,
         );
     }
 

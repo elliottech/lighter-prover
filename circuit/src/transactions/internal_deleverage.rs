@@ -377,6 +377,11 @@ impl Apply for InternalDeleverageTxTarget {
         );
 
         // Apply trade deltas
+        tx_state.market.open_interest = builder.select(
+            self.success,
+            new_open_interest,
+            tx_state.market.open_interest,
+        );
         tx_state.market_details.open_interest = builder.select(
             self.success,
             new_open_interest,

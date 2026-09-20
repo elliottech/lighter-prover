@@ -11,11 +11,13 @@ use plonky2::hash::hash_types::{HashOutTarget, RichField};
 use plonky2::iop::target::{BoolTarget, Target};
 use plonky2::iop::witness::Witness;
 
+use crate::bigint::big_u16::CircuitBuilderBigIntU16;
 use crate::bigint::bigint::{BigIntTarget, CircuitBuilderBigInt};
 use crate::bigint::biguint::CircuitBuilderBiguint;
 use crate::bigint::div_rem::CircuitBuilderBiguintDivRem;
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::comparison::CircuitBuilderSubtractiveComparison;
+use crate::delta::market_delta_leaf::MarketDeltaLeafTarget;
 use crate::ecdsa::curve::curve_types::AffinePoint;
 use crate::ecdsa::curve::ecdsa::{ECDSAPublicKey, ECDSASignature};
 use crate::ecdsa::curve::secp256k1::Secp256K1;
@@ -33,13 +35,14 @@ use crate::merkle_helpers::{
     account_client_order_index_to_merkle_path, account_index_to_merkle_path,
     account_order_index_to_merkle_path, api_key_index_to_merkle_path, asset_index_to_merkle_path,
     conditional_verify_merkle_proof, market_index_to_merkle_path,
-    perps_market_index_to_merkle_path, recalculate_root, try_verify_merkle_proof,
-    verify_merkle_proof,
+    perps_market_index_to_merkle_path, public_market_index_to_merkle_path, recalculate_root,
+    try_verify_merkle_proof, verify_merkle_proof,
 };
 use crate::order_book_tree_helpers::{
     order_indexes_to_merkle_path, recalculate_order_book_tree_root,
     verify_order_book_tree_merkle_proof,
 };
+use crate::poseidon2::Poseidon2Hash;
 use crate::signed::signed_target::{CircuitBuilderSigned, SignedTarget, WitnessSigned};
 use crate::transactions::internal_cancel_all_orders::{
     InternalCancelAllOrdersTxTarget, InternalCancelAllOrdersTxTargetWitness,
@@ -67,6 +70,9 @@ use crate::transactions::internal_liquidate_spot::{
 };
 use crate::transactions::internal_pending_unlock::{
     InternalPendingUnlockTxTarget, InternalPendingUnlockTxTargetWitness,
+};
+use crate::transactions::internal_settle_binary_options_position::{
+    InternalSettleBinaryOptionsPositionTxTarget, InternalSettleBinaryOptionsPositionTxTargetWitness,
 };
 use crate::transactions::internal_transfer::{
     InternalTransferTxTarget, InternalTransferTxTargetWitness,
@@ -108,6 +114,9 @@ use crate::transactions::l2_change_pubkey::{
 use crate::transactions::l2_create_grouped_orders::{
     L2CreateGroupedOrdersTxTarget, L2CreateGroupedOrdersTxTargetWitness,
 };
+use crate::transactions::l2_create_market::{
+    L2CreateMarketTxTarget, L2CreateMarketTxTargetWitness,
+};
 use crate::transactions::l2_create_order::{L2CreateOrderTxTarget, L2CreateOrderTxTargetWitness};
 use crate::transactions::l2_create_public_pool::{
     L2CreatePublicPoolTxTarget, L2CreatePublicPoolTxTargetWitness,
@@ -120,6 +129,9 @@ use crate::transactions::l2_create_sub_account::{
 };
 use crate::transactions::l2_mint_shares::{L2MintSharesTxTarget, L2MintSharesTxTargetWitness};
 use crate::transactions::l2_modify_order::{L2ModifyOrderTxTarget, L2ModifyOrderTxTargetWitness};
+use crate::transactions::l2_settle_outcome::{
+    L2SettleOutcomeTxTarget, L2SettleOutcomeTxTargetWitness,
+};
 use crate::transactions::l2_stake_assets::{L2StakeAssetsTxTarget, L2StakeAssetsTxTargetWitness};
 use crate::transactions::l2_strategy_transfer::{
     L2StrategyTransferTxTarget, L2StrategyTransferTxTargetWitness,
@@ -143,8 +155,14 @@ use crate::transactions::l2_update_leverage::{
 use crate::transactions::l2_update_margin::{
     L2UpdateMarginTxTarget, L2UpdateMarginTxTargetWitness,
 };
+use crate::transactions::l2_update_market::{
+    L2UpdateMarketTxTarget, L2UpdateMarketTxTargetWitness,
+};
 use crate::transactions::l2_update_market_config::{
     L2UpdateMarketConfigTxTarget, L2UpdateMarketConfigTxTargetWitness,
+};
+use crate::transactions::l2_update_market_slot::{
+    L2UpdateMarketSlotTxTarget, L2UpdateMarketSlotTxTargetWitness,
 };
 use crate::transactions::l2_update_public_pool::{
     L2UpdatePublicPoolTxTarget, L2UpdatePublicPoolTxTargetWitness,
@@ -155,20 +173,23 @@ use crate::tx_attributes::{ATTR_SKIP_TX_NONCE, TxAttributesTarget, TxAttributesT
 use crate::tx_interface::TransactionTarget;
 use crate::types::account::{AccountTarget, AccountTargetWitness};
 use crate::types::account_asset::{AccountAssetTarget, AccountAssetTargetWitness};
-use crate::types::account_delta::{AccountDeltaTarget, AccountDeltaTargetWitness};
+use crate::types::account_delta::{
+    AccountDeltaTarget, AccountDeltaTargetWitness, MarketDataDeltaTarget,
+};
 use crate::types::account_margined_asset::{
     AccountMarginedAssetTarget, select_account_margined_asset_target,
 };
 use crate::types::account_order::{AccountOrderTarget, AccountOrderTargetWitness};
 use crate::types::account_position::{
-    AccountPositionTarget, PositionWithDelta, random_access_account_position,
+    AccountPositionTarget, random_access_account_position, random_access_positions,
 };
 use crate::types::api_key::{ApiKeyTarget, ApiKeyTargetWitness};
 use crate::types::asset::{
     AssetTarget, AssetTargetWitness, all_assets_hash, apply_diff_assets, diff_assets,
     random_access_assets,
 };
-use crate::types::config::{BIG_U96_LIMBS, Builder};
+use crate::types::binary_options_position::BinaryOptionsPositionWitness;
+use crate::types::config::{BIG_U96_LIMBS, BIGU16_U64_LIMBS, Builder};
 use crate::types::constants::*;
 use crate::types::margined_asset::{
     MarginedAssetTarget, MarginedAssetTargetWitness, all_margined_assets_hash,
@@ -244,6 +265,10 @@ pub struct TxTarget {
     pub l2_update_asset_config_tx_target: TransactionTarget<L2UpdateAssetConfigTxTarget>,
     pub l2_update_account_asset_config_tx_target:
         TransactionTarget<L2UpdateAccountAssetConfigTxTarget>,
+    pub l2_create_market_tx_target: TransactionTarget<L2CreateMarketTxTarget>,
+    pub l2_settle_outcome_tx_target: TransactionTarget<L2SettleOutcomeTxTarget>,
+    pub l2_update_market_tx_target: TransactionTarget<L2UpdateMarketTxTarget>,
+    pub l2_update_market_slot_tx_target: TransactionTarget<L2UpdateMarketSlotTxTarget>,
 
     /*************************/
     /* Internal Transactions */
@@ -258,6 +283,8 @@ pub struct TxTarget {
     pub internal_pending_unlock_tx_target: TransactionTarget<InternalPendingUnlockTxTarget>,
     pub internal_transfer_tx_target: TransactionTarget<InternalTransferTxTarget>,
     pub internal_liquidate_spot_tx_target: TransactionTarget<InternalLiquidateSpotTxTarget>,
+    pub internal_settle_binary_options_position_tx_target:
+        TransactionTarget<InternalSettleBinaryOptionsPositionTxTarget>,
 
     /***********************/
     /*  Transactions Data  */
@@ -301,11 +328,17 @@ pub struct TxTarget {
         [[[HashOutTarget; ASSET_MERKLE_LEVELS]; NB_ASSETS_PER_TX]; NB_ACCOUNTS_PER_TX],
 
     pub position_delta_merkle_proofs:
-        [[HashOutTarget; POSITION_MERKLE_LEVELS]; NB_ACCOUNTS_PER_TX - 1],
+        [[HashOutTarget; MARKET_MERKLE_LEVELS]; NB_ACCOUNTS_PER_TX - 1],
+    pub account_market_data_tree_merkle_proofs:
+        [[HashOutTarget; MARKET_MERKLE_LEVELS]; NB_ACCOUNTS_PER_TX - 1],
+    pub account_market_pub_data_tree_merkle_proofs:
+        [[HashOutTarget; MARKET_MERKLE_LEVELS]; NB_ACCOUNTS_PER_TX - 1],
     pub api_key_tree_merkle_proof: [HashOutTarget; API_KEY_MERKLE_LEVELS],
     pub account_orders_tree_merkle_proof:
         [[HashOutTarget; ACCOUNT_ORDERS_MERKLE_LEVELS]; NB_ACCOUNT_ORDERS_PATHS_PER_TX],
+    pub public_market_index_tree_merkle_proof: [HashOutTarget; PUBLIC_MARKET_INDEX_MERKLE_LEVELS],
     pub market_tree_merkle_proof: [HashOutTarget; MARKET_MERKLE_LEVELS],
+    pub market_pub_data_tree_merkle_proof: [HashOutTarget; MARKET_MERKLE_LEVELS],
     pub market_details_tree_merkle_proof: [HashOutTarget; MARKET_DETAILS_TREE_HEIGHT],
     pub order_book_tree_path: [OrderBookNodeTarget; ORDER_BOOK_MERKLE_LEVELS],
     pub cancelled_order_book_tree_path: [OrderBookNodeTarget; ORDER_BOOK_MERKLE_LEVELS],
@@ -318,9 +351,15 @@ pub struct TxTarget {
 
     pub old_account_tree_root: HashOutTarget,
     pub old_account_pub_data_tree_root: HashOutTarget,
-    pub old_account_delta_tree_root: HashOutTarget,
     pub old_market_details_tree_root: HashOutTarget,
     pub old_market_tree_root: HashOutTarget,
+    pub old_market_pub_data_tree_root: HashOutTarget,
+    pub old_public_market_index_tree_root: HashOutTarget,
+    pub next_public_market_index_before: Target,
+
+    pub old_account_delta_tree_root: HashOutTarget,
+    pub old_market_delta_hash: HashOutTarget,
+    pub old_delta_root: HashOutTarget,
 
     pub old_validium_root: HashOutTarget,
     pub old_state_root: HashOutTarget,
@@ -434,6 +473,18 @@ impl TxTarget {
             l2_update_account_asset_config_tx_target: TransactionTarget::new(
                 L2UpdateAccountAssetConfigTxTarget::new(builder),
             ),
+            l2_create_market_tx_target: TransactionTarget::new(L2CreateMarketTxTarget::new(
+                builder,
+            )),
+            l2_settle_outcome_tx_target: TransactionTarget::new(L2SettleOutcomeTxTarget::new(
+                builder,
+            )),
+            l2_update_market_tx_target: TransactionTarget::new(L2UpdateMarketTxTarget::new(
+                builder,
+            )),
+            l2_update_market_slot_tx_target: TransactionTarget::new(
+                L2UpdateMarketSlotTxTarget::new(builder),
+            ),
 
             /*************************/
             /* Internal Transactions */
@@ -467,6 +518,9 @@ impl TxTarget {
             )),
             internal_liquidate_spot_tx_target: TransactionTarget::new(
                 InternalLiquidateSpotTxTarget::new(builder),
+            ),
+            internal_settle_binary_options_position_tx_target: TransactionTarget::new(
+                InternalSettleBinaryOptionsPositionTxTarget::new(builder),
             ),
 
             /***********************/
@@ -516,6 +570,12 @@ impl TxTarget {
             position_delta_merkle_proofs: array::from_fn(|_| {
                 array::from_fn(|_| builder.add_virtual_hash())
             }),
+            account_market_data_tree_merkle_proofs: array::from_fn(|_| {
+                array::from_fn(|_| builder.add_virtual_hash())
+            }),
+            account_market_pub_data_tree_merkle_proofs: array::from_fn(|_| {
+                array::from_fn(|_| builder.add_virtual_hash())
+            }),
             account_pub_data_tree_merkle_proofs: array::from_fn(|_| {
                 array::from_fn(|_| builder.add_virtual_hash())
             }),
@@ -523,7 +583,9 @@ impl TxTarget {
             account_orders_tree_merkle_proof: array::from_fn(|_| {
                 array::from_fn(|_| builder.add_virtual_hash())
             }),
+            public_market_index_tree_merkle_proof: array::from_fn(|_| builder.add_virtual_hash()),
             market_tree_merkle_proof: array::from_fn(|_| builder.add_virtual_hash()),
+            market_pub_data_tree_merkle_proof: array::from_fn(|_| builder.add_virtual_hash()),
             market_details_tree_merkle_proof: array::from_fn(|_| builder.add_virtual_hash()),
             order_book_tree_path: array::from_fn(|_| OrderBookNodeTarget::new(builder)),
             cancelled_order_book_tree_path: array::from_fn(|_| OrderBookNodeTarget::new(builder)),
@@ -539,8 +601,13 @@ impl TxTarget {
             old_account_tree_root: builder.add_virtual_hash(),
             old_account_pub_data_tree_root: builder.add_virtual_hash(),
             old_account_delta_tree_root: builder.add_virtual_hash(),
+            old_market_delta_hash: builder.add_virtual_hash(),
+            old_delta_root: builder.add_virtual_hash(),
             old_market_details_tree_root: builder.add_virtual_hash(),
             old_market_tree_root: builder.add_virtual_hash(),
+            old_market_pub_data_tree_root: builder.add_virtual_hash(),
+            old_public_market_index_tree_root: builder.add_virtual_hash(),
+            next_public_market_index_before: builder.add_virtual_target(),
 
             old_validium_root: builder.add_virtual_hash(),
             old_state_root: builder.add_virtual_hash(),
@@ -645,12 +712,11 @@ impl TxTarget {
                 &self.all_margined_assets_before,
             ),
         ];
-        let positions_with_pub_data_before: [PositionWithDelta; NB_ACCOUNTS_PER_TX - 1] =
-            PositionWithDelta::new_positions_with_pub_data_from_accounts(
+        let positions_before: [AccountPositionTarget; NB_ACCOUNTS_PER_TX - 1] =
+            random_access_positions(
                 builder,
                 self.market_before.perps_market_index,
-                &self.accounts_before[..NB_ACCOUNTS_PER_TX - 1],
-                &self.accounts_delta_before[..NB_ACCOUNTS_PER_TX - 1],
+                array::from_fn(|i| &self.accounts_before[i].positions[..]),
             );
 
         let account_margined_assets_before: [[AccountMarginedAssetTarget; NB_ASSETS_PER_TX];
@@ -684,7 +750,7 @@ impl TxTarget {
         let risk_infos_before = self.get_risk_infos_before(
             builder,
             &tx_type,
-            &positions_with_pub_data_before,
+            &positions_before,
             &market_risk_details_before,
             &self.all_market_risk_details_before,
             &self.all_margined_assets_before,
@@ -703,7 +769,11 @@ impl TxTarget {
             self.get_old_account_hashes(builder);
         let old_account_asset_hashes = self.get_old_asset_hashes(builder);
         let old_position_delta_hashes: [HashOutTarget; NB_ACCOUNTS_PER_TX - 1] =
-            array::from_fn(|i| positions_with_pub_data_before[i].delta.hash(builder));
+            array::from_fn(|i| {
+                self.accounts_delta_before[i]
+                    .market_data_delta
+                    .hash(builder, self.market_before.market_type)
+            });
 
         self.attributes.sanitize_and_normalize(
             builder,
@@ -731,7 +801,12 @@ impl TxTarget {
             market_risk_details: market_risk_details_before.clone(),
             order: self.order_before.clone(),
             order_book_tree_path: self.order_book_tree_path.clone(),
-            positions: core::array::from_fn(|i| positions_with_pub_data_before[i].position.clone()),
+            next_public_market_index: self.next_public_market_index_before,
+            positions: positions_before.clone(),
+            binary_options_positions: core::array::from_fn(|i| {
+                self.accounts_before[i]
+                    .get_binary_options_position(builder, self.market_before.public_market_index)
+            }),
             risk_infos: risk_infos_before.clone(),
             strategies: strategies_before.clone(),
             is_asset_used_as_margin,
@@ -793,10 +868,12 @@ impl TxTarget {
         /*******************************/
         /*      PUSH STATE DELTAS      */
         /*******************************/
+        self.apply_account_market_delta(builder, tx_state);
+
         let position_usdc_deltas = self.apply_position_delta(
             builder,
             tx_state,
-            &positions_with_pub_data_before,
+            &positions_before,
             &mut position_bucket_hashes,
         );
 
@@ -850,10 +927,15 @@ impl TxTarget {
         /*************************/
         /*  VERIFY STATE LEAVES  */
         /*************************/
-        let (_, _, _, _, _, old_market_risk_details_bucket_hashes) =
+        let (_, _, _, _, _, _, old_market_risk_details_bucket_hashes) =
             self.verify_old_state_root(builder, state_metadata_hash);
 
+        let current_public_market_index_tree_hash =
+            self.verify_public_market_index_merkle_proof(builder, &tx_type, tx_state);
+
         self.verify_position_delta_merkle_proofs(builder, tx_state, &old_position_delta_hashes);
+
+        self.verify_account_market_data_merkle_proofs(builder, tx_state);
 
         self.verify_api_key_merkle_proof(builder, tx_state);
 
@@ -875,8 +957,17 @@ impl TxTarget {
             &position_bucket_hashes,
         );
 
+        let current_delta_root =
+            self.verify_delta_root(builder, tx_state, current_account_delta_tree_root);
+
         let current_market_tree_root =
             self.verify_market_and_order_book_proofs(builder, tx_state, self.old_market_tree_root);
+
+        let current_market_pub_data_tree_root = self.verify_market_pub_data_merkle_proof(
+            builder,
+            tx_state,
+            self.old_market_pub_data_tree_root,
+        );
 
         let current_market_details_tree_root = self.verify_market_details_merkle_proof(
             builder,
@@ -910,6 +1001,8 @@ impl TxTarget {
             current_account_pub_data_tree_root,
             current_market_details_tree_root,
             current_market_tree_root,
+            current_market_pub_data_tree_root,
+            current_public_market_index_tree_hash,
             state_metadata_hash,
         );
         builder.connect_hashes(self.new_validium_root, new_validium_root);
@@ -921,7 +1014,7 @@ impl TxTarget {
             on_chain_operations_pub_data,
             on_chain_pub_data_exists,
             current_public_market_details_hash,
-            current_account_delta_tree_root,
+            current_delta_root,
             account_pk,
             tx_hash,
             self.signature.clone(),
@@ -929,11 +1022,52 @@ impl TxTarget {
         )
     }
 
+    fn verify_delta_root(
+        &self,
+        builder: &mut Builder,
+        tx_state: &TxState,
+        current_account_delta_tree_root: HashOutTarget,
+    ) -> HashOutTarget {
+        let old_delta_root = builder.hash_two_to_one(
+            &self.old_account_delta_tree_root,
+            &self.old_market_delta_hash,
+        );
+        builder.connect_hashes(self.old_delta_root, old_delta_root);
+
+        let pmi_changed = builder.is_not_equal(
+            self.market_before.public_market_index,
+            tx_state.market.public_market_index,
+        );
+        let status_changed =
+            builder.is_not_equal(self.market_before.status, tx_state.market.status);
+        let has_market_delta = builder.or(pmi_changed, status_changed);
+
+        let market_delta_leaf = MarketDeltaLeafTarget {
+            market_index: tx_state.market.market_index,
+            public_market_index: tx_state.market.public_market_index,
+            status: tx_state.market.status,
+            price: tx_state.market.pub_data_price(builder),
+            settlement_cap: tx_state.market.settlement_cap,
+            quote_extension_multiplier: tx_state.market.quote_extension_multiplier,
+        };
+        let mut inputs = self.old_market_delta_hash.elements.to_vec();
+        inputs.extend(market_delta_leaf.pack(builder));
+        let extended_market_delta_hash = builder.hash_n_to_hash_no_pad::<Poseidon2Hash>(inputs);
+        let current_market_delta_hash = builder.select_hash(
+            has_market_delta,
+            &extended_market_delta_hash,
+            &self.old_market_delta_hash,
+        );
+
+        builder.hash_two_to_one(&current_account_delta_tree_root, &current_market_delta_hash)
+    }
+
     pub fn verify_old_state_root(
         &self,
         builder: &mut Builder,
         state_metadata_hash: HashOutTarget,
     ) -> (
+        HashOutTarget,
         HashOutTarget,
         HashOutTarget,
         HashOutTarget,
@@ -951,6 +1085,11 @@ impl TxTarget {
         let margined_assets_hash =
             all_margined_assets_hash(builder, &self.all_margined_assets_before);
         let register_stack_hash_before = self.register_stack_before.hash(builder);
+        let old_public_market_index_tree_hash = compute_public_market_index_tree_hash(
+            builder,
+            self.old_public_market_index_tree_root,
+            self.next_public_market_index_before,
+        );
 
         let (old_validium_root, old_state_root) = compute_validium_and_state_root(
             builder,
@@ -964,6 +1103,8 @@ impl TxTarget {
             self.old_account_pub_data_tree_root,
             self.old_market_details_tree_root,
             self.old_market_tree_root,
+            self.old_market_pub_data_tree_root,
+            old_public_market_index_tree_hash,
             state_metadata_hash,
         );
         builder.connect_hashes(self.old_validium_root, old_validium_root);
@@ -975,6 +1116,7 @@ impl TxTarget {
             margined_assets_hash,
             market_risk_details_hash,
             public_market_details_hash,
+            old_public_market_index_tree_hash,
             market_risk_details_bucket_hashes,
         )
     }
@@ -1017,7 +1159,7 @@ impl TxTarget {
         &self,
         builder: &mut Builder,
         tx_type: &TxTypeTargets,
-        positions_with_pub_data_before: &[PositionWithDelta; NB_ACCOUNTS_PER_TX - 1],
+        positions_before: &[AccountPositionTarget; NB_ACCOUNTS_PER_TX - 1],
         current_market_details_before: &MarketRiskDetailsTarget,
         all_market_risk_details_before: &[MarketRiskDetailsTarget; POSITION_LIST_SIZE],
         all_margined_assets_before: &[MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
@@ -1115,6 +1257,11 @@ impl TxTarget {
             let partial_account = AccountTarget {
                 positions,
                 margined_assets,
+                account_type: builder.select(
+                    tx_type.is_share_burn_tx,
+                    self.accounts_before[SUB_ACCOUNT_ID].account_type,
+                    self.accounts_before[OWNER_ACCOUNT_ID].account_type,
+                ),
                 ..AccountTarget::default() // Partial
             };
 
@@ -1181,9 +1328,8 @@ impl TxTarget {
             margined_assets[USDC_MARGIN_ASSET_INDEX].balance = usdc_collateral;
 
             let partial_account = AccountTarget {
-                positions: self.accounts_before[SUB_ACCOUNT_ID].positions.clone(),
                 margined_assets,
-                ..AccountTarget::default() // Partial
+                ..self.accounts_before[SUB_ACCOUNT_ID].clone()
             };
 
             let all_market_details =
@@ -1219,7 +1365,8 @@ impl TxTarget {
             RiskInfoTarget::new(
                 builder,
                 &partial_account_0,
-                &positions_with_pub_data_before[OWNER_ACCOUNT_ID].position,
+                &positions_before[OWNER_ACCOUNT_ID],
+                self.market_before.public_market_index,
                 &current_market_details_0,
                 &all_market_details_0,
                 all_margined_assets_before,
@@ -1228,7 +1375,8 @@ impl TxTarget {
             RiskInfoTarget::new(
                 builder,
                 &partial_account_1,
-                &positions_with_pub_data_before[SUB_ACCOUNT_ID].position,
+                &positions_before[SUB_ACCOUNT_ID],
+                self.market_before.public_market_index,
                 &current_market_details_1,
                 &all_market_details_1,
                 all_margined_assets_before,
@@ -1508,11 +1656,26 @@ impl TxTarget {
         }
     }
 
+    /// A binary options position without data is removed from the account: it becomes the
+    /// empty position with the nil public market index
+    pub(crate) fn apply_account_market_delta(&self, builder: &mut Builder, tx_state: &mut TxState) {
+        let nil_public_market_index = builder.constant_u64(NIL_PUBLIC_MARKET_INDEX as u64);
+        for i in 0..NB_ACCOUNTS_PER_TX - 1 {
+            let has_no_position_data =
+                tx_state.binary_options_positions[i].has_no_position_data(builder);
+            tx_state.binary_options_positions[i].public_market_index = builder.select(
+                has_no_position_data,
+                nil_public_market_index,
+                tx_state.binary_options_positions[i].public_market_index,
+            );
+        }
+    }
+
     fn apply_position_delta(
         &self,
         builder: &mut Builder,
         tx_state: &mut TxState,
-        positions_with_pub_data_before: &[PositionWithDelta; NB_ACCOUNTS_PER_TX - 1],
+        positions_before: &[AccountPositionTarget; NB_ACCOUNTS_PER_TX - 1],
         position_bucket_hashes_for_account: &mut [[[HashOutTarget; POSITION_HASH_BUCKET_COUNT]; NB_ACCOUNTS_PER_TX - 1];
                  NB_ACCOUNTS_PER_TX - 1],
     ) -> [BigIntTarget; NB_ACCOUNTS_PER_TX - 1] {
@@ -1526,18 +1689,52 @@ impl TxTarget {
         let empty_position = AccountPositionTarget::empty(builder);
 
         array::from_fn(|i| {
-            let (position_with_pub_data, position_usdc_delta) =
-                PositionWithDelta::new_position_with_pub_data_from_new_position(
-                    builder,
-                    &positions_with_pub_data_before[i],
-                    &tx_state.positions[i],
-                );
-            tx_state.accounts_delta[i].positions_delta = position_with_pub_data.delta.clone();
-            let position_diff = AccountPositionTarget::diff(
-                builder,
-                &position_with_pub_data.position,
-                &positions_with_pub_data_before[i].position,
+            let position_size_delta = builder.sub_bigint_u16_non_carry(
+                &tx_state.positions[i].position,
+                &positions_before[i].position,
+                BIGU16_U64_LIMBS,
             );
+            let funding_delta = builder.sub_bigint_u16_non_carry(
+                &tx_state.positions[i].last_funding_rate_prefix_sum,
+                &positions_before[i].last_funding_rate_prefix_sum,
+                BIGU16_U64_LIMBS,
+            );
+            // Binary options size deltas share the perps position delta slot, both are keyed by the market slot
+            let binary_options_size_delta = builder.sub_bigint_u16_non_carry(
+                &tx_state.binary_options_positions[i].size,
+                &self.accounts_before[i].binary_options_position.size,
+                BIGU16_U64_LIMBS,
+            );
+            let size_delta = builder.add_bigint_u16_non_carry(
+                &self.accounts_delta_before[i].market_data_delta.size_delta,
+                &position_size_delta,
+                BIGU16_U64_LIMBS,
+            );
+            tx_state.accounts_delta[i].market_data_delta = MarketDataDeltaTarget {
+                size_delta: builder.add_bigint_u16_non_carry(
+                    &size_delta,
+                    &binary_options_size_delta,
+                    BIGU16_U64_LIMBS,
+                ),
+                funding_rate_prefix_sum_delta: builder.add_bigint_u16_non_carry(
+                    &self.accounts_delta_before[i]
+                        .market_data_delta
+                        .funding_rate_prefix_sum_delta,
+                    &funding_delta,
+                    BIGU16_U64_LIMBS,
+                ),
+            };
+
+            let old_aggregated_usdc = positions_before[i].calculate_aggregated_usdc(builder);
+            let new_aggregated_usdc = tx_state.positions[i].calculate_aggregated_usdc(builder);
+            let position_usdc_delta = builder.sub_bigint_non_carry(
+                &new_aggregated_usdc,
+                &old_aggregated_usdc,
+                BIG_U96_LIMBS,
+            );
+
+            let position_diff =
+                AccountPositionTarget::diff(builder, &tx_state.positions[i], &positions_before[i]);
 
             // Load the position bucket that corresponds to current market index
             let mut position_bucket: [AccountPositionTarget; POSITION_HASH_BUCKET_SIZE] =
@@ -1742,21 +1939,25 @@ impl TxTarget {
         let nil_market_index = builder.constant_usize(NIL_MARKET_INDEX as usize);
         let position_deltas_empty_check = [
             self.accounts_delta_before[0]
-                .positions_delta
+                .market_data_delta
                 .is_empty(builder),
             self.accounts_delta_before[1]
-                .positions_delta
+                .market_data_delta
                 .is_empty(builder),
-            tx_state.accounts_delta[0].positions_delta.is_empty(builder),
-            tx_state.accounts_delta[1].positions_delta.is_empty(builder),
+            tx_state.accounts_delta[0]
+                .market_data_delta
+                .is_empty(builder),
+            tx_state.accounts_delta[1]
+                .market_data_delta
+                .is_empty(builder),
         ];
         let is_position_deltas_empty = builder.multi_and(&position_deltas_empty_check);
         let delta_market_index = builder.select(
             is_position_deltas_empty,
             nil_market_index,
-            tx_state.market.perps_market_index,
+            tx_state.market.market_index,
         );
-        let merkle_path = perps_market_index_to_merkle_path(builder, delta_market_index);
+        let merkle_path = market_index_to_merkle_path(builder, delta_market_index);
 
         verify_merkle_proof(
             builder,
@@ -1766,8 +1967,8 @@ impl TxTarget {
             merkle_path,
         );
         let new_position_delta_hash = tx_state.accounts_delta[TAKER_ACCOUNT_ID]
-            .positions_delta
-            .hash(builder);
+            .market_data_delta
+            .hash(builder, self.market_before.market_type);
         tx_state.accounts_delta[TAKER_ACCOUNT_ID].position_delta_root = recalculate_root(
             builder,
             new_position_delta_hash,
@@ -1784,8 +1985,8 @@ impl TxTarget {
             merkle_path,
         );
         let new_position_delta_hash = tx_state.accounts_delta[MAKER_ACCOUNT_ID]
-            .positions_delta
-            .hash(builder);
+            .market_data_delta
+            .hash(builder, self.market_before.market_type);
         let new_root = recalculate_root(
             builder,
             new_position_delta_hash,
@@ -1797,6 +1998,67 @@ impl TxTarget {
             &new_root,
             &self.accounts_delta_before[MAKER_ACCOUNT_ID].position_delta_root,
         );
+    }
+
+    // The account market data and market pub data trees are keyed by the binary options market
+    // slot, unrelated transactions prove the nil market index leaf
+    fn verify_account_market_data_merkle_proofs(
+        &self,
+        builder: &mut Builder,
+        tx_state: &mut TxState,
+    ) {
+        let merkle_path =
+            market_index_to_merkle_path(builder, self.market_before.binary_options_market_index);
+
+        let conditions = [builder._true(), tx_state.is_sender_receiver_different];
+        for i in 0..NB_ACCOUNTS_PER_TX - 1 {
+            let old_position = &self.accounts_before[i].binary_options_position;
+            let old_hash = old_position.hash(builder);
+            conditional_verify_merkle_proof(
+                builder,
+                conditions[i],
+                &self.accounts_before[i].market_data_root,
+                old_hash,
+                self.account_market_data_tree_merkle_proofs[i],
+                merkle_path,
+            );
+            let old_pub_data_hash = old_position.pub_data_hash(builder);
+            conditional_verify_merkle_proof(
+                builder,
+                conditions[i],
+                &self.accounts_before[i].market_pub_data_root,
+                old_pub_data_hash,
+                self.account_market_pub_data_tree_merkle_proofs[i],
+                merkle_path,
+            );
+
+            let new_position = &tx_state.binary_options_positions[i];
+            let new_hash = new_position.hash(builder);
+            let new_root = recalculate_root(
+                builder,
+                new_hash,
+                self.account_market_data_tree_merkle_proofs[i],
+                merkle_path,
+            );
+            tx_state.accounts[i].market_data_root = builder.select_hash(
+                conditions[i],
+                &new_root,
+                &self.accounts_before[i].market_data_root,
+            );
+
+            let new_pub_data_hash = new_position.pub_data_hash(builder);
+            let new_pub_data_root = recalculate_root(
+                builder,
+                new_pub_data_hash,
+                self.account_market_pub_data_tree_merkle_proofs[i],
+                merkle_path,
+            );
+            tx_state.accounts[i].market_pub_data_root = builder.select_hash(
+                conditions[i],
+                &new_pub_data_root,
+                &self.accounts_before[i].market_pub_data_root,
+            );
+        }
     }
 
     fn verify_account_and_pub_data_merkle_proofs(
@@ -2472,6 +2734,114 @@ impl TxTarget {
         )
     }
 
+    /// Verifies the market pub data leaf of the transaction's market slot against the old root and
+    /// returns the root holding the leaf after the transaction.
+    pub(crate) fn verify_market_pub_data_merkle_proof(
+        &self,
+        builder: &mut Builder,
+        tx_state: &TxState,
+        market_pub_data_tree_root_before: HashOutTarget,
+    ) -> HashOutTarget {
+        let market_index_merkle_path =
+            market_index_to_merkle_path(builder, self.market_before.market_index);
+        let market_pub_data_hash_before = self.market_before.pub_data_hash(builder);
+        verify_merkle_proof(
+            builder,
+            &market_pub_data_tree_root_before,
+            market_pub_data_hash_before,
+            self.market_pub_data_tree_merkle_proof,
+            market_index_merkle_path,
+        );
+
+        let new_market_pub_data_hash = tx_state.market.pub_data_hash(builder);
+        recalculate_root(
+            builder,
+            new_market_pub_data_hash,
+            self.market_pub_data_tree_merkle_proof,
+            market_index_merkle_path,
+        )
+    }
+
+    /// Verifies the public market index tree leaf for the market used in the transaction against
+    /// the old root and returns the combined (tree root + next public market index) hash after the
+    /// transaction. The public market index tree maps public market index to internal market
+    /// index. The leaf is nil while the market's public market index is nil; it only changes on
+    /// market creation (nil -> market index) and market closure (market index -> nil).
+    fn verify_public_market_index_merkle_proof(
+        &self,
+        builder: &mut Builder,
+        tx_type: &TxTypeTargets,
+        tx_state: &TxState,
+    ) -> HashOutTarget {
+        let is_public_market_index_before_nil = builder.is_equal_constant(
+            self.market_before.public_market_index,
+            NIL_PUBLIC_MARKET_INDEX as u64,
+        );
+        let no_market_public_market_index_key = builder.select(
+            tx_type.is_l1_create_order,
+            self.l1_create_order_tx_target.inner.public_market_index,
+            tx_state.market.public_market_index,
+        );
+        let public_market_index_key = builder.select(
+            is_public_market_index_before_nil,
+            no_market_public_market_index_key,
+            self.market_before.public_market_index,
+        );
+        let public_market_index_merkle_path =
+            public_market_index_to_merkle_path(builder, public_market_index_key);
+
+        let leaf_before = self.public_market_index_tree_leaf_hash(
+            builder,
+            is_public_market_index_before_nil,
+            self.market_before.market_index,
+        );
+        verify_merkle_proof(
+            builder,
+            &self.old_public_market_index_tree_root,
+            leaf_before,
+            self.public_market_index_tree_merkle_proof,
+            public_market_index_merkle_path,
+        );
+
+        let is_public_market_index_after_nil = builder.is_equal_constant(
+            tx_state.market.public_market_index,
+            NIL_PUBLIC_MARKET_INDEX as u64,
+        );
+        let leaf_after = self.public_market_index_tree_leaf_hash(
+            builder,
+            is_public_market_index_after_nil,
+            tx_state.market.market_index,
+        );
+        let new_public_market_index_tree_root = recalculate_root(
+            builder,
+            leaf_after,
+            self.public_market_index_tree_merkle_proof,
+            public_market_index_merkle_path,
+        );
+
+        compute_public_market_index_tree_hash(
+            builder,
+            new_public_market_index_tree_root,
+            tx_state.next_public_market_index,
+        )
+    }
+
+    pub(crate) fn public_market_index_tree_leaf_hash(
+        &self,
+        builder: &mut Builder,
+        is_public_market_index_nil: BoolTarget,
+        market_index: Target,
+    ) -> HashOutTarget {
+        let non_empty_leaf_hash =
+            builder.hash_n_to_hash_no_pad::<Poseidon2Hash>(vec![market_index]);
+        let empty_leaf_hash = builder.zero_hash_out();
+        builder.select_hash(
+            is_public_market_index_nil,
+            &empty_leaf_hash,
+            &non_empty_leaf_hash,
+        )
+    }
+
     /// Selects parts of the main account for tx type related verifications.
     /// Any new field verification added to `verify_l2_tx` requires a change here as well.
     fn build_partial_main_account(&self) -> AccountTarget {
@@ -2754,6 +3124,45 @@ impl TxTarget {
             selected_hash,
         );
 
+        let l2_create_market_tx_hash =
+            self.l2_create_market_tx_target
+                .hash(builder, self.nonce, self.expired_at, chain_id);
+        selected_hash = builder.select_quintic_ext(
+            tx_type.is_l2_create_market,
+            l2_create_market_tx_hash,
+            selected_hash,
+        );
+
+        let l2_settle_outcome_tx_hash =
+            self.l2_settle_outcome_tx_target
+                .hash(builder, self.nonce, self.expired_at, chain_id);
+        selected_hash = builder.select_quintic_ext(
+            tx_type.is_l2_settle_outcome,
+            l2_settle_outcome_tx_hash,
+            selected_hash,
+        );
+
+        let l2_update_market_tx_hash =
+            self.l2_update_market_tx_target
+                .hash(builder, self.nonce, self.expired_at, chain_id);
+        selected_hash = builder.select_quintic_ext(
+            tx_type.is_l2_update_market,
+            l2_update_market_tx_hash,
+            selected_hash,
+        );
+
+        let l2_update_market_slot_tx_hash = self.l2_update_market_slot_tx_target.hash(
+            builder,
+            self.nonce,
+            self.expired_at,
+            chain_id,
+        );
+        selected_hash = builder.select_quintic_ext(
+            tx_type.is_l2_update_market_slot,
+            l2_update_market_slot_tx_hash,
+            selected_hash,
+        );
+
         self.attributes.aggregate_tx_hash(builder, selected_hash)
     }
 
@@ -2915,6 +3324,14 @@ impl TxTarget {
             .verify(builder, tx_type, tx_state);
         self.l2_update_asset_config_tx_target
             .verify(builder, tx_type, tx_state);
+        self.l2_create_market_tx_target
+            .verify(builder, tx_type, tx_state);
+        self.l2_settle_outcome_tx_target
+            .verify(builder, tx_type, tx_state);
+        self.l2_update_market_tx_target
+            .verify(builder, tx_type, tx_state);
+        self.l2_update_market_slot_tx_target
+            .verify(builder, tx_type, tx_state);
 
         /*************************/
         /* Internal Transactions */
@@ -2938,6 +3355,8 @@ impl TxTarget {
         self.internal_transfer_tx_target
             .verify(builder, tx_type, tx_state);
         self.internal_liquidate_spot_tx_target
+            .verify(builder, tx_type, tx_state);
+        self.internal_settle_binary_options_position_tx_target
             .verify(builder, tx_type, tx_state);
     }
 
@@ -3114,6 +3533,11 @@ impl TxTarget {
             .apply(builder, tx_state);
         self.l2_update_asset_config_tx_target
             .apply(builder, tx_state);
+        self.l2_create_market_tx_target.apply(builder, tx_state);
+        self.l2_settle_outcome_tx_target.apply(builder, tx_state);
+        self.l2_update_market_tx_target.apply(builder, tx_state);
+        self.l2_update_market_slot_tx_target
+            .apply(builder, tx_state);
 
         /*************************/
         /* Internal Transactions */
@@ -3134,6 +3558,8 @@ impl TxTarget {
             .apply(builder, tx_state);
         self.internal_transfer_tx_target.apply(builder, tx_state);
         self.internal_liquidate_spot_tx_target
+            .apply(builder, tx_state);
+        self.internal_settle_binary_options_position_tx_target
             .apply(builder, tx_state);
 
         // Increase ApiKey Nonce for all Layer2 transactions
@@ -3481,6 +3907,22 @@ impl<T: Witness<F> + PartialWitnessCurve<F>, F: PrimeField64 + Extendable<5> + R
             &a.l2_update_asset_config_tx_target.inner,
             &b.l2_update_asset_config_tx,
         )?;
+        self.set_l2_create_market_tx_target(
+            &a.l2_create_market_tx_target.inner,
+            &b.l2_create_market_tx,
+        )?;
+        self.set_l2_settle_outcome_tx_target(
+            &a.l2_settle_outcome_tx_target.inner,
+            &b.l2_settle_outcome_tx,
+        )?;
+        self.set_l2_update_market_tx_target(
+            &a.l2_update_market_tx_target.inner,
+            &b.l2_update_market_tx,
+        )?;
+        self.set_l2_update_market_slot_tx_target(
+            &a.l2_update_market_slot_tx_target.inner,
+            &b.l2_update_market_slot_tx,
+        )?;
 
         /*************************/
         /* Internal Transactions */
@@ -3525,6 +3967,10 @@ impl<T: Witness<F> + PartialWitnessCurve<F>, F: PrimeField64 + Extendable<5> + R
             &a.internal_liquidate_spot_tx_target.inner,
             &b.internal_liquidate_spot_tx,
         )?;
+        self.set_internal_settle_binary_options_position_tx_target(
+            &a.internal_settle_binary_options_position_tx_target.inner,
+            &b.internal_settle_binary_options_position_tx,
+        )?;
 
         /***********************/
         /*  Transactions Data  */
@@ -3558,9 +4004,17 @@ impl<T: Witness<F> + PartialWitnessCurve<F>, F: PrimeField64 + Extendable<5> + R
         /***********************/
         /*  State Tree Leaves  */
         /***********************/
-        self.set_account_target(&a.accounts_before[0], &b.accounts_before[0])?;
-        self.set_account_target(&a.accounts_before[1], &b.accounts_before[1])?;
-        self.set_fee_account_target(&a.accounts_before[2], &b.accounts_before[2])?;
+        for i in 0..NB_ACCOUNTS_PER_TX - 1 {
+            self.set_account_target(&a.accounts_before[i], &b.accounts_before[i])?;
+            self.set_binary_options_position_target(
+                &a.accounts_before[i].binary_options_position,
+                &b.accounts_market_data_before[i],
+            )?;
+        }
+        self.set_fee_account_target(
+            &a.accounts_before[FEE_ACCOUNT_ID],
+            &b.accounts_before[FEE_ACCOUNT_ID],
+        )?;
         self.set_account_delta_target(&a.accounts_delta_before[0], &b.accounts_delta_before[0])?;
         self.set_account_delta_target(&a.accounts_delta_before[1], &b.accounts_delta_before[1])?;
         self.set_fee_account_delta_target(
@@ -3616,10 +4070,22 @@ impl<T: Witness<F> + PartialWitnessCurve<F>, F: PrimeField64 + Extendable<5> + R
             }
         }
         for i in 0..NB_ACCOUNTS_PER_TX - 1 {
-            for j in 0..POSITION_MERKLE_LEVELS {
+            for j in 0..MARKET_MERKLE_LEVELS {
                 self.set_hash_target(
                     a.position_delta_merkle_proofs[i][j],
                     b.position_delta_merkle_proofs[i][j],
+                )?;
+            }
+        }
+        for i in 0..NB_ACCOUNTS_PER_TX - 1 {
+            for j in 0..MARKET_MERKLE_LEVELS {
+                self.set_hash_target(
+                    a.account_market_data_tree_merkle_proofs[i][j],
+                    b.account_market_data_tree_merkle_proofs[i][j],
+                )?;
+                self.set_hash_target(
+                    a.account_market_pub_data_tree_merkle_proofs[i][j],
+                    b.account_market_pub_data_tree_merkle_proofs[i][j],
                 )?;
             }
         }
@@ -3655,8 +4121,18 @@ impl<T: Witness<F> + PartialWitnessCurve<F>, F: PrimeField64 + Extendable<5> + R
                 }
             }
         }
+        for i in 0..PUBLIC_MARKET_INDEX_MERKLE_LEVELS {
+            self.set_hash_target(
+                a.public_market_index_tree_merkle_proof[i],
+                b.public_market_index_tree_merkle_proof[i],
+            )?;
+        }
         for i in 0..MARKET_MERKLE_LEVELS {
             self.set_hash_target(a.market_tree_merkle_proof[i], b.market_tree_merkle_proof[i])?;
+            self.set_hash_target(
+                a.market_pub_data_tree_merkle_proof[i],
+                b.market_pub_data_tree_merkle_proof[i],
+            )?;
         }
         for i in 0..MARKET_DETAILS_TREE_HEIGHT {
             self.set_hash_target(
@@ -3726,11 +4202,24 @@ impl<T: Witness<F> + PartialWitnessCurve<F>, F: PrimeField64 + Extendable<5> + R
             b.old_account_pub_data_tree_root,
         )?;
         self.set_hash_target(a.old_account_delta_tree_root, b.old_account_delta_tree_root)?;
+        self.set_hash_target(a.old_market_delta_hash, b.old_market_delta_hash)?;
         self.set_hash_target(
             a.old_market_details_tree_root,
             b.old_market_details_tree_root,
         )?;
         self.set_hash_target(a.old_market_tree_root, b.old_market_tree_root)?;
+        self.set_hash_target(
+            a.old_market_pub_data_tree_root,
+            b.old_market_pub_data_tree_root,
+        )?;
+        self.set_hash_target(
+            a.old_public_market_index_tree_root,
+            b.old_public_market_index_tree_root,
+        )?;
+        self.set_target(
+            a.next_public_market_index_before,
+            F::from_canonical_i64(b.next_public_market_index_before),
+        )?;
         self.set_hash_target(a.old_validium_root, b.old_validium_root)?;
         self.set_hash_target(a.old_state_root, b.old_state_root)?;
 
@@ -3751,6 +4240,8 @@ pub fn compute_validium_and_state_root(
     account_pub_data_tree_root: HashOutTarget,
     market_details_tree_root: HashOutTarget,
     market_tree_root: HashOutTarget,
+    market_pub_data_tree_root: HashOutTarget,
+    public_market_index_tree_hash: HashOutTarget,
     state_metadata_hash: HashOutTarget,
 ) -> (HashOutTarget, HashOutTarget) {
     let validium_root = builder.hash_n_to_one(&[
@@ -3758,6 +4249,7 @@ pub fn compute_validium_and_state_root(
         account_tree_root,
         market_details_tree_root,
         market_tree_root,
+        public_market_index_tree_hash,
         assets_hash,
         margined_assets_hash,
         market_risk_details_hash,
@@ -3768,8 +4260,23 @@ pub fn compute_validium_and_state_root(
     let state_root = builder.hash_n_to_one(&[
         account_pub_data_tree_root,
         public_market_details_hash,
+        market_pub_data_tree_root,
         validium_root,
     ]);
 
     (validium_root, state_root)
+}
+
+pub fn compute_public_market_index_tree_hash(
+    builder: &mut Builder,
+    public_market_index_tree_root: HashOutTarget,
+    next_public_market_index: Target,
+) -> HashOutTarget {
+    builder.hash_n_to_hash_no_pad::<Poseidon2Hash>(vec![
+        public_market_index_tree_root.elements[0],
+        public_market_index_tree_root.elements[1],
+        public_market_index_tree_root.elements[2],
+        public_market_index_tree_root.elements[3],
+        next_public_market_index,
+    ])
 }

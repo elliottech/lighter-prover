@@ -858,28 +858,6 @@ impl MarketRiskDetailsTarget {
         }
     }
 
-    pub fn apply_diff_partial(
-        builder: &mut Builder,
-        flag: BoolTarget,
-        diff: &Self,
-        old: &Self,
-    ) -> Self {
-        Self {
-            funding_rate_prefix_sum: builder.bigint_u16_vector_sum(
-                flag,
-                &diff.funding_rate_prefix_sum,
-                &old.funding_rate_prefix_sum,
-            ),
-            mark_price: builder.mul_add(flag.target, diff.mark_price, old.mark_price),
-            quote_multiplier: builder.mul_add(
-                flag.target,
-                diff.quote_multiplier,
-                old.quote_multiplier,
-            ),
-            ..Default::default()
-        }
-    }
-
     pub fn connect_partial(&self, builder: &mut Builder, b: &Self) {
         builder.connect_bigint_u16(&self.funding_rate_prefix_sum, &b.funding_rate_prefix_sum);
         builder.connect(self.mark_price, b.mark_price);
@@ -906,15 +884,6 @@ impl MarketRiskDetailsTarget {
             funding_rate_prefix_sum: BigIntU16Target::from_vec(&pis[0..5]),
             mark_price: pis[5],
             quote_multiplier: pis[6],
-            ..Default::default()
-        }
-    }
-
-    pub fn to_public_market_details(&self) -> Self {
-        Self {
-            funding_rate_prefix_sum: self.funding_rate_prefix_sum.clone(),
-            mark_price: self.mark_price,
-            quote_multiplier: self.quote_multiplier,
             ..Default::default()
         }
     }

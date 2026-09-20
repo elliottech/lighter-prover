@@ -23,15 +23,17 @@ use crate::eddsa::schnorr::SchnorrSig;
 use crate::keccak::helpers::u8_array_to_bits;
 use crate::tx_attributes::{NB_ATTRIBUTES_PER_TX, TxAttributes};
 use crate::types::account_asset::AccountAsset;
-use crate::types::account_delta::{PositionDelta, PublicPoolShareDelta};
+use crate::types::account_delta::{BinaryOptionsDelta, MarketDataDelta, PublicPoolShareDelta};
 use crate::types::account_margined_asset::AccountMarginedAsset;
 use crate::types::account_position::AccountPosition;
+use crate::types::binary_options_position::BinaryOptionsPosition;
 use crate::types::constants::{
     ACCOUNT_MERKLE_LEVELS, ACCOUNT_ORDERS_MERKLE_LEVELS, API_KEY_MERKLE_LEVELS, ASSET_LIST_SIZE,
-    ASSET_MERKLE_LEVELS, KECCAK_HASH_OUT_BIT_SIZE, KECCAK_HASH_OUT_BYTE_SIZE,
-    MARGINED_ASSET_LIST_SIZE, MARKET_DETAILS_TREE_HEIGHT, MARKET_MERKLE_LEVELS,
+    ASSET_MERKLE_LEVELS, BINARY_OPTIONS_MARKET_SLOT_COUNT, KECCAK_HASH_OUT_BIT_SIZE,
+    KECCAK_HASH_OUT_BYTE_SIZE, MARGINED_ASSET_LIST_SIZE, MARKET_DETAILS_TREE_HEIGHT,
+    MARKET_MERKLE_LEVELS, MAX_BINARY_OPTIONS_MARKET_INDEX, MIN_BINARY_OPTIONS_MARKET_INDEX,
     NB_ACCOUNT_ORDERS_PATHS_PER_TX, NB_ACCOUNTS_PER_TX, NB_ASSETS_PER_TX,
-    ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE, POSITION_LIST_SIZE, POSITION_MERKLE_LEVELS,
+    ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE, POSITION_LIST_SIZE, PUBLIC_MARKET_INDEX_MERKLE_LEVELS,
     REGISTER_STACK_SIZE, SHARES_DELTA_LIST_SIZE,
 };
 use crate::types::register::{BaseRegisterInfo, RegisterStack};
@@ -52,6 +54,27 @@ where
 {
     let num: i128 = Deserialize::deserialize(deserializer)?;
     Ok(BigInt::from(num))
+}
+
+/// Binary options positions of the tx accounts, `null` entries are read as empty positions.
+pub fn binary_options_positions<'de, D, const N: usize>(
+    deserializer: D,
+) -> Result<[BinaryOptionsPosition; N], D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let positions: Vec<Option<BinaryOptionsPosition>> = Deserialize::deserialize(deserializer)?;
+    if positions.len() != N {
+        return Err(de::Error::custom(format!(
+            "Expected {} binary options positions, got {}",
+            N,
+            positions.len()
+        )));
+    }
+    let mut positions = positions.into_iter();
+    Ok(core::array::from_fn(|_| {
+        positions.next().flatten().unwrap_or_default()
+    }))
 }
 
 pub fn strategies<'de, D, const SIZE: usize>(deserializer: D) -> Result<[BigInt; SIZE], D::Error>
@@ -555,34 +578,56 @@ where
     Ok(result)
 }
 
-pub fn positions_delta<'de, D>(
-    deserializer: D,
-) -> Result<[PositionDelta; POSITION_LIST_SIZE], D::Error>
+/// Account market data deltas keyed by market slot: perps slots `0..POSITION_LIST_SIZE` and
+/// binary options slots `MIN_BINARY_OPTIONS_MARKET_INDEX..=MAX_BINARY_OPTIONS_MARKET_INDEX`,
+/// the latter stored at `market_index - MIN_BINARY_OPTIONS_MARKET_INDEX`.
+#[derive(Debug, Clone)]
+pub struct MarketDataDeltas {
+    pub perps: [MarketDataDelta; POSITION_LIST_SIZE],
+    pub binary_options: [BinaryOptionsDelta; BINARY_OPTIONS_MARKET_SLOT_COUNT],
+}
+
+impl Default for MarketDataDeltas {
+    fn default() -> Self {
+        MarketDataDeltas {
+            perps: core::array::from_fn(|_| MarketDataDelta::default()),
+            binary_options: core::array::from_fn(|_| BinaryOptionsDelta::default()),
+        }
+    }
+}
+
+pub fn market_data_deltas<'de, D>(deserializer: D) -> Result<MarketDataDeltas, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let elements: HashMap<String, PositionDelta> = Deserialize::deserialize(deserializer)?;
+    let elements: HashMap<String, MarketDataDelta> = Deserialize::deserialize(deserializer)?;
 
-    let mut result: [PositionDelta; POSITION_LIST_SIZE] =
-        core::array::from_fn(|_| PositionDelta::default());
+    let mut result = MarketDataDeltas::default();
 
     for (idx, element) in elements.into_iter() {
-        match idx.parse::<usize>() {
-            Ok(index) => {
-                if index >= POSITION_LIST_SIZE {
-                    return Err(serde::de::Error::custom(format!(
-                        "Position index out of bounds: {}",
-                        index
-                    )));
-                }
-                result[index] = element;
-            }
-            Err(err) => {
+        let index = idx.parse::<usize>().map_err(|err| {
+            serde::de::Error::custom(format!("Failed to parse position index: {}, {}", idx, err))
+        })?;
+
+        if index < POSITION_LIST_SIZE {
+            result.perps[index] = element;
+        } else if (MIN_BINARY_OPTIONS_MARKET_INDEX..=MAX_BINARY_OPTIONS_MARKET_INDEX)
+            .contains(&index)
+        {
+            if element.funding_rate_prefix_sum_delta != BigInt::ZERO {
                 return Err(serde::de::Error::custom(format!(
-                    "Failed to parse position index: {}, {}",
-                    idx, err
+                    "Binary options delta at market index {} has a funding rate prefix sum delta",
+                    index
                 )));
             }
+            result.binary_options[index - MIN_BINARY_OPTIONS_MARKET_INDEX] = BinaryOptionsDelta {
+                size_delta: element.size_delta,
+            };
+        } else {
+            return Err(serde::de::Error::custom(format!(
+                "Position index out of bounds: {}",
+                index
+            )));
         }
     }
 
@@ -695,6 +740,27 @@ where
     Ok(proof)
 }
 
+pub fn public_market_index_tree_merkle_proof<'de, D, F>(
+    deserializer: D,
+) -> Result<[HashOut<F>; PUBLIC_MARKET_INDEX_MERKLE_LEVELS], D::Error>
+where
+    D: Deserializer<'de>,
+    F: Field,
+{
+    let elements: Vec<[u64; 4]> = Deserialize::deserialize(deserializer)?;
+    if elements.len() != PUBLIC_MARKET_INDEX_MERKLE_LEVELS {
+        return Err(serde::de::Error::custom(
+            "Public market index merkle proof length mismatch",
+        ));
+    }
+    let mut proof: [HashOut<F>; PUBLIC_MARKET_INDEX_MERKLE_LEVELS] =
+        std::array::from_fn(|_| HashOut::<F>::default());
+    for i in 0..PUBLIC_MARKET_INDEX_MERKLE_LEVELS {
+        proof[i] = u64_array_to_hash_out(elements[i]);
+    }
+    Ok(proof)
+}
+
 pub fn asset_tree_merkle_proof<'de, D, F>(
     deserializer: D,
 ) -> Result<[[HashOut<F>; ASSET_MERKLE_LEVELS]; NB_ASSETS_PER_TX], D::Error>
@@ -737,17 +803,37 @@ where
 
 pub fn position_delta_merkle_proofs<'de, D, F>(
     deserializer: D,
-) -> Result<[[HashOut<F>; POSITION_MERKLE_LEVELS]; NB_ACCOUNTS_PER_TX - 1], D::Error>
+) -> Result<[[HashOut<F>; MARKET_MERKLE_LEVELS]; NB_ACCOUNTS_PER_TX - 1], D::Error>
 where
     D: Deserializer<'de>,
     F: Field,
 {
     let elements: ProofData = Deserialize::deserialize(deserializer)?;
-    let mut proof: [[HashOut<F>; POSITION_MERKLE_LEVELS]; NB_ACCOUNTS_PER_TX - 1] =
+    let mut proof: [[HashOut<F>; MARKET_MERKLE_LEVELS]; NB_ACCOUNTS_PER_TX - 1] =
         std::array::from_fn(|_| std::array::from_fn(|_| HashOut::<F>::default()));
 
     for account in 0..NB_ACCOUNTS_PER_TX - 1 {
-        for i in 0..POSITION_MERKLE_LEVELS {
+        for i in 0..MARKET_MERKLE_LEVELS {
+            proof[account][i] = u64_array_to_hash_out(elements[account][i]);
+        }
+    }
+
+    Ok(proof)
+}
+
+pub fn account_market_data_tree_merkle_proofs<'de, D, F>(
+    deserializer: D,
+) -> Result<[[HashOut<F>; MARKET_MERKLE_LEVELS]; NB_ACCOUNTS_PER_TX - 1], D::Error>
+where
+    D: Deserializer<'de>,
+    F: Field,
+{
+    let elements: ProofData = Deserialize::deserialize(deserializer)?;
+    let mut proof: [[HashOut<F>; MARKET_MERKLE_LEVELS]; NB_ACCOUNTS_PER_TX - 1] =
+        std::array::from_fn(|_| std::array::from_fn(|_| HashOut::<F>::default()));
+
+    for account in 0..NB_ACCOUNTS_PER_TX - 1 {
+        for i in 0..MARKET_MERKLE_LEVELS {
             proof[account][i] = u64_array_to_hash_out(elements[account][i]);
         }
     }
@@ -761,7 +847,8 @@ pub fn public_pool_shares_delta<'de, D>(
 where
     D: Deserializer<'de>,
 {
-    let elements: Vec<PublicPoolShareDelta> = Deserialize::deserialize(deserializer)?;
+    let elements: Vec<PublicPoolShareDelta> =
+        Option::<Vec<PublicPoolShareDelta>>::deserialize(deserializer)?.unwrap_or_default();
     assert!(elements.len() <= SHARES_DELTA_LIST_SIZE);
     let mut result: [PublicPoolShareDelta; SHARES_DELTA_LIST_SIZE] =
         std::array::from_fn(|_| PublicPoolShareDelta::default());

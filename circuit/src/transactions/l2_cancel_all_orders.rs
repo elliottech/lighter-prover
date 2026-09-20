@@ -12,7 +12,7 @@ use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::eddsa::gadgets::base_field::QuinticExtensionTarget;
 use crate::eddsa::schnorr::hash_to_quintic_extension_circuit;
 use crate::transactions::tx_utils::apply_immediate_cancel_all_market;
-use crate::tx_attributes::{ATTR_CANCEL_ALL_MARKET_INDEX, ATTR_NIL_VALUES};
+use crate::tx_attributes::{ATTR_CANCEL_ALL_PUBLIC_MARKET_INDEX, ATTR_NIL_VALUES};
 use crate::tx_interface::{Apply, TxHash, Verify};
 use crate::types::config::{Builder, F};
 use crate::types::constants::*;
@@ -121,10 +121,11 @@ impl Verify for L2CancelAllOrdersTxTarget {
         /* Cancel all market index and time in force checks */
         /* (Cancel all market index can't be scheduled)     */
 
-        let market_index = tx_state.attributes.get(ATTR_CANCEL_ALL_MARKET_INDEX);
-
-        let is_market_index_nil =
-            builder.is_equal_f(market_index, ATTR_NIL_VALUES[ATTR_CANCEL_ALL_MARKET_INDEX]);
+        let public_market_index = tx_state.attributes.get(ATTR_CANCEL_ALL_PUBLIC_MARKET_INDEX);
+        let is_market_index_nil = builder.is_equal_f(
+            public_market_index,
+            ATTR_NIL_VALUES[ATTR_CANCEL_ALL_PUBLIC_MARKET_INDEX],
+        );
 
         let is_market_index_enabled = builder.and_not(is_enabled, is_market_index_nil);
 
@@ -132,9 +133,14 @@ impl Verify for L2CancelAllOrdersTxTarget {
 
         builder.conditional_assert_eq(
             is_market_index_enabled,
-            tx_state.market.market_index,
-            market_index,
+            tx_state.market.public_market_index,
+            public_market_index,
         );
+
+        // The pmi match above guarantees a live market leaf, so market_type is reliable here.
+        let is_perps_market =
+            builder.is_equal_constant(tx_state.market.market_type, MARKET_TYPE_PERPS);
+        builder.conditional_assert_true(is_market_index_enabled, is_perps_market);
     }
 }
 
@@ -147,10 +153,11 @@ impl Apply for L2CancelAllOrdersTxTarget {
         let is_abort_scheduled_cancel_all =
             builder.is_equal_constant(self.time_in_force, ABORT_SCHEDULED_CANCEL_ALL as u64);
 
-        let market_index = state.attributes.get(ATTR_CANCEL_ALL_MARKET_INDEX);
-
-        let is_market_index_nil =
-            builder.is_equal_f(market_index, ATTR_NIL_VALUES[ATTR_CANCEL_ALL_MARKET_INDEX]);
+        let public_market_index = state.attributes.get(ATTR_CANCEL_ALL_PUBLIC_MARKET_INDEX);
+        let is_market_index_nil = builder.is_equal_f(
+            public_market_index,
+            ATTR_NIL_VALUES[ATTR_CANCEL_ALL_PUBLIC_MARKET_INDEX],
+        );
 
         let is_market_index_enabled = builder.and_not(self.success, is_market_index_nil);
 
@@ -184,7 +191,7 @@ impl Apply for L2CancelAllOrdersTxTarget {
             is_market_index_enabled,
             state,
             self.account_index,
-            market_index,
+            state.market.market_index,
         );
 
         self.success

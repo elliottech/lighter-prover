@@ -9,7 +9,9 @@ use crate::bigint::biguint::{BigUintTarget, CircuitBuilderBiguint};
 use crate::byte::split::CircuitBuilderByteSplit;
 use crate::delta::evaluate_sequence::CircuitBuilderSequenceEvaluator;
 use crate::hints::CircuitBuilderHints;
-use crate::types::account_delta::{PositionDeltaTarget, PublicPoolInfoDeltaTarget};
+use crate::types::account_delta::{
+    BinaryOptionsDeltaTarget, MarketDataDeltaTarget, PublicPoolInfoDeltaTarget,
+};
 use crate::types::config::Builder;
 use crate::types::constants::ASSET_LIST_SIZE_BITS;
 
@@ -93,18 +95,35 @@ pub fn pack_asset_balance(
     ]
 }
 
+// [market_index, is_negative_size + abs size]
+pub fn pack_binary_options_position(
+    builder: &mut Builder,
+    market_index: Target,
+    entry: &BinaryOptionsDeltaTarget,
+) -> [Target; 2] {
+    let _1_bit_shifter = builder.constant_u64(1 << 1);
+
+    let is_negative = builder.is_sign_negative(entry.size_delta.sign);
+    let abs = builder.biguint_u16_to_target(&entry.size_delta.abs);
+
+    [
+        market_index,
+        builder.mul_add(_1_bit_shifter, abs, is_negative.target),
+    ]
+}
+
 // [market_index + last 4 bits of frps, first 60 bits of frps, is_negative_frps + is_negative_pos + abs pos]
 pub fn pack_position(
     builder: &mut Builder,
     market_index: Target,
-    pos_delta: &PositionDeltaTarget,
+    pos_delta: &MarketDataDeltaTarget,
 ) -> [Target; 3] {
     let _1_bit_shifter = builder.constant_u64(1 << 1);
     let _8_bit_shifter = builder.constant_u64(1 << 8);
     let _16_bit_shifter = builder.constant_u64(1 << 16);
 
-    let is_negative_pos = builder.is_sign_negative(pos_delta.position_delta.sign);
-    let pos_abs_target = builder.biguint_u16_to_target(&pos_delta.position_delta.abs);
+    let is_negative_pos = builder.is_sign_negative(pos_delta.size_delta.sign);
+    let pos_abs_target = builder.biguint_u16_to_target(&pos_delta.size_delta.abs);
     let pos_packed = builder.mul_add(_1_bit_shifter, pos_abs_target, is_negative_pos.target);
 
     let is_negative_frps = builder.is_sign_negative(pos_delta.funding_rate_prefix_sum_delta.sign);

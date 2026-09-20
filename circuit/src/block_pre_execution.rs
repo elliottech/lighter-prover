@@ -45,6 +45,9 @@ where
     pub old_account_tree_root: HashOut<F>,
     pub old_account_pub_data_tree_root: HashOut<F>,
     pub old_market_tree_root: HashOut<F>,
+    pub old_market_pub_data_tree_root: HashOut<F>,
+    pub old_public_market_index_tree_root: HashOut<F>,
+    pub next_public_market_index_before: i64,
     pub old_state_root: HashOut<F>,
 }
 
@@ -66,6 +69,9 @@ impl BlockPreExec<F> {
             old_account_tree_root: block.old_account_tree_root,
             old_account_pub_data_tree_root: block.old_account_pub_data_tree_root,
             old_market_tree_root: block.old_market_tree_root,
+            old_market_pub_data_tree_root: block.old_market_pub_data_tree_root,
+            old_public_market_index_tree_root: block.old_public_market_index_tree_root,
+            next_public_market_index_before: block.next_public_market_index_before,
             old_state_root: block.old_state_root,
             state_metadata: block.state_metadata.clone(),
         }

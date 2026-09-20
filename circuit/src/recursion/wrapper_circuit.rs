@@ -164,12 +164,9 @@ impl WrapperInnerCircuit {
         let mut batch = BatchTarget::from_public_inputs(
             &self.target.chain_proofs[0].public_inputs[..BATCH_TARGET_INDEX],
         );
-        let empty_account_delta_tree_root =
-            self.builder.constant_hash(EMPTY_ACCOUNT_DELTA_TREE_ROOT);
-        self.builder.connect_hashes(
-            batch.old_account_delta_tree_root,
-            empty_account_delta_tree_root,
-        );
+        let empty_delta_root = self.builder.constant_hash(EMPTY_DELTA_ROOT);
+        self.builder
+            .connect_hashes(batch.old_delta_root, empty_delta_root);
 
         let mut is_enabled = self.builder._true();
 
@@ -305,8 +302,13 @@ impl WrapperInnerCircuit {
     }
 
     pub fn verify_version_and_reserved_data(&mut self) {
+        for (i, byte) in BLOB_VERSION.to_be_bytes().into_iter().enumerate() {
+            let expected = self.builder.constant_u8(byte);
+            self.builder
+                .connect_u8(self.target.blob_bytes[BLOB_VERSION_INDEX + i], expected);
+        }
         let zero = self.builder.zero_u8();
-        for i in BLOB_VERSION_INDEX..BLOB_MARK_PRICE_INDEX {
+        for i in BLOB_RESERVED_INDEX..BLOB_MARK_PRICE_INDEX {
             self.builder.connect_u8(self.target.blob_bytes[i], zero);
         }
     }
@@ -368,8 +370,7 @@ impl WrapperInnerCircuit {
             );
         }
 
-        for i in
-            (BLOB_QUOTE_MULTIPLIER_INDEX..BLOB_ACCOUNT_OFFSET).step_by(QUOTE_MULTIPLIER_BYTE_SIZE)
+        for i in (BLOB_QUOTE_MULTIPLIER_INDEX..BLOB_DELTA_INDEX).step_by(QUOTE_MULTIPLIER_BYTE_SIZE)
         {
             let chunk: [U8Target; QUOTE_MULTIPLIER_BYTE_SIZE] = self.target.blob_bytes
                 [i..i + QUOTE_MULTIPLIER_BYTE_SIZE]
@@ -394,7 +395,7 @@ impl WrapperInnerCircuit {
         let multiplier = self.builder.constant_usize(1 << 8);
         let mut pub_data_hash_elements = vec![];
         let blob_bytes = &self.target.blob_bytes;
-        for chunk in blob_bytes[BLOB_ACCOUNT_OFFSET..].chunks(7) {
+        for chunk in blob_bytes[BLOB_DELTA_INDEX..].chunks(7) {
             let mut res = chunk.first().unwrap_or(&zero_u8).0;
             for &byte in chunk.iter().skip(1) {
                 res = self.builder.mul_add(res, multiplier, byte.0);
@@ -442,10 +443,8 @@ impl WrapperInnerCircuit {
             &self.target.blob_evaluation_proof.public_inputs.clone(),
         );
 
-        self.builder.connect_hashes(
-            batch.new_account_delta_tree_root,
-            blob.account_delta_tree_root,
-        );
+        self.builder
+            .connect_hashes(batch.new_delta_root, blob.delta_root);
 
         self.builder
             .connect_keccak_output(self.target.kzg_versioned_hash, blob.kzg_versioned_hash);
@@ -479,15 +478,22 @@ impl WrapperInnerCircuit {
         aggregated_delta: &AggregatedDeltaTarget,
     ) {
         // Verify that delta layer computed the same root as the tx layer
-        let account_delta_tree_root = aggregated_delta.get_root(&mut self.builder);
+        let account_delta_tree_root = self.builder.hash_two_to_one(
+            &aggregated_delta.path_matrix[0][ACCOUNT_MERKLE_LEVELS - 1],
+            &aggregated_delta.path_matrix[1][ACCOUNT_MERKLE_LEVELS - 1],
+        );
+        let delta_root = self.builder.hash_two_to_one(
+            &account_delta_tree_root,
+            &aggregated_delta.market_delta_hash,
+        );
         self.builder
-            .connect_hashes(batch.new_account_delta_tree_root, account_delta_tree_root);
+            .connect_hashes(batch.new_delta_root, delta_root);
+        self.builder
+            .assert_zero(aggregated_delta.remaining_market_delta_count);
 
         // Verify the evaluation point
         let pub_data_hash = self._get_blob_pub_data_hash();
-        let pub_data_evaluation_point = self
-            .builder
-            .hash_two_to_one(&pub_data_hash, &account_delta_tree_root);
+        let pub_data_evaluation_point = self.builder.hash_two_to_one(&pub_data_hash, &delta_root);
         let zero = self.builder.zero();
         self.builder.connect_quintic_ext(
             aggregated_delta.evaluation_point,
@@ -508,7 +514,7 @@ impl WrapperInnerCircuit {
         self.builder
             .bitstream_initialize(0, aggregated_delta.evaluation_point);
 
-        let pub_data_half_bytes = self.target.blob_bytes[BLOB_ACCOUNT_OFFSET..]
+        let pub_data_half_bytes = self.target.blob_bytes[BLOB_DELTA_INDEX..]
             .iter()
             .flat_map(|byte| self.builder.split_to_u4s_le(byte.0, 2))
             .collect::<Vec<_>>();

@@ -33,7 +33,7 @@ use crate::utils::CircuitBuilderUtils;
 
 const NEW_PUBLIC_MARKET_DETAILS_INDEX: usize = 24;
 const ON_CHAIN_OPERATIONS_PUB_DATA_HASH_INDEX: usize =
-    NEW_PUBLIC_MARKET_DETAILS_INDEX + POSITION_LIST_SIZE * 5;
+    NEW_PUBLIC_MARKET_DETAILS_INDEX + POSITION_LIST_SIZE * PublicMarketDetails::PUBLIC_INPUTS_SIZE;
 const PRIORITY_OPERATIONS_COUNT_INDEX: usize =
     ON_CHAIN_OPERATIONS_PUB_DATA_HASH_INDEX + KECCAK_OUTPUT_LENGHT;
 const OLD_PREFIX_PRIORITY_OPERATION_HASH_INDEX: usize = PRIORITY_OPERATIONS_COUNT_INDEX + 1;
@@ -77,11 +77,11 @@ where
 
     #[serde(rename = "oapdtr")]
     #[serde(deserialize_with = "deserializers::hash_out")]
-    pub old_account_delta_tree_root: HashOut<F>,
+    pub old_delta_root: HashOut<F>,
 
     #[serde(rename = "napdtr")]
     #[serde(deserialize_with = "deserializers::hash_out")]
-    pub new_account_delta_tree_root: HashOut<F>,
+    pub new_delta_root: HashOut<F>,
 
     #[serde(rename = "ocpdh")]
     #[serde(deserialize_with = "deserializers::hex_to_bytes")]
@@ -116,8 +116,8 @@ where
             old_state_root: HashOut::<F>::default(),
             new_validium_root: HashOut::<F>::default(),
             new_state_root: HashOut::<F>::default(),
-            old_account_delta_tree_root: HashOut::<F>::default(),
-            new_account_delta_tree_root: HashOut::<F>::default(),
+            old_delta_root: HashOut::<F>::default(),
+            new_delta_root: HashOut::<F>::default(),
             on_chain_operations_pub_data_hash: [0; KECCAK_HASH_OUT_BYTE_SIZE],
             priority_operations_count: 0,
             old_prefix_priority_operation_hash: [0; KECCAK_HASH_OUT_BYTE_SIZE],
@@ -144,12 +144,12 @@ where
             new_validium_root: HashOut::<F>::from([pis[8], pis[9], pis[10], pis[11]]),
             new_state_root: HashOut::<F>::from([pis[12], pis[13], pis[14], pis[15]]),
 
-            old_account_delta_tree_root: HashOut::<F>::from([pis[16], pis[17], pis[18], pis[19]]),
-            new_account_delta_tree_root: HashOut::<F>::from([pis[20], pis[21], pis[22], pis[23]]),
+            old_delta_root: HashOut::<F>::from([pis[16], pis[17], pis[18], pis[19]]),
+            new_delta_root: HashOut::<F>::from([pis[20], pis[21], pis[22], pis[23]]),
 
             new_public_market_details: pis
                 [NEW_PUBLIC_MARKET_DETAILS_INDEX..ON_CHAIN_OPERATIONS_PUB_DATA_HASH_INDEX]
-                .chunks(5)
+                .chunks(PublicMarketDetails::PUBLIC_INPUTS_SIZE)
                 .map(|chunk| {
                     let mut funding_rate_prefix_sum_abs =
                         (chunk[1].to_canonical_u64() + (chunk[2].to_canonical_u64() << 32)) as i64;
@@ -204,13 +204,13 @@ where
             // for first block use current blocks timestamp
             self.first_created_at = current_block.created_at;
             self.old_state_root = current_block.old_state_root;
-            self.old_account_delta_tree_root = current_block.old_account_delta_tree_root;
+            self.old_delta_root = current_block.old_delta_root;
         }
         self.end_block_number = current_block.block_number;
         self.last_created_at = current_block.created_at;
         self.new_validium_root = current_block.new_validium_root;
         self.new_state_root = current_block.new_state_root;
-        self.new_account_delta_tree_root = current_block.new_account_delta_tree_root;
+        self.new_delta_root = current_block.new_delta_root;
         self.new_public_market_details = current_block.new_public_market_details.clone();
         self.batch_size += 1;
     }
@@ -278,8 +278,8 @@ pub struct BatchTarget {
     pub new_validium_root: HashOutTarget,
     pub new_state_root: HashOutTarget,
 
-    pub old_account_delta_tree_root: HashOutTarget,
-    pub new_account_delta_tree_root: HashOutTarget,
+    pub old_delta_root: HashOutTarget,
+    pub new_delta_root: HashOutTarget,
 
     pub on_chain_operations_pub_data_hash: KeccakOutputTarget,
 
@@ -304,8 +304,8 @@ impl BatchTarget {
             new_validium_root: builder.add_virtual_hash_public_input(),
             new_state_root: builder.add_virtual_hash_public_input(),
 
-            old_account_delta_tree_root: builder.add_virtual_hash_public_input(),
-            new_account_delta_tree_root: builder.add_virtual_hash_public_input(),
+            old_delta_root: builder.add_virtual_hash_public_input(),
+            new_delta_root: builder.add_virtual_hash_public_input(),
 
             new_public_market_details: core::array::from_fn(|_| {
                 PublicMarketDetailsTarget::new_public(builder)
@@ -344,16 +344,16 @@ impl BatchTarget {
                 elements: [pis[12], pis[13], pis[14], pis[15]],
             },
 
-            old_account_delta_tree_root: HashOutTarget {
+            old_delta_root: HashOutTarget {
                 elements: [pis[16], pis[17], pis[18], pis[19]],
             },
-            new_account_delta_tree_root: HashOutTarget {
+            new_delta_root: HashOutTarget {
                 elements: [pis[20], pis[21], pis[22], pis[23]],
             },
 
             new_public_market_details: pis
                 [NEW_PUBLIC_MARKET_DETAILS_INDEX..ON_CHAIN_OPERATIONS_PUB_DATA_HASH_INDEX]
-                .chunks(5)
+                .chunks(PublicMarketDetails::PUBLIC_INPUTS_SIZE)
                 .map(|chunk| PublicMarketDetailsTarget {
                     funding_rate_prefix_sum: BigIntTarget {
                         sign: SignTarget::new_unsafe(chunk[0]),
@@ -400,11 +400,7 @@ impl BatchTarget {
         builder.conditional_assert_eq_hash(cond, &a.new_state_root, &b.old_state_root);
 
         // Account pub data delta tree roots
-        builder.conditional_assert_eq_hash(
-            cond,
-            &a.new_account_delta_tree_root,
-            &b.old_account_delta_tree_root,
-        );
+        builder.conditional_assert_eq_hash(cond, &a.new_delta_root, &b.old_delta_root);
 
         // Priority operations pub data hash
         builder.conditional_assert_eq_keccak_output(
@@ -427,12 +423,8 @@ impl BatchTarget {
                 &a.new_validium_root,
             ),
             new_state_root: builder.select_hash(cond, &b.new_state_root, &a.new_state_root),
-            old_account_delta_tree_root: a.old_account_delta_tree_root,
-            new_account_delta_tree_root: builder.select_hash(
-                cond,
-                &b.new_account_delta_tree_root,
-                &a.new_account_delta_tree_root,
-            ),
+            old_delta_root: a.old_delta_root,
+            new_delta_root: builder.select_hash(cond, &b.new_delta_root, &a.new_delta_root),
 
             new_public_market_details: core::array::from_fn(|i| {
                 PublicMarketDetailsTarget::select(
@@ -463,7 +455,7 @@ impl BatchTarget {
         }
     }
 
-    /// `new_account_delta_tree_root` will be taken from the aggregated block, so it
+    /// `new_delta_root` will be taken from the aggregated block, so it
     /// won't be empty when this function is called.
     pub fn is_empty_for_recursion(&self, builder: &mut Builder) -> BoolTarget {
         let assertions = [
@@ -474,7 +466,7 @@ impl BatchTarget {
             builder.is_zero_hash_out(&self.old_state_root),
             builder.is_zero_hash_out(&self.new_validium_root),
             builder.is_zero_hash_out(&self.new_state_root),
-            builder.is_zero_hash_out(&self.old_account_delta_tree_root),
+            builder.is_zero_hash_out(&self.old_delta_root),
             builder.is_zero_keccak_output(self.on_chain_operations_pub_data_hash),
             builder.is_zero(self.priority_operations_count),
             builder.is_zero_keccak_output(self.old_prefix_priority_operation_hash),
@@ -495,14 +487,8 @@ impl BatchTarget {
         builder.connect_hashes(self.new_validium_root, other.new_validium_root);
         builder.connect_hashes(self.new_state_root, other.new_state_root);
 
-        builder.connect_hashes(
-            self.old_account_delta_tree_root,
-            other.old_account_delta_tree_root,
-        );
-        builder.connect_hashes(
-            self.new_account_delta_tree_root,
-            other.new_account_delta_tree_root,
-        );
+        builder.connect_hashes(self.old_delta_root, other.old_delta_root);
+        builder.connect_hashes(self.new_delta_root, other.new_delta_root);
 
         builder.connect_keccak_output(
             self.on_chain_operations_pub_data_hash,
@@ -540,14 +526,8 @@ impl BatchTarget {
             &format!("{} new_validium_root", log),
         );
         builder.println_hash_out(&self.new_state_root, &format!("{} new_state_root", log));
-        builder.println_hash_out(
-            &self.old_account_delta_tree_root,
-            &format!("{} old_account_delta_tree_root", log),
-        );
-        builder.println_hash_out(
-            &self.new_account_delta_tree_root,
-            &format!("{} new_account_delta_tree_root", log),
-        );
+        builder.println_hash_out(&self.old_delta_root, &format!("{} old_delta_root", log));
+        builder.println_hash_out(&self.new_delta_root, &format!("{} new_delta_root", log));
         builder.println_keccak_output(
             &self.on_chain_operations_pub_data_hash,
             &format!("{} on_chain_operations_pub_data_hash", log),
@@ -587,8 +567,8 @@ impl<T: Witness<F>, F: PrimeField64 + RichField> BatchTargetWitness<F> for T {
         self.set_hash_target(a.new_validium_root, b.new_validium_root)?;
         self.set_hash_target(a.new_state_root, b.new_state_root)?;
 
-        self.set_hash_target(a.old_account_delta_tree_root, b.old_account_delta_tree_root)?;
-        self.set_hash_target(a.new_account_delta_tree_root, b.new_account_delta_tree_root)?;
+        self.set_hash_target(a.old_delta_root, b.old_delta_root)?;
+        self.set_hash_target(a.new_delta_root, b.new_delta_root)?;
 
         for i in 0..KECCAK_HASH_OUT_BYTE_SIZE {
             self.set_target(

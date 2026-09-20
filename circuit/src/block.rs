@@ -89,6 +89,17 @@ where
     #[serde(deserialize_with = "deserializers::hash_out")]
     pub old_market_tree_root: HashOut<F>,
 
+    #[serde(rename = "ompdtr")]
+    #[serde(deserialize_with = "deserializers::hash_out")]
+    pub old_market_pub_data_tree_root: HashOut<F>,
+
+    #[serde(rename = "opmitr")]
+    #[serde(deserialize_with = "deserializers::hash_out")]
+    pub old_public_market_index_tree_root: HashOut<F>,
+
+    #[serde(rename = "npmi")]
+    pub next_public_market_index_before: i64,
+
     #[serde(rename = "osm")]
     #[serde(default)]
     pub state_metadata: StateMetadata,
@@ -99,7 +110,7 @@ where
 
     #[serde(rename = "oapdtr")]
     #[serde(deserialize_with = "deserializers::hash_out")]
-    pub old_account_delta_tree_root: HashOut<F>,
+    pub old_delta_root: HashOut<F>,
 
     #[serde(rename = "nvr")]
     #[serde(deserialize_with = "deserializers::hash_out")]
@@ -111,7 +122,7 @@ where
 
     #[serde(rename = "napdtr")]
     #[serde(deserialize_with = "deserializers::hash_out")]
-    pub new_account_delta_tree_root: HashOut<F>,
+    pub new_delta_root: HashOut<F>,
 
     #[serde(rename = "ococ", default)]
     pub on_chain_operations_count: u64,
@@ -346,10 +357,10 @@ where
     pub new_state_root: HashOut<F>,
 
     #[serde(rename = "oapdtr")]
-    pub old_account_delta_tree_root: HashOut<F>,
+    pub old_delta_root: HashOut<F>,
 
     #[serde(rename = "napdtr")]
-    pub new_account_delta_tree_root: HashOut<F>,
+    pub new_delta_root: HashOut<F>,
 
     #[serde(rename = "ococ")]
     #[serde(default)]
@@ -411,14 +422,8 @@ where
             .field("old_state_root", &self.old_state_root)
             .field("new_validium_root", &self.new_validium_root)
             .field("new_state_root", &self.new_state_root)
-            .field(
-                "old_account_delta_tree_root",
-                &self.old_account_delta_tree_root,
-            )
-            .field(
-                "new_account_delta_tree_root",
-                &self.new_account_delta_tree_root,
-            )
+            .field("old_delta_root", &self.old_delta_root)
+            .field("new_delta_root", &self.new_delta_root)
             .field("on_chain_operations_count", &self.on_chain_operations_count)
             .field("on_chain_operations_pub_data", &on_chain_pub_data)
             .field("priority_operations_count", &self.priority_operations_count)
@@ -443,8 +448,8 @@ impl BlockWitness<F> {
             old_state_root: block.old_state_root,
             new_validium_root: block.new_validium_root,
             new_state_root: block.new_state_root,
-            old_account_delta_tree_root: block.old_account_delta_tree_root,
-            new_account_delta_tree_root: block.new_account_delta_tree_root,
+            old_delta_root: block.old_delta_root,
+            new_delta_root: block.new_delta_root,
             on_chain_operations_count: block.on_chain_operations_count,
             on_chain_operations_pub_data: block.on_chain_operations_pub_data.clone(),
             priority_operations_count: block.priority_operations_count,
@@ -473,8 +478,8 @@ where
     pub fn from_public_inputs(public_inputs: &[F], _: usize, _: usize) -> Self {
         let new_public_market_details_index = 22;
 
-        let on_chain_operations_count_index =
-            new_public_market_details_index + POSITION_LIST_SIZE * 5;
+        let on_chain_operations_count_index = new_public_market_details_index
+            + POSITION_LIST_SIZE * PublicMarketDetails::PUBLIC_INPUTS_SIZE;
         let on_chain_operations_pub_data_index = on_chain_operations_count_index + 1;
 
         let priority_operations_count_index =
@@ -508,14 +513,14 @@ where
                 public_inputs[12],
                 public_inputs[13],
             ]),
-            old_account_delta_tree_root: HashOut::<F>::from([
+            old_delta_root: HashOut::<F>::from([
                 public_inputs[14],
                 public_inputs[15],
                 public_inputs[16],
                 public_inputs[17],
             ]),
 
-            new_account_delta_tree_root: HashOut::<F>::from([
+            new_delta_root: HashOut::<F>::from([
                 public_inputs[18],
                 public_inputs[19],
                 public_inputs[20],
@@ -524,7 +529,7 @@ where
 
             new_public_market_details: public_inputs
                 [new_public_market_details_index..on_chain_operations_count_index]
-                .chunks(5)
+                .chunks(PublicMarketDetails::PUBLIC_INPUTS_SIZE)
                 .map(|chunk| {
                     let mut funding_rate_prefix_sum_abs =
                         (chunk[1].to_canonical_u64() + (chunk[2].to_canonical_u64() << 32)) as i64;

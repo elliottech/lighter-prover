@@ -40,7 +40,7 @@ pub struct L2CreateOrderTx {
     pub api_key_index: u8,
 
     #[serde(rename = "mi")]
-    pub market_index: u16,
+    pub public_market_index: i64,
 
     #[serde(rename = "oi")]
     pub client_order_index: i64, // 48 bits (user-assigned or 0)
@@ -75,7 +75,7 @@ pub struct L2CreateOrderTxTarget {
     pub account_index: Target, // 48 bits
     pub api_key_index: Target, // 8 bits
 
-    pub market_index: Target, // 12 bits
+    pub public_market_index: Target, // 48 bits
 
     pub client_order_index: Target, // 48 bits
 
@@ -106,7 +106,7 @@ impl L2CreateOrderTxTarget {
         L2CreateOrderTxTarget {
             account_index: builder.add_virtual_target(),
             api_key_index: builder.add_virtual_target(),
-            market_index: builder.add_virtual_target(),
+            public_market_index: builder.add_virtual_target(),
             client_order_index: builder.add_virtual_target(),
             base_amount: builder.add_virtual_target(),
             price: builder.add_virtual_target(),
@@ -133,6 +133,7 @@ impl L2CreateOrderTxTarget {
     fn get_in_progress_order_register(
         &self,
         builder: &mut Builder,
+        market_index: Target,
         tx_attributes: &TxAttributesTarget,
     ) -> BaseRegisterInfoTarget {
         let (generic_field_1, generic_field_2, generic_field_3) =
@@ -141,7 +142,7 @@ impl L2CreateOrderTxTarget {
         BaseRegisterInfoTarget {
             instruction_type: builder.constant(F::from_canonical_u8(INSERT_ORDER)),
 
-            market_index: self.market_index,
+            market_index,
             account_index: self.account_index,
 
             pending_size: self.calculated_base_amount,
@@ -241,7 +242,7 @@ impl TxHash for L2CreateOrderTxTarget {
             tx_expired_at,
             self.account_index,
             self.api_key_index,
-            self.market_index,
+            self.public_market_index,
             self.client_order_index,
             self.base_amount,
             self.price,
@@ -289,7 +290,17 @@ impl Verify for L2CreateOrderTxTarget {
         /***********************/
         /*  State leaf checks  */
         /***********************/
-        builder.conditional_assert_eq(is_enabled, self.market_index, tx_state.market.market_index);
+        builder.conditional_assert_eq(
+            is_enabled,
+            self.public_market_index,
+            tx_state.market.public_market_index,
+        );
+        let nil_public_market_index = builder.constant_u64(NIL_PUBLIC_MARKET_INDEX as u64);
+        builder.conditional_assert_not_eq(
+            is_enabled,
+            self.public_market_index,
+            nil_public_market_index,
+        );
         builder.conditional_assert_eq(
             is_enabled,
             self.account_index,
@@ -301,7 +312,13 @@ impl Verify for L2CreateOrderTxTarget {
             tx_state.api_key.api_key_index,
         );
 
-        let spot_flag = builder.and(is_enabled, is_spot_market);
+        // Binary options markets use USDC as both base and quote asset; the tx carries it once in the
+        // first slot, like every single-asset tx, and the second slot stays nil
+        let is_binary_options_market =
+            builder.is_equal_constant(tx_state.market.market_type, MARKET_TYPE_BINARY_OPTIONS);
+        let non_perps_flag = builder.and(is_enabled, is_spot_market);
+        let spot_flag = builder.and_not(non_perps_flag, is_binary_options_market);
+        let bo_flag = builder.and(is_enabled, is_binary_options_market);
         builder.conditional_assert_eq(
             spot_flag,
             tx_state.market.base_asset_id,
@@ -311,6 +328,16 @@ impl Verify for L2CreateOrderTxTarget {
             spot_flag,
             tx_state.market.quote_asset_id,
             tx_state.asset_indices[QUOTE_ASSET_ID],
+        );
+        builder.conditional_assert_eq(
+            bo_flag,
+            tx_state.market.quote_asset_id,
+            tx_state.asset_indices[USDC_BASE_ASSET_ID],
+        );
+        builder.conditional_assert_eq_constant(
+            bo_flag,
+            tx_state.asset_indices[QUOTE_ASSET_ID],
+            NIL_ASSET_INDEX,
         );
         let perps_flag = builder.and(is_enabled, self.is_perps_market);
         builder.conditional_assert_eq_constant(
@@ -334,18 +361,21 @@ impl Verify for L2CreateOrderTxTarget {
             );
             let flag = builder.and_not(perps_flag, is_taker_insurance_fund);
 
-            let is_taker_isolated = builder.is_equal_constant(
-                tx_state.positions[TAKER_ACCOUNT_ID].margin_mode,
-                ISOLATED_MARGIN as u64,
+            let mut taker_position = tx_state.positions[TAKER_ACCOUNT_ID].clone();
+            let always = builder._true();
+            taker_position.init_if_empty(
+                builder,
+                always,
+                tx_state.accounts[TAKER_ACCOUNT_ID].account_type,
+                market_flags.default_margin_mode,
+                tx_state.market.public_market_index,
             );
-            let is_taker_cross = builder.is_equal_constant(
-                tx_state.positions[TAKER_ACCOUNT_ID].margin_mode,
-                CROSS_MARGIN as u64,
-            );
-            let is_margin_set = builder.is_equal_constant(
-                tx_state.positions[TAKER_ACCOUNT_ID].margin_set_flag,
-                MARGIN_SET as u64,
-            );
+            let is_taker_isolated =
+                builder.is_equal_constant(taker_position.margin_mode, ISOLATED_MARGIN as u64);
+            let is_taker_cross =
+                builder.is_equal_constant(taker_position.margin_mode, CROSS_MARGIN as u64);
+            let is_margin_set =
+                builder.is_equal_constant(taker_position.margin_set_flag, MARGIN_SET as u64);
 
             // Pools can't trade on isolated-only markets
             let pool_on_isolated_only =
@@ -480,6 +510,47 @@ impl Verify for L2CreateOrderTxTarget {
         let ob_active_status = builder.constant(F::from_canonical_u8(MARKET_STATUS_ACTIVE));
         builder.conditional_assert_eq(is_enabled, tx_state.market.status, ob_active_status);
 
+        // Binary options market validations
+        {
+            // Only master and sub accounts can place binary options orders
+            let is_master = builder.is_equal_constant(
+                tx_state.accounts[TAKER_ACCOUNT_ID].account_type,
+                MASTER_ACCOUNT_TYPE as u64,
+            );
+            let is_sub = builder.is_equal_constant(
+                tx_state.accounts[TAKER_ACCOUNT_ID].account_type,
+                SUB_ACCOUNT_TYPE as u64,
+            );
+            let is_master_or_sub = builder.or(is_master, is_sub);
+            builder.conditional_assert_true(bo_flag, is_master_or_sub);
+
+            // TWAP sub orders would trigger outside the trading window checks, so only
+            // limit and market orders are supported
+            builder.conditional_assert_false(bo_flag, order_type_target.is_twap_order);
+
+            // No order can be placed on a frozen book
+            builder.conditional_assert_zero(bo_flag, tx_state.market.is_frozen);
+
+            // Orders can only be placed inside the market's trading window
+            let before_start = builder.is_lt(
+                tx_state.block_timestamp,
+                tx_state.market.start_timestamp,
+                TIMESTAMP_BITS,
+            );
+            builder.conditional_assert_false(bo_flag, before_start);
+            let after_end = builder.is_gt(
+                tx_state.block_timestamp,
+                tx_state.market.end_timestamp,
+                TIMESTAMP_BITS,
+            );
+            builder.conditional_assert_false(bo_flag, after_end);
+
+            // Price must stay below the settlement payout per share
+            let price_reaches_cap =
+                builder.is_gte(self.price, tx_state.market.settlement_cap, ORDER_PRICE_BITS);
+            builder.conditional_assert_false(bo_flag, price_reaches_cap);
+        }
+
         // Only allow order creation if market is not full, i.e. ask nonce < bid nonce, nonces are initially set so that ask nonce is smaller than bid nonce
         // since only the order creation can change one of the ask or bid nonces by exactly one, checking if orderBook.AskNonce != orderBook.BidNonce is enough
         builder.conditional_assert_not_eq(
@@ -571,9 +642,12 @@ impl Verify for L2CreateOrderTxTarget {
             let insurance_fund_spot_flag = builder.and(flag, is_insurance_fund);
             let is_base_in_margin_list = tx_state.assets[BASE_ASSET_ID].is_in_margin_list(builder);
             builder.conditional_assert_true(insurance_fund_spot_flag, is_base_in_margin_list);
+            // Binary options markets carry no asset in the second slot
+            let insurance_fund_quote_flag =
+                builder.and_not(insurance_fund_spot_flag, is_binary_options_market);
             let is_quote_in_margin_list =
                 tx_state.assets[QUOTE_ASSET_ID].is_in_margin_list(builder);
-            builder.conditional_assert_true(insurance_fund_spot_flag, is_quote_in_margin_list);
+            builder.conditional_assert_true(insurance_fund_quote_flag, is_quote_in_margin_list);
 
             // Make sure user has enough available balance to lock for limit orders
             // let (amount_to_lock, ask_asset_index) = get_locked_amount_and_ask_asset_index(
@@ -720,7 +794,11 @@ impl Apply for L2CreateOrderTxTarget {
         // In progress order - call matching engine
         {
             // Set new register
-            let new_register = self.get_in_progress_order_register(builder, &tx_state.attributes);
+            let new_register = self.get_in_progress_order_register(
+                builder,
+                tx_state.market.market_index,
+                &tx_state.attributes,
+            );
             let in_progress_flag = builder.and_not(self.success, self.is_pending_order);
             tx_state.put_to_instruction_stack_unsafe(builder, in_progress_flag, &new_register, 0);
 
@@ -753,7 +831,10 @@ impl<T: Witness<F>, F: PrimeField64> L2CreateOrderTxTargetWitness<F> for T {
     ) -> Result<()> {
         self.set_target(a.account_index, F::from_canonical_i64(b.account_index))?;
         self.set_target(a.api_key_index, F::from_canonical_u8(b.api_key_index))?;
-        self.set_target(a.market_index, F::from_canonical_u16(b.market_index))?;
+        self.set_target(
+            a.public_market_index,
+            F::from_canonical_i64(b.public_market_index),
+        )?;
         self.set_target(
             a.client_order_index,
             F::from_canonical_i64(b.client_order_index),

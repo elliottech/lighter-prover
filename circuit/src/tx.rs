@@ -21,6 +21,7 @@ use crate::transactions::internal_exit_position::InternalExitPositionTx;
 use crate::transactions::internal_liquidate_position::InternalLiquidatePositionTx;
 use crate::transactions::internal_liquidate_spot::InternalLiquidateSpotTx;
 use crate::transactions::internal_pending_unlock::InternalPendingUnlockTx;
+use crate::transactions::internal_settle_binary_options_position::InternalSettleBinaryOptionsPositionTx;
 use crate::transactions::internal_transfer::InternalTransferTx;
 use crate::transactions::l1_burn_shares::L1BurnSharesTx;
 use crate::transactions::l1_cancel_all_orders::L1CancelAllOrdersTx;
@@ -39,12 +40,14 @@ use crate::transactions::l2_cancel_all_orders::L2CancelAllOrdersTx;
 use crate::transactions::l2_cancel_order::L2CancelOrderTx;
 use crate::transactions::l2_change_pubkey::L2ChangePubKeyTx;
 use crate::transactions::l2_create_grouped_orders::L2CreateGroupedOrdersTx;
+use crate::transactions::l2_create_market::L2CreateMarketTx;
 use crate::transactions::l2_create_order::L2CreateOrderTx;
 use crate::transactions::l2_create_public_pool::L2CreatePublicPoolTx;
 use crate::transactions::l2_create_staking_pool::L2CreateStakingPoolTx;
 use crate::transactions::l2_create_sub_account::L2CreateSubAccountTx;
 use crate::transactions::l2_mint_shares::L2MintSharesTx;
 use crate::transactions::l2_modify_order::L2ModifyOrderTx;
+use crate::transactions::l2_settle_outcome::L2SettleOutcomeTx;
 use crate::transactions::l2_stake_assets::L2StakeAssetsTx;
 use crate::transactions::l2_strategy_transfer::L2StrategyTransferTx;
 use crate::transactions::l2_transfer::L2TransferTx;
@@ -54,7 +57,9 @@ use crate::transactions::l2_update_account_config::L2UpdateAccountConfigTx;
 use crate::transactions::l2_update_asset_config::L2UpdateAssetConfigTx;
 use crate::transactions::l2_update_leverage::L2UpdateLeverageTx;
 use crate::transactions::l2_update_margin::L2UpdateMarginTx;
+use crate::transactions::l2_update_market::L2UpdateMarketTx;
 use crate::transactions::l2_update_market_config::L2UpdateMarketConfigTx;
+use crate::transactions::l2_update_market_slot::L2UpdateMarketSlotTx;
 use crate::transactions::l2_update_public_pool::L2UpdatePublicPoolTx;
 use crate::transactions::l2_withdraw::L2WithdrawTx;
 use crate::tx_attributes::TxAttributes;
@@ -64,6 +69,7 @@ use crate::types::account_delta::AccountDelta;
 use crate::types::account_order::AccountOrder;
 use crate::types::api_key::ApiKey;
 use crate::types::asset::Asset;
+use crate::types::binary_options_position::BinaryOptionsPosition;
 use crate::types::config::F;
 use crate::types::constants::*;
 use crate::types::margined_asset::MarginedAsset;
@@ -231,6 +237,22 @@ where
     #[serde(default)]
     pub l2_update_asset_config_tx: L2UpdateAssetConfigTx,
 
+    #[serde(rename = "2cm")]
+    #[serde(default)]
+    pub l2_create_market_tx: L2CreateMarketTx,
+
+    #[serde(rename = "2so")]
+    #[serde(default)]
+    pub l2_settle_outcome_tx: L2SettleOutcomeTx,
+
+    #[serde(rename = "2upm")]
+    #[serde(default)]
+    pub l2_update_market_tx: L2UpdateMarketTx,
+
+    #[serde(rename = "2ums")]
+    #[serde(default)]
+    pub l2_update_market_slot_tx: L2UpdateMarketSlotTx,
+
     #[serde(rename = "Ic")]
     #[serde(default)]
     pub internal_claim_order_tx: InternalClaimOrderTx,
@@ -270,6 +292,10 @@ where
     #[serde(rename = "Ils")]
     #[serde(default)]
     pub internal_liquidate_spot_tx: InternalLiquidateSpotTx,
+
+    #[serde(rename = "Iso")]
+    #[serde(default)]
+    pub internal_settle_binary_options_position_tx: InternalSettleBinaryOptionsPositionTx,
 
     #[serde(rename = "nonce", default)]
     pub nonce: i64,
@@ -318,6 +344,10 @@ where
 
     #[serde(rename = "apdb")] // Account public data delta since the beginning of the batch
     pub accounts_delta_before: [AccountDelta<F>; NB_ACCOUNTS_PER_TX],
+
+    #[serde(rename = "amdb", default)] // Binary options positions in the tx market slot
+    #[serde(deserialize_with = "deserializers::binary_options_positions")]
+    pub accounts_market_data_before: [BinaryOptionsPosition; NB_ACCOUNTS_PER_TX - 1],
 
     #[serde(rename = "mmb")]
     pub market_before: Market<F>,
@@ -369,6 +399,10 @@ where
     #[serde(deserialize_with = "deserializers::hash_out")]
     pub old_account_delta_tree_root: HashOut<F>,
 
+    #[serde(rename = "omdh", default)]
+    #[serde(deserialize_with = "deserializers::hash_out")]
+    pub old_market_delta_hash: HashOut<F>,
+
     #[serde(rename = "omdtr")]
     #[serde(deserialize_with = "deserializers::hash_out")]
     pub old_market_details_tree_root: HashOut<F>,
@@ -376,6 +410,17 @@ where
     #[serde(rename = "omtr")]
     #[serde(deserialize_with = "deserializers::hash_out")]
     pub old_market_tree_root: HashOut<F>,
+
+    #[serde(rename = "ompdtr")]
+    #[serde(deserialize_with = "deserializers::hash_out")]
+    pub old_market_pub_data_tree_root: HashOut<F>,
+
+    #[serde(rename = "opmitr")]
+    #[serde(deserialize_with = "deserializers::hash_out")]
+    pub old_public_market_index_tree_root: HashOut<F>,
+
+    #[serde(rename = "npmi")]
+    pub next_public_market_index_before: i64,
 
     #[serde(rename = "ovr")]
     #[serde(deserialize_with = "deserializers::hash_out")]
@@ -416,8 +461,17 @@ where
 
     #[serde(rename = "mpppdd")]
     #[serde(deserialize_with = "deserializers::position_delta_merkle_proofs")]
-    pub position_delta_merkle_proofs:
-        [[HashOut<F>; POSITION_MERKLE_LEVELS]; NB_ACCOUNTS_PER_TX - 1],
+    pub position_delta_merkle_proofs: [[HashOut<F>; MARKET_MERKLE_LEVELS]; NB_ACCOUNTS_PER_TX - 1],
+
+    #[serde(rename = "mpamdb")]
+    #[serde(deserialize_with = "deserializers::account_market_data_tree_merkle_proofs")]
+    pub account_market_data_tree_merkle_proofs:
+        [[HashOut<F>; MARKET_MERKLE_LEVELS]; NB_ACCOUNTS_PER_TX - 1],
+
+    #[serde(rename = "mpampdb")]
+    #[serde(deserialize_with = "deserializers::account_market_data_tree_merkle_proofs")]
+    pub account_market_pub_data_tree_merkle_proofs:
+        [[HashOut<F>; MARKET_MERKLE_LEVELS]; NB_ACCOUNTS_PER_TX - 1],
 
     #[serde(rename = "mpakb")]
     #[serde(deserialize_with = "deserializers::api_key_tree_merkle_proof")]
@@ -428,9 +482,17 @@ where
     pub account_orders_tree_merkle_proof:
         [[HashOut<F>; ACCOUNT_ORDERS_MERKLE_LEVELS]; NB_ACCOUNT_ORDERS_PATHS_PER_TX],
 
+    #[serde(rename = "mppmb")]
+    #[serde(deserialize_with = "deserializers::public_market_index_tree_merkle_proof")]
+    pub public_market_index_tree_merkle_proof: [HashOut<F>; PUBLIC_MARKET_INDEX_MERKLE_LEVELS],
+
     #[serde(rename = "mpmmb")]
     #[serde(deserialize_with = "deserializers::market_tree_merkle_proof")]
     pub market_tree_merkle_proof: [HashOut<F>; MARKET_MERKLE_LEVELS],
+
+    #[serde(rename = "mpmpdb")]
+    #[serde(deserialize_with = "deserializers::market_tree_merkle_proof")]
+    pub market_pub_data_tree_merkle_proof: [HashOut<F>; MARKET_MERKLE_LEVELS],
 
     #[serde(rename = "mpmdb")]
     #[serde(deserialize_with = "deserializers::market_details_tree_merkle_proof")]

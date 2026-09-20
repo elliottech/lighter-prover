@@ -19,7 +19,6 @@ use crate::hash_utils::CircuitBuilderHashUtils;
 use crate::poseidon2::Poseidon2Hash;
 use crate::types::config::BIG_U96_LIMBS;
 use crate::uint::u32::gadgets::arithmetic_u32::CircuitBuilderU32;
-use crate::utils::CircuitBuilderUtils;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(bound = "")]
@@ -78,15 +77,9 @@ impl AccountAssetTarget {
     }
 
     pub fn is_empty(&self, builder: &mut Builder) -> BoolTarget {
-        // Adding 6 u32 limbs and a bool does not overflow Goldilocks, as long as
-        // limbs are guaranteed by business logic to fit 32 bits.
-        let added = builder.add_many(
-            [&self.balance, &self.locked_balance]
-                .iter()
-                .flat_map(|x| x.limbs.iter().map(|limb| limb.0))
-                .collect::<Vec<_>>(),
-        );
-        builder.is_zero(added)
+        let is_balance_zero = builder.is_zero_biguint(&self.balance);
+        let is_locked_balance_zero = builder.is_zero_biguint(&self.locked_balance);
+        builder.and(is_balance_zero, is_locked_balance_zero)
     }
 
     pub fn print(&self, builder: &mut Builder, tag: &str) {

@@ -12,7 +12,9 @@ use plonky2::iop::target::{BoolTarget, Target};
 use plonky2::iop::witness::Witness;
 use serde::Deserialize;
 
-use super::position_delta::{PositionDelta, PositionDeltaTarget, PositionDeltaTargetWitness};
+use super::market_data_delta::{
+    MarketDataDelta, MarketDataDeltaTarget, MarketDataDeltaTargetWitness,
+};
 use super::public_pool_delta::{
     PublicPoolInfoDelta, PublicPoolInfoDeltaTarget, PublicPoolInfoDeltaWitness,
     PublicPoolShareDelta, PublicPoolShareDeltaTarget, PublicPoolShareDeltaWitness,
@@ -52,7 +54,7 @@ where
     pub aggregated_asset_deltas: [BigInt; NB_ASSETS_PER_TX], // 96 bits
 
     #[serde(rename = "pd", default)]
-    pub positions_delta: PositionDelta,
+    pub market_data_delta: MarketDataDelta,
 
     #[serde(rename = "ppsd")]
     #[serde(deserialize_with = "deserializers::public_pool_shares_delta")]
@@ -81,7 +83,7 @@ impl<F: PrimeField64 + Extendable<5> + RichField> Default for AccountDelta<F> {
             l1_address: BigUint::ZERO,
             account_type: 0,
             aggregated_asset_deltas: array::from_fn(|_| BigInt::ZERO),
-            positions_delta: PositionDelta::default(),
+            market_data_delta: MarketDataDelta::default(),
             public_pool_shares_delta: array::from_fn(|_| PublicPoolShareDelta::default()),
             public_pool_info_delta: PublicPoolInfoDelta::default(),
             asset_delta_root: HashOut::ZERO,
@@ -97,7 +99,7 @@ pub struct AccountDeltaTarget {
     pub l1_address: BigUintTarget,
     pub account_type: Target,
     pub aggregated_asset_deltas: [BigIntTarget; NB_ASSETS_PER_TX],
-    pub positions_delta: PositionDeltaTarget,
+    pub market_data_delta: MarketDataDeltaTarget,
     pub public_pool_shares_delta: [PublicPoolShareDeltaTarget; SHARES_DELTA_LIST_SIZE],
     pub public_pool_info_delta: PublicPoolInfoDeltaTarget,
 
@@ -114,7 +116,7 @@ impl Default for AccountDeltaTarget {
             l1_address: BigUintTarget::default(),
             account_type: Target::default(),
             aggregated_asset_deltas: core::array::from_fn(|_| BigIntTarget::default()),
-            positions_delta: PositionDeltaTarget::default(),
+            market_data_delta: MarketDataDeltaTarget::default(),
             public_pool_shares_delta: array::from_fn(|_| PublicPoolShareDeltaTarget::default()),
             public_pool_info_delta: PublicPoolInfoDeltaTarget::default(),
             asset_delta_root: HashOutTarget {
@@ -139,7 +141,7 @@ impl AccountDeltaTarget {
             aggregated_asset_deltas: core::array::from_fn(|_| {
                 builder.add_virtual_bigint_target_unsafe(BIG_U96_LIMBS)
             }),
-            positions_delta: PositionDeltaTarget::new(builder),
+            market_data_delta: MarketDataDeltaTarget::new(builder),
             public_pool_shares_delta: array::from_fn(|_| PublicPoolShareDeltaTarget::new(builder)),
             public_pool_info_delta: PublicPoolInfoDeltaTarget::new(builder),
             asset_delta_root: builder.add_virtual_hash(),
@@ -156,7 +158,7 @@ impl AccountDeltaTarget {
             aggregated_asset_deltas: core::array::from_fn(|_| {
                 builder.add_virtual_bigint_target_unsafe(BIG_U96_LIMBS)
             }),
-            positions_delta: PositionDeltaTarget::default(),
+            market_data_delta: MarketDataDeltaTarget::default(),
             public_pool_shares_delta: array::from_fn(|_| PublicPoolShareDeltaTarget::new(builder)),
             public_pool_info_delta: PublicPoolInfoDeltaTarget::new(builder),
             asset_delta_root: builder.add_virtual_hash(),
@@ -246,8 +248,8 @@ impl AccountDeltaTarget {
             &self.aggregated_asset_deltas[1],
             &format!("{} aggregated_asset_deltas[1]", tag),
         );
-        self.positions_delta
-            .print(builder, &format!("{} positions_delta", tag));
+        self.market_data_delta
+            .print(builder, &format!("{} market_data_delta", tag));
         self.public_pool_info_delta
             .print(builder, &format!("{} public_pool_info_delta", tag));
         builder.println_hash_out(
@@ -284,7 +286,7 @@ impl<T: Witness<F> + PartialWitnessCurve<F>, F: PrimeField64 + Extendable<5> + R
     ) -> Result<()> {
         self._set_common_targets(a, b)?;
 
-        self.set_position_delta_target(&a.positions_delta, &b.positions_delta)?;
+        self.set_market_data_delta_target(&a.market_data_delta, &b.market_data_delta)?;
         self.set_public_pool_info_delta(&a.public_pool_info_delta, &b.public_pool_info_delta)?;
         for i in 0..b.public_pool_shares_delta.len() {
             self.set_public_pool_share_delta(

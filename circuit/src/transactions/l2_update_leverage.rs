@@ -19,6 +19,7 @@ use crate::types::constants::*;
 use crate::types::market_details::MarketFlags;
 use crate::types::tx_state::TxState;
 use crate::types::tx_type::TxTypeTargets;
+use crate::utils::CircuitBuilderUtils;
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct L2UpdateLeverageTx {
@@ -29,7 +30,7 @@ pub struct L2UpdateLeverageTx {
     pub api_key_index: u8,
 
     #[serde(rename = "mi")]
-    pub market_index: u16,
+    pub public_market_index: i64,
 
     #[serde(rename = "imf")]
     pub initial_margin_fraction: u16,
@@ -42,7 +43,7 @@ pub struct L2UpdateLeverageTx {
 pub struct L2UpdateLeverageTxTarget {
     pub account_index: Target,
     pub api_key_index: Target,
-    pub market_index: Target,
+    pub public_market_index: Target,     // 48 bits
     pub initial_margin_fraction: Target, // 16 bits
     pub margin_mode: Target,
 
@@ -58,7 +59,7 @@ impl L2UpdateLeverageTxTarget {
         L2UpdateLeverageTxTarget {
             account_index: builder.add_virtual_target(),
             api_key_index: builder.add_virtual_target(),
-            market_index: builder.add_virtual_target(),
+            public_market_index: builder.add_virtual_target(),
             initial_margin_fraction: builder.add_virtual_target(),
             margin_mode: builder.add_virtual_target(),
 
@@ -86,7 +87,7 @@ impl TxHash for L2UpdateLeverageTxTarget {
             tx_expired_at,
             self.account_index,
             self.api_key_index,
-            self.market_index,
+            self.public_market_index,
             self.initial_margin_fraction,
             self.margin_mode,
         ];
@@ -112,12 +113,21 @@ impl Verify for L2UpdateLeverageTxTarget {
             tx_state.api_key.api_key_index,
         );
 
-        builder.conditional_assert_eq(is_enabled, self.market_index, tx_state.market.market_index);
         builder.conditional_assert_eq(
             is_enabled,
-            self.market_index,
-            tx_state.market.perps_market_index,
+            self.public_market_index,
+            tx_state.market.public_market_index,
         );
+        let nil_public_market_index = builder.constant_u64(NIL_PUBLIC_MARKET_INDEX as u64);
+        builder.conditional_assert_not_eq(
+            is_enabled,
+            self.public_market_index,
+            nil_public_market_index,
+        );
+        // The pmi match above guarantees a live market leaf, so market_type is reliable here.
+        let is_perps_market =
+            builder.is_equal_constant(tx_state.market.market_type, MARKET_TYPE_PERPS);
+        builder.conditional_assert_true(is_enabled, is_perps_market);
 
         let is_isolated_margin_mode =
             builder.is_equal_constant(self.margin_mode, ISOLATED_MARGIN as u64);
@@ -126,8 +136,13 @@ impl Verify for L2UpdateLeverageTxTarget {
         builder.conditional_assert_true(is_enabled, is_valid_margin_mode);
 
         // We only allow to update margin mode if there is no active position or order in the market
+        let is_position_public_market_index_matching = builder.is_equal(
+            tx_state.positions[OWNER_ACCOUNT_ID].public_market_index,
+            tx_state.market.public_market_index,
+        );
+        let is_open = tx_state.positions[OWNER_ACCOUNT_ID].is_order_or_position_open(builder);
         self.is_position_active_on_market =
-            tx_state.positions[OWNER_ACCOUNT_ID].is_order_or_position_open(builder);
+            builder.and(is_open, is_position_public_market_index_matching);
         let is_margin_mode_changed = builder.is_not_equal(
             tx_state.positions[OWNER_ACCOUNT_ID].margin_mode,
             self.margin_mode,
@@ -201,6 +216,15 @@ impl Verify for L2UpdateLeverageTxTarget {
 
 impl Apply for L2UpdateLeverageTxTarget {
     fn apply(&mut self, builder: &mut Builder, tx_state: &mut TxState) -> BoolTarget {
+        let market_flags = MarketFlags::from_target(builder, tx_state.market_details.market_flags);
+        tx_state.positions[OWNER_ACCOUNT_ID].init_if_empty(
+            builder,
+            self.success,
+            tx_state.accounts[OWNER_ACCOUNT_ID].account_type,
+            market_flags.default_margin_mode,
+            tx_state.market.public_market_index,
+        );
+
         tx_state.positions[OWNER_ACCOUNT_ID].initial_margin_fraction = builder.select(
             self.success,
             self.initial_margin_fraction,
@@ -284,7 +308,10 @@ impl<T: Witness<F>, F: PrimeField64> L2UpdateLeverageTxTargetWitness<F> for T {
     ) -> Result<()> {
         self.set_target(a.account_index, F::from_canonical_i64(b.account_index))?;
         self.set_target(a.api_key_index, F::from_canonical_u8(b.api_key_index))?;
-        self.set_target(a.market_index, F::from_canonical_u16(b.market_index))?;
+        self.set_target(
+            a.public_market_index,
+            F::from_canonical_i64(b.public_market_index),
+        )?;
         self.set_target(
             a.initial_margin_fraction,
             F::from_canonical_u16(b.initial_margin_fraction),

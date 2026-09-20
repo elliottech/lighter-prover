@@ -336,36 +336,34 @@ impl BaseRegisterInfoTarget {
         builder.multi_and(&assertions)
     }
 
+    /// Every field is checked individually: the fields are unconstrained witnesses when
+    /// loaded from the state, so a summed check would let distinct assignments alias
+    /// the empty register.
     pub fn is_empty(&self, builder: &mut Builder) -> BoolTarget {
-        // Adding following fields does not overflow Goldilocks, as long as
-        // these fields are guaranteed by business logic to fit these sizes.
-        let added = builder.add_many([
-            self.instruction_type,           // 8 bits
-            self.market_index,               // 16 bits
-            self.account_index,              // 48 bits
-            self.pending_size,               // 48 bits
-            self.pending_client_order_index, // 48 bits
-            self.pending_initial_size,       // 48 bits
-            self.pending_price,              // 32 bits
-            self.pending_nonce,              // 48 bits
-            self.pending_is_ask.target,      // 1 bit
-            self.pending_type,               // 8 bits
-            self.pending_time_in_force,      // 8 bits
-            self.pending_reduce_only,        // 8 bits
-            self.pending_expiry,             // 48 bits
-            self.pending_trigger_price,      // 32 bits
-            self.pending_trigger_status,     // 2 bits
-            self.generic_field_2,            // generic but 32 bits
-            self.generic_field_3,            // generic but 32 bits
-        ]);
         let assertions = [
-            builder.is_zero(added),
+            builder.is_zero(self.instruction_type),
+            builder.is_zero(self.market_index),
+            builder.is_zero(self.account_index),
+            builder.is_zero(self.pending_size),
             builder.is_zero(self.pending_order_index),
+            builder.is_zero(self.pending_client_order_index),
+            builder.is_zero(self.pending_initial_size),
+            builder.is_zero(self.pending_price),
+            builder.is_zero(self.pending_nonce),
+            builder.is_zero(self.pending_is_ask.target),
+            builder.is_zero(self.pending_type),
+            builder.is_zero(self.pending_time_in_force),
+            builder.is_zero(self.pending_reduce_only),
+            builder.is_zero(self.pending_expiry),
+            builder.is_zero(self.generic_field_0),
+            builder.is_zero(self.pending_trigger_price),
+            builder.is_zero(self.pending_trigger_status),
             builder.is_zero(self.pending_to_trigger_order_index0),
             builder.is_zero(self.pending_to_trigger_order_index1),
             builder.is_zero(self.pending_to_cancel_order_index0),
-            builder.is_zero(self.generic_field_0), // Generic
-            builder.is_zero(self.generic_field_1), // Generic
+            builder.is_zero(self.generic_field_1),
+            builder.is_zero(self.generic_field_2),
+            builder.is_zero(self.generic_field_3),
             builder.is_zero(self.pending_order_version),
         ];
         builder.multi_and(&assertions)

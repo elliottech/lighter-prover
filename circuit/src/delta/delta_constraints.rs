@@ -21,24 +21,30 @@ use serde_with::serde_as;
 use super::account_delta_full_leaf::{
     AccountDeltaFullLeaf, AccountDeltaFullLeafTarget, AccountDeltaLeafTargetWitness,
 };
+use super::market_delta_leaf::{
+    MarketDeltaLeaf, MarketDeltaLeafTarget, MarketDeltaLeafTargetWitness,
+};
 use crate::bigint::bigint::CircuitBuilderBigInt;
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::comparison::CircuitBuilderSubtractiveComparison;
 use crate::delta::evaluate_sequence::CircuitBuilderSequenceEvaluator;
 use crate::delta::types::{DeltaPublicInputTarget, DeltaPublicOutputTarget};
 use crate::delta::utils::{
-    digest, pack_asset_balance, pack_conditionals_with_account_type, pack_l1_address, pack_position,
+    digest, pack_asset_balance, pack_binary_options_position, pack_conditionals_with_account_type,
+    pack_l1_address, pack_position,
 };
 use crate::deserializers;
 use crate::eddsa::gadgets::base_field::{CircuitBuilderGFp5, PartialWitnessQuinticExt};
 use crate::hash_utils::CircuitBuilderHashUtils;
+use crate::poseidon2::Poseidon2Hash;
 use crate::signed::signed_target::CircuitBuilderSigned;
 use crate::types::config::{Builder, C, D, F};
 use crate::types::constants::{
-    ACCOUNT_INDEX_BITS, ACCOUNT_MERKLE_LEVELS, ASSET_LIST_SIZE, EMPTY_DELTA_TREE_HASHES,
-    MAX_ACCOUNT_INDEX, MAX_ASSET_INDEX, MIN_ASSET_INDEX, NIL_ACCOUNT_INDEX, POSITION_LIST_SIZE,
-    SHARES_DELTA_LIST_SIZE,
+    ACCOUNT_INDEX_BITS, ACCOUNT_MERKLE_LEVELS, ASSET_LIST_SIZE, BINARY_OPTIONS_MARKET_SLOT_COUNT,
+    EMPTY_DELTA_TREE_HASHES, MAX_ACCOUNT_INDEX, MAX_ASSET_INDEX, MIN_ASSET_INDEX,
+    MIN_BINARY_OPTIONS_MARKET_INDEX, NIL_ACCOUNT_INDEX, POSITION_LIST_SIZE, SHARES_DELTA_LIST_SIZE,
 };
+use crate::utils::CircuitBuilderUtils;
 
 #[serde_as]
 #[derive(Debug, Clone, Deserialize)]
@@ -54,14 +60,32 @@ where
     #[serde(rename = "mpad")]
     #[serde(deserialize_with = "deserializers::path_matrix")]
     pub path_matrix: [[HashOut<F>; ACCOUNT_MERKLE_LEVELS]; 2],
+
+    #[serde(rename = "mdh", default)]
+    #[serde(deserialize_with = "deserializers::hash_out")]
+    pub market_delta_hash: HashOut<F>,
+    #[serde(rename = "rmd", default = "default_remaining_market_delta_count")]
+    pub remaining_market_delta_count: i64,
+    #[serde(rename = "tmd", default)]
+    pub total_market_delta_count: u64,
+    #[serde(rename = "md", default)]
+    pub market_deltas: Vec<MarketDeltaLeaf>,
+
     #[serde(rename = "pdx")]
     #[serde(deserialize_with = "deserializers::hash_out")]
     pub x: HashOut<F>,
 }
 
+fn default_remaining_market_delta_count() -> i64 {
+    -1
+}
+
 #[derive(Debug)]
 pub struct DeltaTarget {
     pub leaves: Vec<AccountDeltaFullLeafTarget>,
+    pub market_leaves: Vec<MarketDeltaLeafTarget>,
+    pub market_leaf_count: Target,
+    pub total_market_delta_count: Target,
     pub public_inputs: DeltaPublicInputTarget,
     pub output: DeltaPublicOutputTarget,
 }
@@ -73,23 +97,42 @@ pub struct DeltaCircuit {
 
     // Helpers
     should_evaluate: Vec<BoolTarget>,
+    should_evaluate_market: Vec<BoolTarget>,
+    is_first_iteration: BoolTarget,
+    no_account_yet: BoolTarget,
 }
 
 impl DeltaCircuit {
-    pub fn new(config: CircuitConfig, account_count: usize) -> Self {
+    pub fn new(config: CircuitConfig, account_count: usize, market_count: usize) -> Self {
         let mut builder = Builder::new(config);
 
+        let target = DeltaTarget {
+            leaves: (0..account_count)
+                .map(|_| AccountDeltaFullLeafTarget::new(&mut builder))
+                .collect(),
+            market_leaves: (0..market_count)
+                .map(|_| MarketDeltaLeafTarget::new(&mut builder))
+                .collect(),
+            market_leaf_count: builder.add_virtual_target(),
+            total_market_delta_count: builder.add_virtual_target(),
+            public_inputs: DeltaPublicInputTarget::new_public(&mut builder),
+            output: DeltaPublicOutputTarget::new_public(&mut builder),
+        };
+
+        let neg_one = builder.neg_one();
+        let is_first_iteration =
+            builder.is_equal(target.public_inputs.remaining_market_delta_count, neg_one);
+        let no_account_yet = builder.is_equal(target.public_inputs.account_index, neg_one);
+        builder.conditional_assert_true(is_first_iteration, no_account_yet);
+
         Self {
-            target: DeltaTarget {
-                leaves: (0..account_count)
-                    .map(|_| AccountDeltaFullLeafTarget::new(&mut builder))
-                    .collect(),
-                public_inputs: DeltaPublicInputTarget::new_public(&mut builder),
-                output: DeltaPublicOutputTarget::new_public(&mut builder),
-            },
+            target,
             builder,
 
             should_evaluate: vec![],
+            should_evaluate_market: vec![],
+            is_first_iteration,
+            no_account_yet,
         }
     }
 
@@ -99,13 +142,26 @@ impl DeltaCircuit {
         builder.sequence_initialize(0, self.target.public_inputs.evaluation_point);
         let mut degree = builder.zero();
 
+        digest(
+            builder,
+            self.target.total_market_delta_count,
+            self.is_first_iteration,
+            &mut degree,
+        );
+        for (i, market_leaf) in self.target.market_leaves.iter().enumerate() {
+            for limb in market_leaf.pack(builder) {
+                digest(builder, limb, self.should_evaluate_market[i], &mut degree);
+            }
+        }
+
         let _1_bit_shifter = builder.constant_u64(1 << 1);
 
-        let mut last_account_index = self.target.public_inputs.account_index;
         let zero = builder.zero();
-        let neg_one = builder.neg_one();
-        let is_first_iteration = builder.is_equal(last_account_index, neg_one);
-        last_account_index = builder.select(is_first_iteration, zero, last_account_index);
+        let mut last_account_index = builder.select(
+            self.no_account_yet,
+            zero,
+            self.target.public_inputs.account_index,
+        );
         for (i, delta) in self.target.leaves.iter().enumerate() {
             let is_enabled = self.should_evaluate[i]; // Disallow empty leaf insertion
             {
@@ -153,7 +209,7 @@ impl DeltaCircuit {
                 let mut zero_position_count = builder.zero();
                 let mut is_position_empty_list = vec![];
                 for i in 0..POSITION_LIST_SIZE {
-                    let is_position_empty = delta.positions_delta[i].is_empty(builder);
+                    let is_position_empty = delta.perps_deltas[i].is_empty(builder);
                     is_position_empty_list.push(is_position_empty);
                     zero_position_count =
                         builder.add(zero_position_count, is_position_empty.target);
@@ -162,11 +218,39 @@ impl DeltaCircuit {
                 let nonzero_position_count = builder.sub(total_pos_count, zero_position_count);
                 digest(builder, nonzero_position_count, is_enabled, &mut degree);
                 for i in 0..POSITION_LIST_SIZE {
-                    let pos_delta = &delta.positions_delta[i];
+                    let pos_delta = &delta.perps_deltas[i];
                     let flag = builder.and_not(is_enabled, is_position_empty_list[i]);
                     let market_index = builder.constant_usize(i);
 
                     for limb in pack_position(builder, market_index, pos_delta) {
+                        digest(builder, limb, flag, &mut degree);
+                    }
+                }
+            }
+            {
+                let mut nonzero_binary_options_count = builder.zero();
+                let mut is_binary_options_empty_list = vec![];
+                for i in 0..BINARY_OPTIONS_MARKET_SLOT_COUNT {
+                    let is_empty = delta.binary_options_deltas[i].is_empty(builder);
+                    is_binary_options_empty_list.push(is_empty);
+                    nonzero_binary_options_count =
+                        builder.add(nonzero_binary_options_count, is_empty.target);
+                }
+                let total_count = builder.constant_usize(BINARY_OPTIONS_MARKET_SLOT_COUNT);
+                let nonzero_binary_options_count =
+                    builder.sub(total_count, nonzero_binary_options_count);
+                digest(
+                    builder,
+                    nonzero_binary_options_count,
+                    is_enabled,
+                    &mut degree,
+                );
+                for i in 0..BINARY_OPTIONS_MARKET_SLOT_COUNT {
+                    let entry = &delta.binary_options_deltas[i];
+                    let flag = builder.and_not(is_enabled, is_binary_options_empty_list[i]);
+                    let market_index = builder.constant_usize(MIN_BINARY_OPTIONS_MARKET_INDEX + i);
+
+                    for limb in pack_binary_options_position(builder, market_index, entry) {
                         digest(builder, limb, flag, &mut degree);
                     }
                 }
@@ -231,6 +315,49 @@ impl DeltaCircuit {
         builder.connect(degree, self.target.output.degree);
     }
 
+    fn populate_market_delta_hash(&mut self) {
+        let builder = &mut self.builder;
+
+        let remaining_before = builder.select(
+            self.is_first_iteration,
+            self.target.total_market_delta_count,
+            self.target.public_inputs.remaining_market_delta_count,
+        );
+        let remaining_after = builder.sub(remaining_before, self.target.market_leaf_count);
+        builder.register_range_check(self.target.total_market_delta_count, 32);
+        builder.register_range_check(remaining_after, 32);
+        builder.connect(
+            remaining_after,
+            self.target.output.remaining_market_delta_count,
+        );
+
+        // Account deltas may only start once every market delta of the batch has been consumed
+        let all_markets_consumed = builder.is_zero(remaining_after);
+        if let Some(first_account_evaluated) = self.should_evaluate.first() {
+            let accounts_too_early =
+                builder.and_not(*first_account_evaluated, all_markets_consumed);
+            builder.assert_false(accounts_too_early);
+        }
+
+        let mut reached_end = builder.is_zero(self.target.market_leaf_count);
+        let mut market_delta_hash = self.target.public_inputs.market_delta_hash;
+        for (i, market_leaf) in self.target.market_leaves.iter().enumerate() {
+            let should_evaluate = builder.not(reached_end);
+            self.should_evaluate_market.push(should_evaluate);
+
+            let mut inputs = market_delta_hash.elements.to_vec();
+            inputs.extend(market_leaf.pack(builder));
+            let extended = builder.hash_n_to_hash_no_pad::<Poseidon2Hash>(inputs);
+            market_delta_hash = builder.select_hash(should_evaluate, &extended, &market_delta_hash);
+
+            let at_end = builder.is_equal_constant(self.target.market_leaf_count, (i + 1) as u64);
+            reached_end = builder.or(reached_end, at_end);
+        }
+        builder.assert_true(reached_end);
+
+        builder.connect_hashes(market_delta_hash, self.target.output.market_delta_hash);
+    }
+
     /// Iterate through the sorted deltas and construct delta tree root from left to right, by going from the
     /// bottom to the top for each leaf.
     ///
@@ -244,8 +371,9 @@ impl DeltaCircuit {
         let mut prev_account_index = self.target.public_inputs.account_index;
         let mut path_matrix = self.target.public_inputs.path_matrix;
         let zero = self.builder.zero();
-        let neg_one = self.builder.neg_one();
-        let is_first_iteration = self.builder.is_equal(prev_account_index, neg_one);
+        let mut previous_leaf_index =
+            self.builder
+                .select(self.no_account_yet, zero, prev_account_index);
 
         let nil_account_index = self.builder.constant_i64(NIL_ACCOUNT_INDEX);
         let mut nil_account_hit = self.builder._false();
@@ -271,7 +399,7 @@ impl DeltaCircuit {
 
             let mut is_lt_enabled = should_evaluate;
             if i == 0 {
-                is_lt_enabled = self.builder.and_not(is_lt_enabled, is_first_iteration);
+                is_lt_enabled = self.builder.and_not(is_lt_enabled, self.no_account_yet);
             }
 
             // do not allow holes in the account leaf data, every non-nil leaf must be evaluated
@@ -286,15 +414,14 @@ impl DeltaCircuit {
                 .builder
                 .split_le(leaf.account_index, ACCOUNT_MERKLE_LEVELS);
 
-            let mut previous_leaf_index = prev_account_index;
-            if i == 0 {
-                previous_leaf_index =
-                    self.builder
-                        .select(is_first_iteration, zero, prev_account_index);
-            }
             let lca_height = self._get_lca_height(&curr_merkle_path, previous_leaf_index);
 
-            prev_account_index = leaf.account_index;
+            prev_account_index =
+                self.builder
+                    .select(should_evaluate, leaf.account_index, prev_account_index);
+            previous_leaf_index =
+                self.builder
+                    .select(should_evaluate, leaf.account_index, previous_leaf_index);
 
             // Insert current leaf to the tree. `current_height_hash` will be equal to the root after the loop.
             let mut has_common_parent = self.builder._false();
@@ -389,7 +516,7 @@ pub trait Circuit<
     const D: usize,
 >
 {
-    fn define(config: CircuitConfig, account_count: usize) -> Self;
+    fn define(config: CircuitConfig, account_count: usize, market_count: usize) -> Self;
     fn generate_witness(
         target: &DeltaTarget,
         witness: &DeltaWitness<F>,
@@ -402,10 +529,12 @@ pub trait Circuit<
 }
 
 impl Circuit<C, F, D> for DeltaCircuit {
-    fn define(config: CircuitConfig, account_count: usize) -> Self {
-        let mut circuit = Self::new(config, account_count);
+    fn define(config: CircuitConfig, account_count: usize, market_count: usize) -> Self {
+        let mut circuit = Self::new(config, account_count, market_count);
 
         circuit.populate_delta_tree();
+
+        circuit.populate_market_delta_hash();
 
         circuit.eval_delta_polynomial();
 
@@ -438,6 +567,30 @@ impl Circuit<C, F, D> for DeltaCircuit {
             target.public_inputs.account_index,
             F::from_noncanonical_i64(witness.previous_account_index),
         )?;
+        pw.set_hash_target(
+            target.public_inputs.market_delta_hash,
+            witness.market_delta_hash,
+        )?;
+        pw.set_target(
+            target.public_inputs.remaining_market_delta_count,
+            F::from_noncanonical_i64(witness.remaining_market_delta_count),
+        )?;
+        pw.set_target(
+            target.total_market_delta_count,
+            F::from_canonical_u64(witness.total_market_delta_count),
+        )?;
+        pw.set_target(
+            target.market_leaf_count,
+            F::from_canonical_usize(witness.market_deltas.len()),
+        )?;
+        let padding_market_delta = MarketDeltaLeaf::default();
+        for (i, market_leaf) in target.market_leaves.iter().enumerate() {
+            let value = witness
+                .market_deltas
+                .get(i)
+                .unwrap_or(&padding_market_delta);
+            pw.set_market_delta_leaf_target(market_leaf, value)?;
+        }
         pw.set_quintic_ext_target(
             target.public_inputs.evaluation_point,
             QuinticExtension([

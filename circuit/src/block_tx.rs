@@ -240,7 +240,7 @@ where
 {
     pub public_market_details_hash_after: HashOut<F>,
 
-    pub new_account_delta_tree_root: HashOut<F>,
+    pub new_delta_root: HashOut<F>,
     pub new_validium_root: HashOut<F>,
     pub new_state_root: HashOut<F>,
 
@@ -311,7 +311,7 @@ where
         );
 
         Self {
-            new_account_delta_tree_root: HashOut::<F>::from_vec(public_inputs[0..4].to_vec()),
+            new_delta_root: HashOut::<F>::from_vec(public_inputs[0..4].to_vec()),
             new_validium_root: HashOut::<F>::from_vec(public_inputs[4..8].to_vec()),
             new_state_root: HashOut::<F>::from_vec(public_inputs[8..12].to_vec()),
 
@@ -361,7 +361,7 @@ where
 pub struct BlockTxWitnessTarget {
     pub public_market_details_hash_after: HashOutTarget,
 
-    pub new_account_delta_tree_root: HashOutTarget,
+    pub new_delta_root: HashOutTarget,
     pub new_validium_root: HashOutTarget,
     pub new_state_root: HashOutTarget,
 
@@ -428,7 +428,7 @@ impl BlockTxWitnessTarget {
         );
 
         Self {
-            new_account_delta_tree_root: HashOutTarget::from_vec(pis[0..4].to_vec()),
+            new_delta_root: HashOutTarget::from_vec(pis[0..4].to_vec()),
             new_validium_root: HashOutTarget::from_vec(pis[4..8].to_vec()),
             new_state_root: HashOutTarget::from_vec(pis[8..12].to_vec()),
 

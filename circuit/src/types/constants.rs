@@ -26,6 +26,12 @@ pub const SPOT_MARKET_INDEX_BITS: usize = 12;
 
 pub const MARKET_TYPE_PERPS: u64 = 0;
 pub const MARKET_TYPE_SPOT: u64 = 1;
+pub const MARKET_TYPE_BINARY_OPTIONS: u64 = 2;
+
+pub const MIN_BINARY_OPTIONS_MARKET_INDEX: usize = 1000;
+pub const MAX_BINARY_OPTIONS_MARKET_INDEX: usize = 2000;
+pub const BINARY_OPTIONS_MARKET_SLOT_COUNT: usize =
+    MAX_BINARY_OPTIONS_MARKET_INDEX - MIN_BINARY_OPTIONS_MARKET_INDEX + 1;
 
 pub const ROUTE_TYPE_PERPS: u64 = 0;
 pub const ROUTE_TYPE_SPOT: u64 = 1;
@@ -35,6 +41,8 @@ pub const PRODUCT_TYPE_SPOT: u64 = 1;
 
 pub const MARKET_DETAILS_TREE_HEIGHT: usize = 8;
 pub const MARKET_INDEX_BITS: usize = 12;
+/// Width of the market status inside the packed market delta limb: Expired, Active, InSettlement.
+pub const MARKET_SLOT_STATUS_BITS: usize = 2;
 
 pub const GLOBAL_SUPPLY_CAP_BITS: usize = 60;
 pub const USER_SUPPLY_CAP_BITS: usize = 60;
@@ -78,12 +86,15 @@ pub const COLLATERAL_BITS: usize = 96;
 pub const EMPTY_ACCOUNT_DELTA_TREE_ROOT: HashOut<F> =
     EMPTY_DELTA_TREE_HASHES[ACCOUNT_MERKLE_LEVELS];
 
-pub const EMPTY_POSITION_DELTA_TREE_ROOT: HashOut<F> = const_hash_out([
-    5428970986623951092,
-    515484187069299980,
-    6723256903412060294,
-    2762657640779953643,
+pub const EMPTY_DELTA_ROOT: HashOut<F> = const_hash_out([
+    7779832342589892204,
+    4170105743869794615,
+    7169824709541860102,
+    12342988886584067005,
 ]);
+
+pub const EMPTY_POSITION_DELTA_TREE_ROOT: HashOut<F> =
+    EMPTY_DELTA_TREE_HASHES[MARKET_MERKLE_LEVELS];
 
 pub const EMPTY_API_KEY_TREE_ROOT: HashOut<F> = const_hash_out([
     5428970986623951092,
@@ -106,6 +117,14 @@ pub const EMPTY_ASSET_TREE_ROOT: HashOut<F> = const_hash_out([
     5448886425767967618,
 ]);
 
+/// Root of the empty account market data tree (MARKET_MERKLE_LEVELS levels of nil hashes).
+pub const EMPTY_MARKET_DATA_TREE_ROOT: HashOut<F> = const_hash_out([
+    5094422418556072775,
+    472024594924382182,
+    11064781981674099049,
+    14079628902931319245,
+]);
+
 pub const EMPTY_ORDER_BOOK_TREE_ROOT: HashOut<F> = const_hash_out([
     2269038392415604357,
     1685606050090336416,
@@ -114,10 +133,10 @@ pub const EMPTY_ORDER_BOOK_TREE_ROOT: HashOut<F> = const_hash_out([
 ]);
 
 pub const EMPTY_ACCOUNT_HASH: HashOut<F> = const_hash_out([
-    16496574717886153423,
-    6271885065761349139,
-    16208258067531002960,
-    18356876270155499168,
+    17289273313606260951,
+    11345669838050056237,
+    17251682592702054961,
+    5290299717499980746,
 ]);
 
 /// Tx Types
@@ -164,6 +183,10 @@ pub const TX_TYPE_L2_STRATEGY_TRANSFER: u8 = 43;
 pub const TX_TYPE_L2_UPDATE_MARKET_CONFIG: u8 = 44;
 pub const TX_TYPE_L2_APPROVE_INTEGRATOR: u8 = 45;
 pub const TX_TYPE_L2_UPDATE_ASSET_CONFIG: u8 = 48;
+pub const TX_TYPE_L2_CREATE_MARKET: u8 = 49;
+pub const TX_TYPE_L2_SETTLE_OUTCOME: u8 = 50;
+pub const TX_TYPE_L2_UPDATE_MARKET: u8 = 52;
+pub const TX_TYPE_L2_UPDATE_MARKET_SLOT: u8 = 53;
 
 // Internal
 pub const TX_TYPE_INTERNAL_CLAIM_ORDER: u8 = 21;
@@ -176,20 +199,21 @@ pub const TX_TYPE_INTERNAL_CREATE_ORDER: u8 = 27;
 pub const TX_TYPE_INTERNAL_PENDING_UNLOCK: u8 = 39;
 pub const TX_TYPE_INTERNAL_INTEGRATOR_OPERATIONS: u8 = 46;
 pub const TX_TYPE_INTERNAL_LIQUIDATE_SPOT: u8 = 47;
+pub const TX_TYPE_INTERNAL_SETTLE_BINARY_OPTIONS_POSITION: u8 = 51;
 
 // Priority request pub data
-pub const PRIORITY_PUB_DATA_TYPE_L1_DEPOSIT: u8 = 41;
-pub const PRIORITY_PUB_DATA_TYPE_L1_CHANGE_PUB_KEY: u8 = 42;
-pub const PRIORITY_PUB_DATA_TYPE_L1_CREATE_MARKET: u8 = 43;
-pub const PRIORITY_PUB_DATA_TYPE_L1_UPDATE_MARKET: u8 = 44;
-pub const PRIORITY_PUB_DATA_TYPE_L1_CANCEL_ALL_ORDERS: u8 = 45;
-pub const PRIORITY_PUB_DATA_TYPE_L1_WITHDRAW: u8 = 46;
-pub const PRIORITY_PUB_DATA_TYPE_L1_CREATE_ORDER: u8 = 47;
-pub const PRIORITY_PUB_DATA_TYPE_L1_BURN_SHARES: u8 = 48;
-pub const PRIORITY_PUB_DATA_TYPE_L1_REGISTER_ASSET: u8 = 49;
-pub const PRIORITY_PUB_DATA_TYPE_L1_UPDATE_ASSET: u8 = 50;
-pub const PRIORITY_PUB_DATA_TYPE_L1_UNSTAKE_ASSETS: u8 = 51;
-pub const PRIORITY_PUB_DATA_TYPE_L1_SET_SYSTEM_CONFIG: u8 = 52;
+pub const PRIORITY_PUB_DATA_TYPE_L1_DEPOSIT: u8 = 61;
+pub const PRIORITY_PUB_DATA_TYPE_L1_CHANGE_PUB_KEY: u8 = 62;
+pub const PRIORITY_PUB_DATA_TYPE_L1_CREATE_MARKET: u8 = 63;
+pub const PRIORITY_PUB_DATA_TYPE_L1_UPDATE_MARKET: u8 = 64;
+pub const PRIORITY_PUB_DATA_TYPE_L1_CANCEL_ALL_ORDERS: u8 = 65;
+pub const PRIORITY_PUB_DATA_TYPE_L1_WITHDRAW: u8 = 66;
+pub const PRIORITY_PUB_DATA_TYPE_L1_CREATE_ORDER: u8 = 67;
+pub const PRIORITY_PUB_DATA_TYPE_L1_BURN_SHARES: u8 = 68;
+pub const PRIORITY_PUB_DATA_TYPE_L1_REGISTER_ASSET: u8 = 69;
+pub const PRIORITY_PUB_DATA_TYPE_L1_UPDATE_ASSET: u8 = 70;
+pub const PRIORITY_PUB_DATA_TYPE_L1_UNSTAKE_ASSETS: u8 = 71;
+pub const PRIORITY_PUB_DATA_TYPE_L1_SET_SYSTEM_CONFIG: u8 = 72;
 
 // On Chain Log Pubdata
 pub const ON_CHAIN_PUB_DATA_TYPE_WITHDRAW: u8 = 2;
@@ -341,11 +365,19 @@ pub const NIL_CLIENT_ORDER_INDEX: i64 = 0;
 
 // Market index
 pub const NIL_MARKET_INDEX: u8 = 255; // 2^8 - 1
+
+// Public market index
+pub const PUBLIC_MARKET_INDEX_BITS: usize = 48;
+pub const MIN_PUBLIC_MARKET_INDEX: i64 = 0;
+pub const MAX_PUBLIC_MARKET_INDEX: i64 = (1i64 << PUBLIC_MARKET_INDEX_BITS) - 1;
+pub const NIL_PUBLIC_MARKET_INDEX: i64 = NIL_MARKET_INDEX as i64;
+pub const PUBLIC_MARKET_INDEX_MERKLE_LEVELS: usize = 48;
 pub const POSITION_LIST_SIZE: usize = 255; // Only markets from 0 to 254 is usable. Last market is always empty and used for empty transactions
 pub const POSITION_LIST_SIZE_BITS: usize = 8;
 pub const POSITION_HASH_BUCKET_COUNT: usize = 16;
 pub const POSITION_HASH_BUCKET_SIZE: usize = 16;
 pub const SHARES_LIST_SIZE: usize = 16;
+pub const BINARY_OPTIONS_POSITION_LIST_SIZE: usize = 16;
 pub const SHARES_DELTA_LIST_SIZE: usize = SHARES_LIST_SIZE * 2;
 pub const MAX_APPROVED_INTEGRATORS: usize = 4;
 
@@ -426,6 +458,16 @@ pub const MAX_DELEVERAGE_QUOTE_BITS: usize = 56;
 // Market status
 pub const MARKET_STATUS_EXPIRED: u8 = 0;
 pub const MARKET_STATUS_ACTIVE: u8 = 1;
+pub const MARKET_STATUS_IN_SETTLEMENT: u8 = 2;
+
+// Binary options market outcome
+pub const MARKET_OUTCOME_NONE: u8 = 0;
+pub const MARKET_OUTCOME_NO: u8 = 1;
+pub const MARKET_OUTCOME_YES: u8 = 2;
+
+// Binary options settlement type
+pub const SETTLEMENT_TYPE_DISCRETE: u8 = 0;
+pub const SETTLEMENT_TYPE_CONTINUOUS: u8 = 1;
 
 // Register instruction types
 pub const EXECUTE_TRANSACTION: u8 = 0;
@@ -524,6 +566,7 @@ pub const SUB_ACCOUNT_ID: usize = 1;
 pub const SENDER_ACCOUNT_ID: usize = 0;
 pub const RECEIVER_ACCOUNT_ID: usize = 1;
 pub const INTEGRATOR_ACCOUNT_ID: usize = 1;
+pub const MARKET_OPERATOR_ACCOUNT_ID: usize = 1;
 
 pub const BANKRUPT_ACCOUNT_ID: usize = 0;
 pub const DELEVERAGER_ACCOUNT_ID: usize = 1;

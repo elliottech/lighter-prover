@@ -16,6 +16,7 @@ use crate::bigint::big_u16::{
 use crate::bigint::bigint::{BigIntTarget, CircuitBuilderBigInt, SignTarget, WitnessBigInt};
 use crate::bigint::biguint::CircuitBuilderBiguint;
 use crate::bigint::comparison::CircuitBuilderBiguintSubtractiveComparison;
+use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::circuit_logger::CircuitBuilderLogging;
 use crate::comparison::CircuitBuilderSubtractiveComparison;
 use crate::deserializers;
@@ -25,15 +26,19 @@ use crate::signed::signed_target::{CircuitBuilderSigned, SignedTarget};
 use crate::types::config::{BIG_U96_LIMBS, BIGU16_U64_LIMBS, Builder, F};
 use crate::types::constants::{
     CROSS_MARGIN, ENTRY_QUOTE_BITS, INSURANCE_FUND_ACCOUNT_TYPE, MARGIN_FRACTION_BITS, MARGIN_SET,
-    MAX_ORDER_BASE_AMOUNT, ORDER_PRICE_BITS, POSITION_SIZE_BITS, PUBLIC_POOL_ACCOUNT_TYPE,
-    QUOTE_MULTIPLIER_BITS, USDC_TO_COLLATERAL_MULTIPLIER,
+    MAX_ORDER_BASE_AMOUNT, NIL_PUBLIC_MARKET_INDEX, ORDER_PRICE_BITS, POSITION_LIST_SIZE_BITS,
+    POSITION_SIZE_BITS, PUBLIC_POOL_ACCOUNT_TYPE, QUOTE_MULTIPLIER_BITS,
+    USDC_TO_COLLATERAL_MULTIPLIER,
 };
 use crate::types::market_details::MarketRiskDetailsTarget;
 use crate::utils::CircuitBuilderUtils;
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct AccountPosition {
+    #[serde(rename = "pmi")]
+    pub public_market_index: i64,
+
     #[serde(rename = "lfrps")]
     #[serde(deserialize_with = "deserializers::int_to_bigint")]
     pub last_funding_rate_prefix_sum: BigInt, // 63 bits
@@ -65,8 +70,26 @@ pub struct AccountPosition {
     pub allocated_margin: BigInt,
 }
 
+impl Default for AccountPosition {
+    fn default() -> Self {
+        AccountPosition {
+            public_market_index: NIL_PUBLIC_MARKET_INDEX,
+            last_funding_rate_prefix_sum: BigInt::default(),
+            position: BigInt::default(),
+            entry_quote: 0,
+            initial_margin_fraction: 0,
+            total_order_count: 0,
+            total_position_tied_order_count: 0,
+            margin_mode: 0,
+            margin_set_flag: 0,
+            allocated_margin: BigInt::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct AccountPositionTarget {
+    pub public_market_index: Target,                   // 48 bits
     pub last_funding_rate_prefix_sum: BigIntU16Target, // 63 bits
     pub position: BigIntU16Target,                     // 56 bits
     pub entry_quote: Target,                           // 56 bits
@@ -81,6 +104,7 @@ pub struct AccountPositionTarget {
 impl AccountPositionTarget {
     pub fn new(builder: &mut Builder) -> Self {
         AccountPositionTarget {
+            public_market_index: builder.add_virtual_target(),
             last_funding_rate_prefix_sum: builder
                 .add_virtual_bigint_u16_target_unsafe(BIGU16_U64_LIMBS), // safe because it is read from the state using merkle proofs
             position: builder.add_virtual_bigint_u16_target_unsafe(BIGU16_U64_LIMBS), // safe because it is read from the state using merkle proofs
@@ -172,7 +196,10 @@ impl AccountPositionTarget {
             self.margin_set_flag,
         ]);
         let sum = builder.add_many(terms);
-        builder.is_zero(sum)
+        let is_rest_zero = builder.is_zero(sum);
+        let is_public_market_index_nil =
+            builder.is_equal_constant(self.public_market_index, NIL_PUBLIC_MARKET_INDEX as u64);
+        builder.and(is_rest_zero, is_public_market_index_nil)
     }
 
     pub fn init_if_empty(
@@ -181,9 +208,14 @@ impl AccountPositionTarget {
         is_enabled: BoolTarget,
         account_type: Target,
         default_margin_mode: Target,
+        market_public_market_index: Target,
     ) {
         let was_empty = self.is_empty(builder);
-        let flag = builder.and(is_enabled, was_empty);
+        let is_public_market_index_matching =
+            builder.is_equal(self.public_market_index, market_public_market_index);
+        let is_stale = builder.not(is_public_market_index_matching);
+        let needs_init = builder.or(was_empty, is_stale);
+        let flag = builder.and(is_enabled, needs_init);
 
         let is_insurance_fund =
             builder.is_equal_constant(account_type, INSURANCE_FUND_ACCOUNT_TYPE as u64);
@@ -199,12 +231,38 @@ impl AccountPositionTarget {
             default_margin_mode,
         );
         let margin_set = builder.constant_usize(MARGIN_SET);
+        let fresh = Self::empty(builder);
+        self.last_funding_rate_prefix_sum = builder.select_bigint_u16(
+            flag,
+            &fresh.last_funding_rate_prefix_sum,
+            &self.last_funding_rate_prefix_sum,
+        );
+        self.position = builder.select_bigint_u16(flag, &fresh.position, &self.position);
+        self.entry_quote = builder.select(flag, fresh.entry_quote, self.entry_quote);
+        self.initial_margin_fraction = builder.select(
+            flag,
+            fresh.initial_margin_fraction,
+            self.initial_margin_fraction,
+        );
+        self.total_order_count =
+            builder.select(flag, fresh.total_order_count, self.total_order_count);
+        self.total_position_tied_order_count = builder.select(
+            flag,
+            fresh.total_position_tied_order_count,
+            self.total_position_tied_order_count,
+        );
+        self.allocated_margin =
+            builder.select_bigint(flag, &fresh.allocated_margin, &self.allocated_margin);
+
+        self.public_market_index =
+            builder.select(flag, market_public_market_index, self.public_market_index);
         self.margin_mode = builder.select(flag, init_mode, self.margin_mode);
         self.margin_set_flag = builder.select(flag, margin_set, self.margin_set_flag);
     }
 
     pub fn empty(builder: &mut Builder) -> Self {
         AccountPositionTarget {
+            public_market_index: builder.constant_u64(NIL_PUBLIC_MARKET_INDEX as u64),
             last_funding_rate_prefix_sum: builder.zero_bigint_u16(),
             position: builder.zero_bigint_u16(),
             entry_quote: builder.zero(),
@@ -311,6 +369,7 @@ impl AccountPositionTarget {
 
     pub fn select_position(builder: &mut Builder, flag: BoolTarget, a: &Self, b: &Self) -> Self {
         Self {
+            public_market_index: builder.select(flag, a.public_market_index, b.public_market_index),
             position: builder.select_bigint_u16(flag, &a.position, &b.position),
             last_funding_rate_prefix_sum: builder.select_bigint_u16(
                 flag,
@@ -341,6 +400,7 @@ impl AccountPositionTarget {
         old: &AccountPositionTarget,
     ) -> AccountPositionTarget {
         AccountPositionTarget {
+            public_market_index: builder.sub(new.public_market_index, old.public_market_index),
             position: builder.bigint_u16_vector_diff(&new.position, &old.position),
             last_funding_rate_prefix_sum: builder.bigint_u16_vector_diff(
                 &new.last_funding_rate_prefix_sum,
@@ -371,6 +431,11 @@ impl AccountPositionTarget {
         diff: &AccountPositionTarget,
     ) -> AccountPositionTarget {
         AccountPositionTarget {
+            public_market_index: builder.mul_add(
+                flag.target,
+                diff.public_market_index,
+                base.public_market_index,
+            ),
             position: builder.bigint_u16_vector_sum(flag, &diff.position, &base.position),
             last_funding_rate_prefix_sum: builder.bigint_u16_vector_sum(
                 flag,
@@ -408,6 +473,48 @@ impl AccountPositionTarget {
     }
 }
 
+/// Random access to the position at `access_index` in each of the given position lists, done in
+/// chunks of 64 so that every random access gate is a full 64-way lookup
+pub fn random_access_positions<const NB_ACCOUNTS: usize>(
+    builder: &mut Builder,
+    access_index: Target,
+    position_lists: [&[AccountPositionTarget]; NB_ACCOUNTS],
+) -> [AccountPositionTarget; NB_ACCOUNTS] {
+    builder.register_range_check(access_index, POSITION_LIST_SIZE_BITS);
+
+    let empty_position = AccountPositionTarget::empty(builder);
+    let position_lists: [Vec<AccountPositionTarget>; NB_ACCOUNTS] = core::array::from_fn(|i| {
+        let mut positions = position_lists[i].to_vec();
+        positions.push(empty_position.clone());
+        assert!(positions.len() % 64 == 0);
+        positions
+    });
+
+    let zero = builder.zero();
+    let mut is_position_set = builder._false();
+    let mut res: [AccountPositionTarget; NB_ACCOUNTS] =
+        core::array::from_fn(|_| empty_position.clone());
+    for i in 0..(position_lists[0].len() / 64) {
+        let start_index = builder.constant_i64((i as i64) * 64);
+        let end_index = builder.constant_i64(((i + 1) as i64) * 64 - 1);
+        let chunk_access_index = builder.sub(access_index, start_index);
+        let contains = builder.is_lte(access_index, end_index, POSITION_LIST_SIZE_BITS);
+        let contains = builder.and_not(contains, is_position_set);
+        let chunk_access_index = builder.select(contains, chunk_access_index, zero);
+        for j in 0..NB_ACCOUNTS {
+            let candidate = random_access_account_position(
+                builder,
+                chunk_access_index,
+                position_lists[j][i * 64..(i + 1) * 64].to_vec(),
+            );
+            res[j] = AccountPositionTarget::select_position(builder, contains, &candidate, &res[j]);
+        }
+        is_position_set = builder.or(contains, is_position_set);
+    }
+
+    res
+}
+
 pub fn random_access_account_position(
     builder: &mut Builder,
     access_index: Target,
@@ -415,6 +522,10 @@ pub fn random_access_account_position(
 ) -> AccountPositionTarget {
     assert!(v.len().is_power_of_two());
     AccountPositionTarget {
+        public_market_index: builder.random_access(
+            access_index,
+            v.iter().map(|x| x.public_market_index).collect(),
+        ),
         last_funding_rate_prefix_sum: builder.random_access_bigint_u16(
             access_index,
             v.iter()
@@ -491,6 +602,10 @@ impl<T: Witness<F> + PartialWitnessCurve<F>, F: PrimeField64 + Extendable<5> + R
         a: &AccountPositionTarget,
         b: &AccountPosition,
     ) -> Result<()> {
+        self.set_target(
+            a.public_market_index,
+            F::from_canonical_i64(b.public_market_index),
+        )?;
         self.set_bigint_u16_target(
             &a.last_funding_rate_prefix_sum,
             &b.last_funding_rate_prefix_sum,

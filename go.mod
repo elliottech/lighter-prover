@@ -7,7 +7,7 @@ toolchain go1.24.11
 require (
 	github.com/consensys/gnark v0.14.0
 	github.com/consensys/gnark-crypto v0.19.0
-	github.com/elliottech/gnark-plonky2-verifier v0.0.7
+	github.com/elliottech/gnark-plonky2-verifier v0.0.8
 )
 
 require (
