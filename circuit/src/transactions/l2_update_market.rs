@@ -54,7 +54,7 @@ pub struct L2UpdateMarketTx {
     pub is_frozen: u8,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct L2UpdateMarketTxTarget {
     pub account_index: Target,
     pub api_key_index: Target,

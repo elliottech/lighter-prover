@@ -59,7 +59,7 @@ impl InternalDeleverageTx {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct InternalDeleverageTxTarget {
     pub bankrupt_account_index: Target,
     pub deleverager_account_index: Target,

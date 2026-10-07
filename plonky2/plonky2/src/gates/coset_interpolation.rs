@@ -10,6 +10,7 @@ use core::ops::Range;
 
 use anyhow::Result;
 
+use crate::field::batch_util::batch_multiply_add_inplace;
 use crate::field::extension::algebra::ExtensionAlgebra;
 use crate::field::extension::{Extendable, FieldExtension, OEF};
 use crate::field::interpolation::barycentric_weights;
@@ -24,7 +25,9 @@ use crate::iop::wire::Wire;
 use crate::iop::witness::{PartitionWitness, Witness, WitnessWrite};
 use crate::plonk::circuit_builder::CircuitBuilder;
 use crate::plonk::circuit_data::CommonCircuitData;
-use crate::plonk::vars::{EvaluationTargets, EvaluationVars, EvaluationVarsBase};
+use crate::plonk::vars::{
+    EvaluationTargets, EvaluationVars, EvaluationVarsBase, EvaluationVarsBaseBatch,
+};
 use crate::util::serialization::{Buffer, IoResult, Read, Write};
 
 /// One of the instantiations of `InterpolationGate`: allows constraints of variable
@@ -260,7 +263,7 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for CosetInterpola
             (evaluation_point - shifted_evaluation_point.scalar_mul(shift)).to_basefield_array(),
         );
 
-        let domain = F::two_adic_subgroup(self.subgroup_bits);
+        let domain = crate::field::fft::cached_two_adic_subgroup::<F>(self.subgroup_bits);
         let values = (0..self.num_points())
             .map(|i| vars.get_local_ext(self.wires_value(i)))
             .collect::<Vec<_>>();
@@ -295,6 +298,98 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for CosetInterpola
 
         let evaluation_value = vars.get_local_ext(self.wires_evaluation_value());
         yield_constr.many((evaluation_value - computed_eval).to_basefield_array());
+    }
+
+    /// Batched fused evaluation. The interpolation itself is inherently
+    /// per-point, but this override hoists the subgroup computation and the
+    /// values buffer out of the point loop (the default path recomputes the
+    /// two-adic subgroup and collects the values `Vec` once per point) and
+    /// multiply-adds the filtered constraint rows straight into the shared
+    /// buffer.
+    fn eval_unfiltered_base_batch_accumulate(
+        &self,
+        vars_base: EvaluationVarsBaseBatch<F>,
+        filters: &[F],
+        combined_gate_constraints: &mut [F],
+    ) {
+        let n = vars_base.len();
+        assert_eq!(filters.len(), n);
+        let num_constraints = <Self as Gate<F, D>>::num_constraints(self);
+        assert!(combined_gate_constraints.len() >= num_constraints * n);
+
+        // Cached process-wide: value-identical to `F::two_adic_subgroup`, but
+        // skips the primitive-root exponentiation and power chain that would
+        // otherwise run once per 32-point batch call.
+        let domain = crate::field::fft::cached_two_adic_subgroup::<F>(self.subgroup_bits);
+        let weights = &self.barycentric_weights;
+        let mut values = vec![F::Extension::ZERO; self.num_points()];
+        let mut scratch = vec![F::ZERO; num_constraints * n];
+
+        for (p, vars) in vars_base.iter().enumerate() {
+            let shift = vars.local_wires[self.wire_shift()];
+            let evaluation_point = vars.get_local_ext(self.wires_evaluation_point());
+            let shifted_evaluation_point =
+                vars.get_local_ext(self.wires_shifted_evaluation_point());
+            let arr = (evaluation_point - shifted_evaluation_point.scalar_mul(shift))
+                .to_basefield_array();
+            for (d, a) in arr.iter().enumerate() {
+                scratch[d * n + p] = *a;
+            }
+
+            for (i, value) in values.iter_mut().enumerate() {
+                *value = vars.get_local_ext(self.wires_value(i));
+            }
+
+            let (mut computed_eval, mut computed_prod) = partial_interpolate(
+                &domain[..self.degree()],
+                &values[..self.degree()],
+                &weights[..self.degree()],
+                shifted_evaluation_point,
+                F::Extension::ZERO,
+                F::Extension::ONE,
+            );
+
+            let mut row = D;
+            for i in 0..self.num_intermediates() {
+                let intermediate_eval = vars.get_local_ext(self.wires_intermediate_eval(i));
+                let intermediate_prod = vars.get_local_ext(self.wires_intermediate_prod(i));
+                let arr = (intermediate_eval - computed_eval).to_basefield_array();
+                for (d, a) in arr.iter().enumerate() {
+                    scratch[(row + d) * n + p] = *a;
+                }
+                row += D;
+                let arr = (intermediate_prod - computed_prod).to_basefield_array();
+                for (d, a) in arr.iter().enumerate() {
+                    scratch[(row + d) * n + p] = *a;
+                }
+                row += D;
+
+                let start_index = 1 + (self.degree() - 1) * (i + 1);
+                let end_index = (start_index + self.degree() - 1).min(self.num_points());
+                (computed_eval, computed_prod) = partial_interpolate(
+                    &domain[start_index..end_index],
+                    &values[start_index..end_index],
+                    &weights[start_index..end_index],
+                    shifted_evaluation_point,
+                    intermediate_eval,
+                    intermediate_prod,
+                );
+            }
+
+            let evaluation_value = vars.get_local_ext(self.wires_evaluation_value());
+            let arr = (evaluation_value - computed_eval).to_basefield_array();
+            for (d, a) in arr.iter().enumerate() {
+                scratch[(row + d) * n + p] = *a;
+            }
+        }
+
+        for (j, row_slice) in scratch.chunks_exact(n).enumerate() {
+            batch_multiply_add_inplace(
+                &mut combined_gate_constraints[j * n..][..n],
+                row_slice,
+                filters,
+            );
+        }
     }
 
     fn eval_unfiltered_circuit(
@@ -406,7 +501,8 @@ pub struct InterpolationGenerator<F: RichField + Extendable<D>, const D: usize> 
 
 impl<F: RichField + Extendable<D>, const D: usize> InterpolationGenerator<F, D> {
     fn new(row: usize, gate: CosetInterpolationGate<F, D>) -> Self {
-        let interpolation_domain = F::two_adic_subgroup(gate.subgroup_bits);
+        let interpolation_domain =
+            crate::field::fft::cached_two_adic_subgroup::<F>(gate.subgroup_bits).to_vec();
         InterpolationGenerator {
             row,
             gate,
@@ -654,6 +750,97 @@ mod tests {
     use crate::gates::gate_testing::{test_eval_fns, test_low_degree};
     use crate::hash::hash_types::HashOut;
     use crate::plonk::config::{GenericConfig, PoseidonGoldilocksConfig};
+
+    /// Checks the fused `eval_unfiltered_base_batch_accumulate` against the
+    /// (unchanged) per-point default batch evaluation across a multi-point
+    /// batch, including the bounded-degree production shape (subgroup bits 4,
+    /// degree 6) used by the recursion circuits, which the public constructor
+    /// cannot reach.
+    #[test]
+    fn test_accumulate_matches_default_across_batch() {
+        const D: usize = 2;
+        type F = GoldilocksField;
+
+        let n = 32;
+        for max_degree in [2, 3, 6, 16] {
+            let gate = <CosetInterpolationGate<F, D>>::with_max_degree(4, max_degree);
+            let num_wires = <CosetInterpolationGate<F, D> as Gate<F, D>>::num_wires(&gate);
+            let num_constraints =
+                <CosetInterpolationGate<F, D> as Gate<F, D>>::num_constraints(&gate);
+
+            let wires_batch: Vec<F> = (0..num_wires * n).map(|_| F::rand()).collect();
+            let filters: Vec<F> = (0..n).map(|_| F::rand()).collect();
+            let initial: Vec<F> = (0..num_constraints * n).map(|_| F::rand()).collect();
+            let public_inputs_hash = HashOut::<F>::ZERO;
+            let vars_batch =
+                EvaluationVarsBaseBatch::new(n, &[], &wires_batch, &public_inputs_hash);
+
+            let reference = gate.eval_unfiltered_base_batch(vars_batch);
+            let mut expected = initial.clone();
+            for (combined, row) in expected.chunks_exact_mut(n).zip(reference.chunks_exact(n)) {
+                for p in 0..n {
+                    combined[p] += row[p] * filters[p];
+                }
+            }
+
+            let mut actual = initial;
+            gate.eval_unfiltered_base_batch_accumulate(vars_batch, &filters, &mut actual);
+            assert_eq!(actual, expected, "max_degree {max_degree}");
+        }
+    }
+
+    /// Single-threaded microbenchmark of the previous accumulate path
+    /// (per-point default batch evaluation, then row-wise multiply-add)
+    /// against the fused batch override, on the production shape. Run with:
+    /// `cargo test --release -p plonky2 --lib -- --ignored --nocapture accumulate_microbench`
+    #[test]
+    #[ignore = "microbenchmark; run explicitly with --ignored --nocapture"]
+    fn coset_interpolation_accumulate_microbench() {
+        use core::time::Duration;
+        use std::time::Instant;
+
+        use crate::field::batch_util::batch_multiply_add_inplace;
+
+        const D: usize = 2;
+        type F = GoldilocksField;
+
+        let n = 32;
+        let iters = 5_000;
+        let gate = <CosetInterpolationGate<F, D>>::with_max_degree(4, 6);
+        let num_wires = <CosetInterpolationGate<F, D> as Gate<F, D>>::num_wires(&gate);
+        let num_constraints = <CosetInterpolationGate<F, D> as Gate<F, D>>::num_constraints(&gate);
+
+        let wires_batch: Vec<F> = (0..num_wires * n).map(|_| F::rand()).collect();
+        let filters: Vec<F> = (0..n).map(|_| F::rand()).collect();
+        let public_inputs_hash = HashOut::<F>::ZERO;
+        let vars_batch = EvaluationVarsBaseBatch::new(n, &[], &wires_batch, &public_inputs_hash);
+
+        let mut combined = vec![F::ZERO; num_constraints * n];
+        let start = Instant::now();
+        for _ in 0..iters {
+            let res = gate.eval_unfiltered_base_batch(vars_batch);
+            for (acc, row) in combined.chunks_exact_mut(n).zip(res.chunks_exact(n)) {
+                batch_multiply_add_inplace(acc, row, &filters);
+            }
+        }
+        let old: Duration = start.elapsed();
+        let old_sink = combined[0];
+
+        let mut combined = vec![F::ZERO; num_constraints * n];
+        let start = Instant::now();
+        for _ in 0..iters {
+            gate.eval_unfiltered_base_batch_accumulate(vars_batch, &filters, &mut combined);
+        }
+        let new: Duration = start.elapsed();
+        assert_eq!(old_sink, combined[0], "paths diverged");
+
+        println!(
+            "{:>10.3}us/iter -> {:>10.3}us/iter ({:.2}x)  CosetInterpolationGate(subgroup_bits=4, degree=6)",
+            old.as_secs_f64() * 1e6 / iters as f64,
+            new.as_secs_f64() * 1e6 / iters as f64,
+            old.as_secs_f64() / new.as_secs_f64(),
+        );
+    }
 
     #[test]
     fn test_degree_and_wires_minimized() {

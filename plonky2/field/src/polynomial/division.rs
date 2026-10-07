@@ -70,6 +70,23 @@ impl<F: Field> PolynomialCoeffs<F> {
         }
     }
 
+    /// Like `divide_by_linear`, but consumes `self`, reuses its buffer, and
+    /// leaves the top coefficient zero (the power-of-two pad the FRI opening
+    /// path would otherwise push). Same Horner recurrence in the same order,
+    /// so the quotient coefficients are bit-identical: slot `i` receives
+    /// `b_{i+1}` while the accumulator carries `b_i` downward, and the first
+    /// step writes the zero seed into the top slot.
+    pub fn divide_by_linear_padded_in_place(mut self, z: F) -> PolynomialCoeffs<F> {
+        let mut acc = F::ZERO;
+        for i in (0..self.coeffs.len()).rev() {
+            let a = self.coeffs[i];
+            let prev = acc;
+            acc = acc * z + a;
+            self.coeffs[i] = prev;
+        }
+        self
+    }
+
     /// Let `self=p(X)`, this returns `(p(X)-p(z))/(X-z)`.
     /// See <https://en.wikipedia.org/wiki/Horner%27s_method>
     pub fn divide_by_linear(&self, z: F) -> PolynomialCoeffs<F> {

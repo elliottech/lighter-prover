@@ -36,7 +36,7 @@ pub struct L2SettleOutcomeTx {
     pub is_refund: u8,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct L2SettleOutcomeTxTarget {
     pub account_index: Target,
     pub api_key_index: Target,

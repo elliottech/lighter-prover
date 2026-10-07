@@ -36,7 +36,7 @@ pub struct L2CancelAllOrdersTx {
     pub time: i64, // 48 bits
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct L2CancelAllOrdersTxTarget {
     pub account_index: Target,
     pub api_key_index: Target,

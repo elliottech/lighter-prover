@@ -15,7 +15,82 @@ use crate::iop::wire::Wire;
 /// placement moves. Flip to `false` to restore the previous sequential-outer schedule exactly.
 const OUTER_PARALLEL_SIGMA_COLUMNS: bool = false;
 
+/// Derive one bit per routed `(row, column)` position, in row-major order, that is set exactly
+/// when the position is the only routed member of its copy-constraint component.
+///
+/// `wire_partition` cycles only routed members of each component. Consequently a component with
+/// one routed member maps that member to itself in sigma, even when the component also contains
+/// virtual or advice-wire aliases; a component with two or more routed members has no fixed point.
+/// The compressed representative map therefore contains all the information needed to identify
+/// factors that cancel from the permutation numerator and denominator for every proof.
+///
+/// Cardinalities are saturated at two and packed into two temporary bits per representative. The
+/// retained mask costs one bit per routed position (640 KiB at 80 x 2^16), while peak derivation
+/// scratch is bounded by `representative_map.len() / 4` rather than a `usize` count per target.
+pub fn fixed_routed_wire_mask(
+    representative_map: &[u32],
+    num_wires: usize,
+    num_routed_wires: usize,
+    degree: usize,
+) -> Option<Vec<u8>> {
+    if num_routed_wires > num_wires {
+        return None;
+    }
+    let wire_targets = degree.checked_mul(num_wires)?;
+    if wire_targets > representative_map.len() {
+        return None;
+    }
+    let routed_positions = degree.checked_mul(num_routed_wires)?;
+
+    // Two-bit states: 0 = unseen, 1 = exactly one routed member, 2 = at least two.
+    let mut cardinalities = vec![0u8; representative_map.len().div_ceil(4)];
+    for row in 0..degree {
+        let target_base = row * num_wires;
+        for column in 0..num_routed_wires {
+            let representative = representative_map[target_base + column] as usize;
+            // Stored maps have had every path compressed. Besides rejecting a malformed index,
+            // requiring the representative to be a root prevents an uncompressed map from
+            // splitting one component into several apparent singleton components.
+            if representative >= representative_map.len()
+                || representative_map[representative] as usize != representative
+            {
+                return None;
+            }
+            let byte = representative >> 2;
+            let shift = (representative & 3) << 1;
+            let state = (cardinalities[byte] >> shift) & 3;
+            if state < 2 {
+                cardinalities[byte] =
+                    (cardinalities[byte] & !(3 << shift)) | ((state + 1) << shift);
+            }
+        }
+    }
+
+    let mut fixed = vec![0u8; routed_positions.div_ceil(8)];
+    for row in 0..degree {
+        let target_base = row * num_wires;
+        let routed_base = row * num_routed_wires;
+        for column in 0..num_routed_wires {
+            let representative = representative_map[target_base + column] as usize;
+            let state = (cardinalities[representative >> 2] >> ((representative & 3) << 1)) & 3;
+            if state == 1 {
+                let routed_index = routed_base + column;
+                fixed[routed_index >> 3] |= 1 << (routed_index & 7);
+            }
+        }
+    }
+    Some(fixed)
+}
+
+/// Test a row-major routed-position bit. Out-of-range indices conservatively return `false`.
+#[inline(always)]
+pub(crate) fn fixed_routed_wire(mask: &[u8], routed_index: usize) -> bool {
+    mask.get(routed_index >> 3)
+        .is_some_and(|byte| byte & (1 << (routed_index & 7)) != 0)
+}
+
 /// Disjoint Set Forest data-structure following <https://en.wikipedia.org/wiki/Disjoint-set_data_structure>.
+#[derive(Debug)]
 pub struct Forest {
     /// A map of parent pointers, stored as indices.
     ///
@@ -33,6 +108,12 @@ pub struct Forest {
 }
 
 impl Forest {
+    /// Marks a `parents` entry as holding a copy class's current tail rather than a parent
+    /// pointer, for the duration of [`Self::wire_partition`] only. Forest indices are bounded
+    /// by `num_wires * degree + num_virtual_targets`, which that function asserts stays below
+    /// `2^31`, so bit 31 is never part of a legitimate entry.
+    const TAIL_TAG: u32 = 1 << 31;
+
     pub fn new(
         num_wires: usize,
         num_routed_wires: usize,
@@ -108,11 +189,17 @@ impl Forest {
     /// Compress all paths. After calling this, every `parent` value will point to the node's
     /// representative.
     ///
-    /// This dedicated full pass visits every index once and gives it its own direct-root write,
-    /// so the general `find`'s second chain walk (which rewrites intermediate nodes) is
-    /// unnecessary: each intermediate node receives its direct-root assignment when the outer
-    /// loop reaches it. Roots are stable during this pass, so the final `parents` vector is
-    /// identical to calling `find(i)` for every `i`.
+    /// The final `parents` vector is identical to calling `find(i)` for every `i`: a node is only
+    /// ever written when it is a non-root (the `continue` guard), and the value written is always
+    /// a root, so roots are stable for the whole pass and every index ends at `root(i)`.
+    ///
+    /// The writeback loop is load-bearing for performance, not just for `i`. A copy-constraint
+    /// class built by repeated `connect` is a *chain*, and the outer loop visits it in the
+    /// direction that walks it from the far end: writing the root into `parents[i]` alone leaves
+    /// every intermediate node still pointing along the chain, so the next index re-walks almost
+    /// the whole thing — quadratic in the class length, over a `parents` array of tens of
+    /// millions of entries. Writing the root into every node on the path as we go makes each
+    /// later node terminate in one hop.
     pub(crate) fn compress_paths(&mut self) {
         for i in 0..self.parents.len() {
             let parent = self.parents[i];
@@ -123,7 +210,13 @@ impl Forest {
             while self.parents[root as usize] != root {
                 root = self.parents[root as usize];
             }
-            self.parents[i] = root;
+            // Point every node on `i`'s path directly at the root, not just `i`.
+            let mut x = i;
+            while self.parents[x] != root {
+                let next = self.parents[x] as usize;
+                self.parents[x] = root;
+                x = next;
+            }
         }
     }
 
@@ -135,36 +228,150 @@ impl Forest {
     /// `a->b->a`, then `a->b->c->a`, which is exactly the open successor chain built by the
     /// previous implementation plus its closing sweep. This deletes the whole-forest `first`
     /// array and the final serial sweep over every forest entry.
+    ///
+    /// The per-class tail pointer lives in `parents` itself rather than in a second
+    /// whole-forest array. `compress_paths` leaves every entry pointing directly at its class
+    /// root and every root pointing at itself, so a root's own slot carries no information
+    /// this pass still needs: it can hold that class's current tail, tagged with
+    /// `TAIL_TAG` to separate "tail stored here" from "untouched root". Two
+    /// consequences, both mechanical:
+    ///
+    /// * the `vec![u32::MAX; parents.len()]` allocation disappears. Its fill is not zero, so
+    ///   it could never be `calloc`-backed: it was a genuine eager write of `4 *
+    ///   parents.len()` bytes, plus that region's first-touch page faults, once per circuit.
+    /// * for a routed slot that is its own representative — the common case, and the reason
+    ///   `representative_map` delta-encodes to mostly zeros — the tail slot *is* the slot
+    ///   just read, so a lookup that was an unconditional random miss into a second large
+    ///   array becomes a hit on the line already in L1. Slots whose representative is
+    ///   elsewhere pay the same single random access they always did, so no shape regresses.
+    ///
+    /// Only roots are ever written, so the restoring sweep needs no record of which entries
+    /// were touched: a tagged entry is by construction a root, and a root's parent is itself.
+    ///
+    /// Value-exact. The splice order, the scan order, the `index` computed for each slot and
+    /// every `sigma` write are unchanged, so the emitted `sigma` is byte-identical to the
+    /// two-array form, and `parents` is restored entry-for-entry before it is observable.
+    /// Oracles: `u32_forest_matches_usize_reference` (which compares against a verbatim copy
+    /// of the two-array code) and `wire_partition_restores_representative_map`.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn wire_partition(&mut self) -> WirePartition {
-        let mut sigma = vec![0u32; self.degree * self.num_routed_wires];
-        let mut last = vec![u32::MAX; self.parents.len()];
+        self.partition::<false>().0
+    }
 
-        for row in 0..self.degree {
-            for column in 0..self.num_routed_wires {
+    /// [`Self::wire_partition`], plus the routed-position singleton mask that
+    /// [`fixed_routed_wire_mask`] otherwise derives in two extra passes over the representative
+    /// map.
+    ///
+    /// The mask is exactly "this position is a sigma fixed point" — the identity the unit test
+    /// `fixed_routed_mask_is_exactly_sigma_identity_with_aliases` pins — and the splice below
+    /// already decides that, position by position, as it builds the cycles. A position becomes a
+    /// self-loop the moment it is spliced as the first routed member of its class, and it stops
+    /// being one the moment a second routed member of that class arrives. So the bit is set where
+    /// the self-loop is created and cleared where it is broken, and the mask is complete when the
+    /// splice is.
+    ///
+    /// The clear costs nothing beyond an address computation: it fires only when the previous
+    /// tail is still a self-loop, i.e. exactly once per class, at its second member — and
+    /// `sigma[old_tail]`, the value that decides it, is already loaded by the splice itself.
+    /// Deleted in exchange: `fixed_routed_wire_mask`'s `representative_map.len() / 4` scratch
+    /// allocation and its two full passes over every routed position, each of which chased a
+    /// random cardinality lookup per position. Value-exact: `sigma` is untouched, and the mask
+    /// is bit-for-bit what the two-pass derivation returns for the same forest (asserted by
+    /// `folded_mask_matches_two_pass_derivation`).
+    pub fn wire_partition_with_fixed_mask(&mut self) -> (WirePartition, Vec<u8>) {
+        let (partition, fixed) = self.partition::<true>();
+        (partition, fixed)
+    }
+
+    fn partition<const FIXED_MASK: bool>(&mut self) -> (WirePartition, Vec<u8>) {
+        let degree = self.degree;
+        let num_routed_wires = self.num_routed_wires;
+        let mut sigma = vec![0u32; degree * num_routed_wires];
+        let mut fixed = if FIXED_MASK {
+            vec![0u8; (degree * num_routed_wires).div_ceil(8)]
+        } else {
+            Vec::new()
+        };
+        // Recovering `(row, column)` from a column-major sigma index needs a division by
+        // `degree`, which is a power of two for every circuit this runs on; the general
+        // remainder/quotient stays as a fallback so no shape is excluded.
+        let degree_is_pow2 = degree.is_power_of_two();
+        let degree_shift = degree.trailing_zeros();
+        let degree_mask = degree.wrapping_sub(1);
+
+        // Bit 31 must be free to carry the tag. `Forest::new` bounds the forest by
+        // `u32::MAX`; this tightens that to `2^31` and checks it rather than assuming it.
+        assert!(
+            self.parents.len() <= Self::TAIL_TAG as usize,
+            "forest of {} targets leaves no room for the tail tag in bit 31",
+            self.parents.len()
+        );
+
+        for row in 0..degree {
+            for column in 0..num_routed_wires {
                 let t = Target::Wire(Wire { row, column });
-                let parent = self.parents[self.target_index(t)] as usize;
-                let index = (column * self.degree + row) as u32;
-                let old_tail = last[parent];
-                if old_tail == u32::MAX {
-                    sigma[index as usize] = index;
+                let slot = self.target_index(t);
+                let stored = self.parents[slot];
+                // A tagged entry is a root already holding its own class's tail, so the
+                // representative is the slot itself; an untagged entry is the
+                // path-compressed pointer to the root.
+                let parent = if stored & Self::TAIL_TAG != 0 {
+                    slot
                 } else {
-                    sigma[index as usize] = sigma[old_tail as usize];
-                    sigma[old_tail as usize] = index;
+                    stored as usize
+                };
+                let index = (column * degree + row) as u32;
+                let tail = self.parents[parent];
+                if tail & Self::TAIL_TAG == 0 {
+                    sigma[index as usize] = index;
+                    if FIXED_MASK {
+                        // First routed member of its class: a self-loop, hence fixed until
+                        // some later member breaks it.
+                        let routed_index = row * num_routed_wires + column;
+                        fixed[routed_index >> 3] |= 1 << (routed_index & 7);
+                    }
+                } else {
+                    let old_tail = (tail & !Self::TAIL_TAG) as usize;
+                    let head = sigma[old_tail];
+                    sigma[index as usize] = head;
+                    sigma[old_tail] = index;
+                    if FIXED_MASK && head as usize == old_tail {
+                        // The previous tail still pointed at itself, so it is the class's
+                        // first member and this is the second: its self-loop ends here.
+                        // Later members find `head` already pointing at the class head, so
+                        // this branch fires exactly once per class.
+                        let (tail_row, tail_column) = if degree_is_pow2 {
+                            (old_tail & degree_mask, old_tail >> degree_shift)
+                        } else {
+                            (old_tail % degree, old_tail / degree)
+                        };
+                        let routed_index = tail_row * num_routed_wires + tail_column;
+                        fixed[routed_index >> 3] &= !(1 << (routed_index & 7));
+                    }
                 }
-                last[parent] = index;
+                self.parents[parent] = index | Self::TAIL_TAG;
             }
         }
 
-        WirePartition { sigma }
+        // Restore the representative map. Nothing but a root is ever written above, and
+        // `compress_paths` leaves a root pointing at itself.
+        for (slot, parent) in self.parents.iter_mut().enumerate() {
+            if *parent & Self::TAIL_TAG != 0 {
+                *parent = slot as u32;
+            }
+        }
+
+        (WirePartition { sigma }, fixed)
     }
 }
 
+#[derive(Debug)]
 pub struct WirePartition {
     sigma: Vec<u32>,
 }
 
 impl WirePartition {
-    pub(crate) fn get_sigma_polys<F: Field>(
+    pub fn get_sigma_polys<F: Field>(
         &self,
         degree_log: usize,
         k_is: &[F],
@@ -704,6 +911,98 @@ mod tests {
         }
     }
 
+    /// `wire_partition` borrows the `parents` entries of class roots as tail pointers, so it
+    /// must hand back a representative map that is bit-identical to the one it was given —
+    /// `into_parents` feeds `ProverOnlyCircuitData::representative_map` and
+    /// `fixed_routed_wire_mask` straight from it.
+    ///
+    /// Three obligations are checked together, against a verbatim copy of the two-array code:
+    /// the emitted sigma is unchanged, the map is restored entry-for-entry, and the pass is
+    /// idempotent (a second call reproduces the first sigma exactly — which can only hold if
+    /// the restore left no tag behind). Shapes are chosen so that class representatives land
+    /// on routed wires, on non-routed wires and on virtual targets, since those three cases
+    /// exercise different arms of the tag/restore logic: a routed representative is re-read as
+    /// `slot` later in the same scan, while non-routed and virtual representatives are only
+    /// ever reached indirectly and are restored solely by the closing sweep.
+    #[test]
+    fn wire_partition_restores_representative_map() {
+        // (num_wires, num_routed_wires, degree, num_virtual_targets, merges)
+        let configs = [
+            // Production-shaped: 80 routed of 136 wires, so most representatives are the
+            // slot itself (the L1-hit path) and the rest are spread across the forest.
+            (136usize, 80usize, 1usize << 10, 1200usize, 3 * (1 << 10)),
+            // Merge-saturated: almost nothing is a singleton, so nearly every lookup takes
+            // the remote-representative arm.
+            (136, 80, 1 << 9, 800, 136 * (1 << 9)),
+            // No merges at all: every routed slot is its own representative.
+            (136, 80, 1 << 8, 64, 0),
+            // Virtual-target heavy: representatives frequently sit past the wire block.
+            (9, 6, 300, 4000, 6000),
+            // Degenerate shapes.
+            (7, 5, 999, 41, 5000),
+            (3, 2, 1, 0, 0),
+        ];
+
+        for (num_wires, num_routed_wires, degree, num_virtual_targets, num_merges) in configs {
+            let mut rng = Lcg(0xa11c_e5ed ^ ((degree as u64) << 16) ^ num_wires as u64);
+            let merges =
+                random_merges(&mut rng, num_wires, degree, num_virtual_targets, num_merges);
+
+            let mut forest = build_forest(
+                num_wires,
+                num_routed_wires,
+                degree,
+                num_virtual_targets,
+                &merges,
+            );
+            let mut reference = build_usize_forest(
+                num_wires,
+                num_routed_wires,
+                degree,
+                num_virtual_targets,
+                &merges,
+            );
+
+            forest.compress_paths();
+            reference.compress_paths();
+
+            // The map as every downstream consumer expects to receive it.
+            let expected_parents = forest.parents.clone();
+            assert_eq!(
+                parents_as_usize(&forest),
+                reference.parents,
+                "compressed parents diverge for num_wires {num_wires} degree {degree}"
+            );
+
+            let sigma = forest.wire_partition().sigma;
+            let expected_sigma = reference.wire_partition();
+            assert_eq!(
+                sigma, expected_sigma,
+                "sigma diverges for num_wires {num_wires} degree {degree}"
+            );
+
+            assert_eq!(
+                forest.parents, expected_parents,
+                "representative map not restored for num_wires {num_wires} degree {degree}"
+            );
+            assert!(
+                forest.parents.iter().all(|p| p & (1u32 << 31) == 0),
+                "a tail tag survived wire_partition for num_wires {num_wires} degree {degree}"
+            );
+
+            // Idempotence: only possible if the restore was complete.
+            let sigma_again = forest.wire_partition().sigma;
+            assert_eq!(
+                sigma_again, expected_sigma,
+                "second wire_partition diverges for num_wires {num_wires} degree {degree}"
+            );
+            assert_eq!(
+                forest.parents, expected_parents,
+                "representative map not restored on the second pass for num_wires {num_wires} degree {degree}"
+            );
+        }
+    }
+
     /// `Forest::new` rejects a target count that would not fit the narrowed map rather than
     /// silently truncating indices.
     #[test]
@@ -757,5 +1056,134 @@ mod tests {
 
         let actual = partition.get_sigma_polys(degree_log, &k_is, &subgroup);
         assert_eq!(actual, expected);
+    }
+
+    /// The runtime cancellation mask is derived from copy-component cardinality, not from a
+    /// target being its own representative. A component may contain virtual/advice aliases and
+    /// still have exactly one routed member; conversely, every routed member of a multi-routed
+    /// component participates in a nontrivial sigma cycle.
+    #[test]
+    fn fixed_routed_mask_is_exactly_sigma_identity_with_aliases() {
+        let (num_wires, num_routed_wires, degree, num_virtual_targets) = (5, 3, 4, 2);
+        let merges = [
+            // Singleton routed component with a virtual alias.
+            (
+                Target::Wire(Wire { row: 0, column: 0 }),
+                Target::VirtualTarget { index: 0 },
+            ),
+            // Singleton routed component with an advice-wire alias.
+            (
+                Target::Wire(Wire { row: 0, column: 1 }),
+                Target::Wire(Wire { row: 2, column: 4 }),
+            ),
+            // Two separate multi-routed components.
+            (
+                Target::Wire(Wire { row: 0, column: 2 }),
+                Target::Wire(Wire { row: 1, column: 0 }),
+            ),
+            (
+                Target::Wire(Wire { row: 1, column: 1 }),
+                Target::Wire(Wire { row: 1, column: 2 }),
+            ),
+            (
+                Target::Wire(Wire { row: 1, column: 2 }),
+                Target::VirtualTarget { index: 1 },
+            ),
+        ];
+        let mut forest = build_forest(
+            num_wires,
+            num_routed_wires,
+            degree,
+            num_virtual_targets,
+            &merges,
+        );
+        forest.compress_paths();
+        let representative_map = forest.parents.clone();
+        let sigma = forest.wire_partition().sigma;
+
+        let mask = fixed_routed_wire_mask(&representative_map, num_wires, num_routed_wires, degree)
+            .expect("valid compressed representative map");
+        assert_eq!(mask.len(), (degree * num_routed_wires).div_ceil(8));
+
+        for row in 0..degree {
+            for column in 0..num_routed_wires {
+                let row_major = row * num_routed_wires + column;
+                let column_major = column * degree + row;
+                assert_eq!(
+                    fixed_routed_wire(&mask, row_major),
+                    sigma[column_major] as usize == column_major,
+                    "mask/sigma identity mismatch at ({row}, {column})"
+                );
+            }
+        }
+        assert!(fixed_routed_wire(&mask, 0));
+        assert!(fixed_routed_wire(&mask, 1));
+        assert!(!fixed_routed_wire(&mask, 2));
+        assert!(!fixed_routed_wire(&mask, num_routed_wires));
+    }
+
+    /// The mask spliced inside `wire_partition` is byte-identical to the two-pass derivation
+    /// from the representative map, and asking for it changes no sigma value. Shapes cover a
+    /// production config (135 wires / 80 routed / 2^12 rows), a non-power-of-two degree, a
+    /// forest with no merges at all (every routed position fixed) and a heavily merged one
+    /// (almost none fixed).
+    #[test]
+    fn folded_mask_matches_two_pass_derivation() {
+        // (num_wires, num_routed_wires, degree, num_virtual_targets, merges)
+        let configs = [
+            (135usize, 80usize, 1usize << 12, 1500usize, 135 * (1 << 12)),
+            (7, 5, 999, 41, 5000),
+            (5, 3, 4, 2, 0),
+            (9, 6, 64, 8, 0),
+            (9, 6, 64, 8, 20_000),
+        ];
+
+        for (num_wires, num_routed_wires, degree, num_virtual_targets, num_merges) in configs {
+            let mut rng = Lcg(0x5eed_1234 ^ ((degree as u64) << 24) ^ num_merges as u64);
+            let merges =
+                random_merges(&mut rng, num_wires, degree, num_virtual_targets, num_merges);
+            let mut forest = build_forest(
+                num_wires,
+                num_routed_wires,
+                degree,
+                num_virtual_targets,
+                &merges,
+            );
+            forest.compress_paths();
+            let representative_map = forest.parents.clone();
+
+            let (partition, folded) = forest.wire_partition_with_fixed_mask();
+            let two_pass =
+                fixed_routed_wire_mask(&representative_map, num_wires, num_routed_wires, degree)
+                    .expect("valid compressed representative map");
+            assert_eq!(
+                folded, two_pass,
+                "folded mask diverges from the two-pass derivation at degree {degree}, \
+                 {num_merges} merges"
+            );
+
+            // The mask must not perturb the partition, and the forest must be restored
+            // identically either way.
+            assert_eq!(forest.parents, representative_map);
+            let plain = forest.wire_partition();
+            assert_eq!(
+                partition.sigma, plain.sigma,
+                "sigma perturbed at degree {degree}"
+            );
+            assert_eq!(forest.parents, representative_map);
+
+            // Cross-check both against the sigma fixed-point definition directly.
+            for row in 0..degree {
+                for column in 0..num_routed_wires {
+                    let row_major = row * num_routed_wires + column;
+                    let column_major = column * degree + row;
+                    assert_eq!(
+                        fixed_routed_wire(&folded, row_major),
+                        partition.sigma[column_major] as usize == column_major,
+                        "mask/sigma identity mismatch at ({row}, {column}), degree {degree}"
+                    );
+                }
+            }
+        }
     }
 }

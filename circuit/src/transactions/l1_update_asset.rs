@@ -48,7 +48,7 @@ pub struct L1UpdateAssetTx {
     pub index_price: i64, // Given by sequencer
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct L1UpdateAssetTxTarget {
     pub asset_index: Target,
     pub min_transfer_amount: BigUintTarget,
@@ -248,11 +248,13 @@ impl Verify for L1UpdateAssetTxTarget {
         let is_asset_empty = tx_state.assets[TX_ASSET_ID].is_empty(builder);
         self.success = builder.and_not(self.success, is_asset_empty);
 
-        let is_nil_margin_index =
-            builder.is_equal_constant(tx_state.next_margin_asset_index, NIL_MARGIN_ASSET_INDEX);
-        let nil_margin_index_and_enabling_margin =
-            builder.and(is_nil_margin_index, self.enabling_margin);
-        self.success = builder.and_not(self.success, nil_margin_index_and_enabling_margin);
+        let is_margin_index_invalid = builder.is_equal_constant(
+            tx_state.next_margin_asset_index,
+            tx_state.margined_asset_list_size as u64,
+        );
+        let invalid_margin_index_and_enabling_margin =
+            builder.and(is_margin_index_invalid, self.enabling_margin);
+        self.success = builder.and_not(self.success, invalid_margin_index_and_enabling_margin);
 
         // Enabling margin requires margin index to be empty
         let success_and_enabling_margin = builder.and(self.success, self.enabling_margin);

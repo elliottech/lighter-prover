@@ -17,7 +17,7 @@ pub const POSITIVE_THRESHOLD_BIT: usize = 60;
 
 /// A `Target` which is in range of `(-2^POSITIVE_THRESHOLD_BIT, 2^POSITIVE_THRESHOLD_BIT)` where negative values stored as
 /// in the larger part of the field, ie. `(F::ORDER - 2^POSITIVE_THRESHOLD_BIT, F::ORDER)`
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[allow(clippy::manual_non_exhaustive)]
 pub struct SignedTarget {
     pub target: Target,

@@ -137,7 +137,7 @@ impl TransferMessage {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct TransferMessageTarget {
     pub from_account_index: Target,
     pub api_key_index: Target,

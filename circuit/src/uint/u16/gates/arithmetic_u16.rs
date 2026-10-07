@@ -163,6 +163,101 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for U16ArithmeticG
         self.eval_unfiltered_base_batch_packed(vars_base)
     }
 
+    fn eval_unfiltered_base_batch_accumulate(
+        &self,
+        vars_base: EvaluationVarsBaseBatch<F>,
+        filters: &[F],
+        combined_gate_constraints: &mut [F],
+    ) {
+        let n = vars_base.len();
+        assert_eq!(filters.len(), n);
+        assert!(combined_gate_constraints.len() >= <Self as Gate<F, D>>::num_constraints(self) * n);
+        let wires = vars_base.local_wires;
+        let three = F::from_canonical_usize(3);
+        let base16 = F::from_canonical_u64(1 << 16u64);
+        let midpoint = Self::num_limbs() / 2;
+        // Each half-recomposition below is accumulated in a 128 bit integer and
+        // reduced once, instead of once per limb. Raw representatives are at
+        // most `2^64 - 1`, so a half of `midpoint` limbs in base
+        // `2^limb_bits` sums to less than
+        // `(2^64 - 1) * (limb_base^midpoint - 1) / (limb_base - 1)
+        //    < 2^64 * limb_base^midpoint * limb_base / (limb_base - 1)`.
+        // The assertion keeps `limb_base^midpoint <= 2^30`, which bounds the
+        // accumulator by `2^64 * 2^30 * 4/3 < 2^96`: below `2^96` every
+        // sub-`2^64` representative produced by the delayed reduction is
+        // bit-identical to the per-limb Horner chain's, not merely congruent
+        // to it (the high 32 bits of the 128 bit accumulator are zero, so
+        // `from_noncanonical_u128` takes the same wrap-correction branch that
+        // the multiply/add chain takes). With the production parameters
+        // (`limb_bits = 2`, `num_limbs = 8`) the accumulator is below `2^71`.
+        assert!(Self::limb_bits() * midpoint <= 30);
+        let limb_base_u128 = 1u128 << Self::limb_bits();
+        let mut chunks = combined_gate_constraints.chunks_exact_mut(n);
+        // Batches are 32 points in this prover; keep the recomposition rows on
+        // the stack and fall back to the heap only for oversized batches.
+        let mut combined_low_stack = [0u128; 64];
+        let mut combined_high_stack = [0u128; 64];
+        let mut combined_low_heap;
+        let mut combined_high_heap;
+        let (mut combined_low, mut combined_high): (&mut [u128], &mut [u128]) = if n <= 64 {
+            (&mut combined_low_stack[..n], &mut combined_high_stack[..n])
+        } else {
+            combined_low_heap = vec![0u128; n];
+            combined_high_heap = vec![0u128; n];
+            (&mut combined_low_heap, &mut combined_high_heap)
+        };
+
+        for i in 0..self.num_ops {
+            let multiplicand_0 = &wires[self.wire_ith_multiplicand_0(i) * n..][..n];
+            let multiplicand_1 = &wires[self.wire_ith_multiplicand_1(i) * n..][..n];
+            let addend = &wires[self.wire_ith_addend(i) * n..][..n];
+            let output_low = &wires[self.wire_ith_output_low_half(i) * n..][..n];
+            let output_high = &wires[self.wire_ith_output_high_half(i) * n..][..n];
+
+            let out = chunks.next().unwrap();
+            for p in 0..n {
+                let computed = multiplicand_0[p] * multiplicand_1[p] + addend[p];
+                out[p] += filters[p] * (output_high[p] * base16 + output_low[p] - computed);
+            }
+
+            // Limb range products (base-4: x(x-1)(x-2)(x-3) = y(y+2), y = x(x-3))
+            // in the same descending order as `eval_unfiltered`, accumulating
+            // the low/high recompositions along the way.
+            combined_low.fill(0);
+            combined_high.fill(0);
+            for j in (0..Self::num_limbs()).rev() {
+                let limb = &wires[self.wire_ith_output_jth_limb(i, j) * n..][..n];
+                let out = chunks.next().unwrap();
+                debug_assert_eq!(1 << Self::limb_bits(), 4);
+                for p in 0..n {
+                    let x = limb[p];
+                    let y = x * (x - three);
+                    out[p] += filters[p] * (y * (y + F::TWO));
+                }
+                let combined = if j < midpoint {
+                    &mut combined_low
+                } else {
+                    &mut combined_high
+                };
+                for p in 0..n {
+                    combined[p] =
+                        combined[p] * limb_base_u128 + limb[p].to_noncanonical_u64() as u128;
+                }
+            }
+            let out = chunks.next().unwrap();
+            for p in 0..n {
+                debug_assert!(combined_low[p] < 1u128 << 96);
+                out[p] += filters[p] * (F::from_noncanonical_u128(combined_low[p]) - output_low[p]);
+            }
+            let out = chunks.next().unwrap();
+            for p in 0..n {
+                debug_assert!(combined_high[p] < 1u128 << 96);
+                out[p] +=
+                    filters[p] * (F::from_noncanonical_u128(combined_high[p]) - output_high[p]);
+            }
+        }
+    }
+
     fn eval_unfiltered_circuit(
         &self,
         builder: &mut CircuitBuilder<F, D>,
@@ -394,5 +489,163 @@ impl<F: RichField + Extendable<D>, const D: usize> SimpleGenerator<F, D>
             i,
             _phantom: PhantomData,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use plonky2::field::goldilocks_field::GoldilocksField;
+    use plonky2::field::types::{Field64, PrimeField64};
+    use plonky2::hash::hash_types::HashOut;
+
+    use super::*;
+
+    /// The pre-transformation accumulation path, kept compiled as the
+    /// differential's reference: one modular reduction per limb inside each
+    /// half recomposition.
+    fn eval_accumulate_termwise_reference<F: RichField + Extendable<D>, const D: usize>(
+        gate: &U16ArithmeticGate<F, D>,
+        vars_base: EvaluationVarsBaseBatch<F>,
+        filters: &[F],
+        combined_gate_constraints: &mut [F],
+    ) {
+        let n = vars_base.len();
+        assert_eq!(filters.len(), n);
+        let wires = vars_base.local_wires;
+        let three = F::from_canonical_usize(3);
+        let limb_base = F::from_canonical_u64(1u64 << U16ArithmeticGate::<F, D>::limb_bits());
+        let base16 = F::from_canonical_u64(1 << 16u64);
+        let midpoint = U16ArithmeticGate::<F, D>::num_limbs() / 2;
+        let mut chunks = combined_gate_constraints.chunks_exact_mut(n);
+        let mut combined_low = vec![F::ZERO; n];
+        let mut combined_high = vec![F::ZERO; n];
+
+        for i in 0..gate.num_ops {
+            let multiplicand_0 = &wires[gate.wire_ith_multiplicand_0(i) * n..][..n];
+            let multiplicand_1 = &wires[gate.wire_ith_multiplicand_1(i) * n..][..n];
+            let addend = &wires[gate.wire_ith_addend(i) * n..][..n];
+            let output_low = &wires[gate.wire_ith_output_low_half(i) * n..][..n];
+            let output_high = &wires[gate.wire_ith_output_high_half(i) * n..][..n];
+
+            let out = chunks.next().unwrap();
+            for p in 0..n {
+                let computed = multiplicand_0[p] * multiplicand_1[p] + addend[p];
+                out[p] += filters[p] * (output_high[p] * base16 + output_low[p] - computed);
+            }
+
+            combined_low.fill(F::ZERO);
+            combined_high.fill(F::ZERO);
+            for j in (0..U16ArithmeticGate::<F, D>::num_limbs()).rev() {
+                let limb = &wires[gate.wire_ith_output_jth_limb(i, j) * n..][..n];
+                let out = chunks.next().unwrap();
+                for p in 0..n {
+                    let x = limb[p];
+                    let y = x * (x - three);
+                    out[p] += filters[p] * (y * (y + F::TWO));
+                }
+                let combined = if j < midpoint {
+                    &mut combined_low
+                } else {
+                    &mut combined_high
+                };
+                for p in 0..n {
+                    combined[p] = combined[p] * limb_base + limb[p];
+                }
+            }
+            let out = chunks.next().unwrap();
+            for p in 0..n {
+                out[p] += filters[p] * (combined_low[p] - output_low[p]);
+            }
+            let out = chunks.next().unwrap();
+            for p in 0..n {
+                out[p] += filters[p] * (combined_high[p] - output_high[p]);
+            }
+        }
+    }
+
+    /// Raw-limb differential between the delayed and the per-limb reduction at
+    /// the production gate shape, over arbitrary `u64` representatives:
+    /// canonical, non-canonical, and boundary. Limb wires are deliberately NOT
+    /// restricted to the base-4 digit set — quotient-domain evaluations are
+    /// not, so the bound is derived from `raw < 2^64` alone.
+    #[test]
+    fn delayed_limb_recomposition_matches_termwise_reduction_in_raw_limbs() {
+        type F = GoldilocksField;
+        const D: usize = 2;
+        // CIRCUIT_CONFIG: num_wires 136, num_routed_wires 80 => num_ops 10.
+        // The quotient walker evaluates 32 points per batch.
+        const NUM_OPS: usize = 10;
+        const N: usize = 32;
+
+        let boundary: [u64; 15] = [
+            0,
+            1,
+            2,
+            3,
+            (u32::MAX as u64) - 1,
+            u32::MAX as u64,
+            1u64 << 32,
+            F::ORDER - 2,
+            F::ORDER - 1,
+            F::ORDER,
+            F::ORDER + 1,
+            F::ORDER + 2,
+            1u64 << 63,
+            u64::MAX - 1,
+            u64::MAX,
+        ];
+
+        let gate = U16ArithmeticGate::<F, D> {
+            num_ops: NUM_OPS,
+            _phantom: PhantomData,
+        };
+        let num_wires = <U16ArithmeticGate<F, D> as Gate<F, D>>::num_wires(&gate);
+        let num_constraints = <U16ArithmeticGate<F, D> as Gate<F, D>>::num_constraints(&gate);
+        let hash = HashOut::<F>::ZERO;
+
+        let mut state = 0x243f_6a88_85a3_08d3u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        for trial in 0..64usize {
+            // Trial 0 is a pure boundary sweep; every later trial mixes
+            // boundary and uniform raw representatives.
+            let mut draw = |k: usize| -> F {
+                if trial == 0 {
+                    GoldilocksField(boundary[k % boundary.len()])
+                } else {
+                    let r = next();
+                    if r % 3 == 0 {
+                        GoldilocksField(boundary[(r >> 2) as usize % boundary.len()])
+                    } else {
+                        GoldilocksField(r)
+                    }
+                }
+            };
+
+            let wires: Vec<F> = (0..num_wires * N).map(&mut draw).collect();
+            let filters: Vec<F> = (0..N).map(&mut draw).collect();
+            let seed: Vec<F> = (0..num_constraints * N).map(&mut draw).collect();
+
+            let vars = EvaluationVarsBaseBatch::new(N, &[], &wires, &hash);
+
+            let mut expected = seed.clone();
+            eval_accumulate_termwise_reference(&gate, vars, &filters, &mut expected);
+
+            let mut actual = seed;
+            gate.eval_unfiltered_base_batch_accumulate(vars, &filters, &mut actual);
+
+            for (index, (a, e)) in actual.iter().zip(&expected).enumerate() {
+                assert_eq!(
+                    a.to_noncanonical_u64(),
+                    e.to_noncanonical_u64(),
+                    "raw-limb mismatch at slot {index} (trial {trial})"
+                );
+            }
+        }
     }
 }

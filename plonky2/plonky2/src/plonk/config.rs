@@ -31,6 +31,13 @@ pub trait GenericHashOut<F: RichField>:
     fn from_bytes(bytes: &[u8]) -> Self;
 
     fn to_vec(&self) -> Vec<F>;
+
+    /// Visit the hash's field elements in `to_vec` order without requiring an
+    /// allocation. The default preserves `to_vec` exactly; element-backed
+    /// hashes override it to iterate their storage directly.
+    fn for_each_element(&self, f: impl FnMut(F)) {
+        self.to_vec().into_iter().for_each(f);
+    }
 }
 
 /// Trait for hash functions.
@@ -110,38 +117,48 @@ pub trait Hasher<F: RichField>: Sized + Copy + Debug + Eq + PartialEq {
         (Self::two_to_one(x0, y0), Self::two_to_one(x1, y1))
     }
 
+    /// Four independent `two_to_one` compressions, allowing implementations
+    /// to interleave them. Must return exactly the four individual
+    /// `Self::two_to_one` results, in order.
+    fn two_to_one_quad(inputs: [(Self::Hash, Self::Hash); 4]) -> [Self::Hash; 4] {
+        inputs.map(|(x, y)| Self::two_to_one(x, y))
+    }
+
     fn two_to_one(left: Self::Hash, right: Self::Hash) -> Self::Hash;
 
     /// Build the native Merkle digests and cap with a specialized backend, when available.
     ///
     /// `leaves` is one flat row-major buffer holding `num_leaves` leaves of `leaf_width`
-    /// field elements each. The first result uses
-    /// [`crate::hash::merkle_tree::MerkleTree::digests`] layout.
-    #[allow(clippy::type_complexity)]
+    /// field elements each. The first result uses the level-order
+    /// [`crate::hash::merkle_tree::LevelOrderDigests`] layout.
     fn try_build_merkle_tree(
         _leaves: &[F],
         _leaf_width: usize,
         _num_leaves: usize,
         _cap_height: usize,
-    ) -> Option<(Vec<Self::Hash>, Vec<Self::Hash>)> {
+    ) -> Option<(
+        crate::hash::merkle_tree::LevelOrderDigests<Self::Hash>,
+        Vec<Self::Hash>,
+    )> {
         None
     }
 
     /// Like [`Hasher::try_build_merkle_tree`], but the leaves arrive as
     /// natural-order poly-major columns: tree leaf `i` is
     /// `columns[j][reverse_bits(i, log2(num_leaves))]`.
-    #[allow(clippy::type_complexity)]
     fn try_build_merkle_tree_columns(
         _columns: &[Vec<F>],
         _cap_height: usize,
-    ) -> Option<(Vec<Self::Hash>, Vec<Self::Hash>)> {
+    ) -> Option<(
+        crate::hash::merkle_tree::LevelOrderDigests<Self::Hash>,
+        Vec<Self::Hash>,
+    )> {
         None
     }
 
     /// Allocates retained column-major leaf storage suitable for a specialized
     /// Merkle backend. The caller may compute the columns directly in this
     /// storage before passing it to [`Hasher::try_build_merkle_tree_column_store`].
-    #[allow(clippy::type_complexity)]
     fn try_allocate_merkle_tree_columns(
         _num_columns: usize,
         _num_rows: usize,
@@ -153,11 +170,13 @@ pub trait Hasher<F: RichField>: Sized + Copy + Debug + Eq + PartialEq {
     /// Like [`Hasher::try_build_merkle_tree_columns`], but accepts retained
     /// column storage allocated by
     /// [`Hasher::try_allocate_merkle_tree_columns`].
-    #[allow(clippy::type_complexity)]
     fn try_build_merkle_tree_column_store(
         columns: &crate::hash::merkle_tree::ColumnStore<F>,
         cap_height: usize,
-    ) -> Option<(Vec<Self::Hash>, Vec<Self::Hash>)> {
+    ) -> Option<(
+        crate::hash::merkle_tree::LevelOrderDigests<Self::Hash>,
+        Vec<Self::Hash>,
+    )> {
         match columns {
             crate::hash::merkle_tree::ColumnStore::Owned(columns) => {
                 Self::try_build_merkle_tree_columns(columns, cap_height)
@@ -167,19 +186,37 @@ pub trait Hasher<F: RichField>: Sized + Copy + Debug + Eq + PartialEq {
         }
     }
 
+    /// Streamed variant of [`Hasher::try_build_merkle_tree_column_store`]:
+    /// the caller computes the leaf columns on demand, eight at a time, via
+    /// `fill_group(group, slices)` (covering columns `[8 * group, 8 * group +
+    /// slices.len())`), and a capable backend overlaps each group's sponge
+    /// absorption with the next group's fill. Returns `None` when no backend
+    /// is available or the shape does not qualify; the caller then fills the
+    /// storage itself and uses the classic build (the fill is idempotent).
+    #[allow(clippy::type_complexity)]
+    fn try_build_merkle_tree_column_store_streamed(
+        _columns: &crate::hash::merkle_tree::ColumnStore<F>,
+        _cap_height: usize,
+        _fill_group: &(dyn Fn(usize, &mut [&mut [F]]) + Sync),
+    ) -> Option<(
+        crate::hash::merkle_tree::LevelOrderDigests<Self::Hash>,
+        Vec<Self::Hash>,
+    )> {
+        None
+    }
+
     /// Computes the coset LDE of the given coefficient columns and the Merkle
     /// tree over the resulting leaves in one fused backend pass, when a
     /// specialized backend is available. Returns the retained LDE column
-    /// storage plus digests and cap in
-    /// [`crate::hash::merkle_tree::MerkleTree::digests`] layout.
-    #[allow(clippy::type_complexity)]
+    /// storage plus digests in the level-order
+    /// [`crate::hash::merkle_tree::LevelOrderDigests`] layout and the cap.
     fn try_build_commitment_from_coeffs(
         _coeff_columns: &[&[F]],
         _rate_bits: usize,
         _cap_height: usize,
     ) -> Option<(
         crate::hash::merkle_tree::ColumnStore<F>,
-        Vec<Self::Hash>,
+        crate::hash::merkle_tree::LevelOrderDigests<Self::Hash>,
         Vec<Self::Hash>,
     )> {
         None
@@ -195,7 +232,7 @@ pub trait Hasher<F: RichField>: Sized + Copy + Debug + Eq + PartialEq {
         _cap_height: usize,
     ) -> Option<(
         crate::hash::merkle_tree::ColumnStore<F>,
-        Vec<Self::Hash>,
+        crate::hash::merkle_tree::LevelOrderDigests<Self::Hash>,
         Vec<Self::Hash>,
         Vec<Vec<F>>,
     )> {

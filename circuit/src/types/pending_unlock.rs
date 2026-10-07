@@ -28,7 +28,7 @@ pub struct PendingUnlock {
     pub amount: BigUint,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct PendingUnlockTarget {
     pub unlock_timestamp: Target,
     pub asset_index: Target,

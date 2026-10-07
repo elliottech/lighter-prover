@@ -150,7 +150,7 @@ impl<F: RichField + Default> Default for Market<F> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MarketTarget {
     pub market_index: Target, //  8 bits. Index is used only as hint to verify merkle proofs. It isn't included in the leaf hash
 

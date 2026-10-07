@@ -11,7 +11,7 @@ use serde::Deserialize;
 
 use super::config::Builder;
 use crate::deserializers;
-use crate::types::constants::{MARGINED_ASSET_LIST_SIZE, POSITION_LIST_SIZE};
+use crate::types::constants::POSITION_LIST_SIZE;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(bound = "")]
@@ -28,8 +28,8 @@ pub struct PriceUpdates {
 
     #[serde(rename = "a")]
     #[serde(deserialize_with = "deserializers::asset_price_updates")]
-    #[serde(default = "deserializers::default_asset_price_updates")]
-    pub asset_index_price: [i64; MARGINED_ASSET_LIST_SIZE],
+    #[serde(default)]
+    pub asset_index_price: Vec<i64>,
 }
 
 impl Default for PriceUpdates {
@@ -37,21 +37,26 @@ impl Default for PriceUpdates {
         Self {
             index_price: [0; POSITION_LIST_SIZE],
             mark_price: [0; POSITION_LIST_SIZE],
-            asset_index_price: [0; MARGINED_ASSET_LIST_SIZE],
+            // Default has zero-length margined asset prices; the witness setter pads missing entries
+            // with zero up to `margined_asset_list_size`.
+            asset_index_price: Vec::new(),
         }
     }
 }
 
-#[derive(Debug)]
+#[serde_with::serde_as]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct PriceUpdatesTarget {
     // 32 bits each
+    #[serde_as(as = "[_; POSITION_LIST_SIZE]")]
     pub index_price: [Target; POSITION_LIST_SIZE],
+    #[serde_as(as = "[_; POSITION_LIST_SIZE]")]
     pub mark_price: [Target; POSITION_LIST_SIZE],
-    pub asset_index_price: [Target; MARGINED_ASSET_LIST_SIZE],
+    pub asset_index_price: Vec<Target>,
 }
 
 impl PriceUpdatesTarget {
-    pub fn new(builder: &mut Builder) -> Self {
+    pub fn new(builder: &mut Builder, margined_asset_list_size: usize) -> Self {
         Self {
             index_price: builder
                 .add_virtual_targets(POSITION_LIST_SIZE)
@@ -61,10 +66,7 @@ impl PriceUpdatesTarget {
                 .add_virtual_targets(POSITION_LIST_SIZE)
                 .try_into()
                 .unwrap(),
-            asset_index_price: builder
-                .add_virtual_targets(MARGINED_ASSET_LIST_SIZE)
-                .try_into()
-                .unwrap(),
+            asset_index_price: builder.add_virtual_targets(margined_asset_list_size),
         }
     }
 }
@@ -80,11 +82,16 @@ impl<T: Witness<F>, F: PrimeField64 + Extendable<5> + RichField> PriceUpdatesWit
             self.set_target(t.mark_price[i], F::from_canonical_u32(n.mark_price[i]))?;
         }
 
-        for i in 0..MARGINED_ASSET_LIST_SIZE {
-            self.set_target(
-                t.asset_index_price[i],
-                F::from_canonical_u64(n.asset_index_price[i] as u64),
-            )?;
+        if n.asset_index_price.len() > t.asset_index_price.len() {
+            anyhow::bail!(
+                "asset price update index out of bounds: witness has {} entries, circuit expects at most {}",
+                n.asset_index_price.len(),
+                t.asset_index_price.len()
+            );
+        }
+        for (i, target) in t.asset_index_price.iter().enumerate() {
+            let price = n.asset_index_price.get(i).copied().unwrap_or_default();
+            self.set_target(*target, F::from_canonical_u64(price as u64))?;
         }
 
         Ok(())

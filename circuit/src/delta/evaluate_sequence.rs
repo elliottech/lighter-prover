@@ -505,7 +505,7 @@ mod tests {
         builder.sequence_initialize(0, evaluation_point);
         builder.sequence_initialize(1, evaluation_point);
 
-        for (value, selector) in values.into_iter().zip(selectors.into_iter()) {
+        for (value, selector) in values.into_iter().zip(selectors) {
             builder.sequence_single_digest(0, value, selector);
             builder.sequence_digest_target(1, value, selector);
         }

@@ -39,7 +39,7 @@ pub struct L1BurnSharesTx {
     pub share_amount: i64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct L1BurnSharesTxTarget {
     pub account_index: Target,
     pub master_account_index: Target,

@@ -127,7 +127,7 @@ impl AccountOrder {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct AccountOrderTarget {
     pub index_0: Target,
     pub index_1: Target,

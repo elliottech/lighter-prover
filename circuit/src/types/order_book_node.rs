@@ -56,7 +56,7 @@ impl<F: Field> OrderBookNode<F> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OrderBookNodeTarget {
     pub sibling_child_hash: HashOutTarget,
     pub ask_base_sum: Target,  // 63 bits

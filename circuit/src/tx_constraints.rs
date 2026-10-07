@@ -217,7 +217,8 @@ use crate::types::tx_type::{TxTypeTargets, TxTypeVerifyTargets};
 use crate::uint::u8::{CircuitBuilderU8, U8Target};
 use crate::utils::CircuitBuilderUtils;
 
-#[derive(Debug)]
+#[serde_with::serde_as]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct TxTarget {
     pub tx_type: Target,
     pub tx_index: Target,
@@ -315,9 +316,12 @@ pub struct TxTarget {
     /*****************************/
     /*  State Tree Merkle Proofs */
     /*****************************/
+    #[serde_as(as = "[[_; ACCOUNT_MERKLE_LEVELS]; NB_ACCOUNTS_PER_TX]")]
     pub account_tree_merkle_proofs: [[HashOutTarget; ACCOUNT_MERKLE_LEVELS]; NB_ACCOUNTS_PER_TX],
+    #[serde_as(as = "[[_; ACCOUNT_MERKLE_LEVELS]; NB_ACCOUNTS_PER_TX]")]
     pub account_pub_data_tree_merkle_proofs:
         [[HashOutTarget; ACCOUNT_MERKLE_LEVELS]; NB_ACCOUNTS_PER_TX],
+    #[serde_as(as = "[[_; ACCOUNT_MERKLE_LEVELS]; NB_ACCOUNTS_PER_TX]")]
     pub account_delta_tree_merkle_proofs:
         [[HashOutTarget; ACCOUNT_MERKLE_LEVELS]; NB_ACCOUNTS_PER_TX],
     pub asset_tree_merkle_proofs:
@@ -334,19 +338,25 @@ pub struct TxTarget {
     pub account_market_pub_data_tree_merkle_proofs:
         [[HashOutTarget; MARKET_MERKLE_LEVELS]; NB_ACCOUNTS_PER_TX - 1],
     pub api_key_tree_merkle_proof: [HashOutTarget; API_KEY_MERKLE_LEVELS],
+    #[serde_as(as = "[[_; ACCOUNT_ORDERS_MERKLE_LEVELS]; NB_ACCOUNT_ORDERS_PATHS_PER_TX]")]
     pub account_orders_tree_merkle_proof:
         [[HashOutTarget; ACCOUNT_ORDERS_MERKLE_LEVELS]; NB_ACCOUNT_ORDERS_PATHS_PER_TX],
+    #[serde_as(as = "[_; PUBLIC_MARKET_INDEX_MERKLE_LEVELS]")]
     pub public_market_index_tree_merkle_proof: [HashOutTarget; PUBLIC_MARKET_INDEX_MERKLE_LEVELS],
     pub market_tree_merkle_proof: [HashOutTarget; MARKET_MERKLE_LEVELS],
     pub market_pub_data_tree_merkle_proof: [HashOutTarget; MARKET_MERKLE_LEVELS],
     pub market_details_tree_merkle_proof: [HashOutTarget; MARKET_DETAILS_TREE_HEIGHT],
+    #[serde_as(as = "[_; ORDER_BOOK_MERKLE_LEVELS]")]
     pub order_book_tree_path: [OrderBookNodeTarget; ORDER_BOOK_MERKLE_LEVELS],
+    #[serde_as(as = "[_; ORDER_BOOK_MERKLE_LEVELS]")]
     pub cancelled_order_book_tree_path: [OrderBookNodeTarget; ORDER_BOOK_MERKLE_LEVELS],
 
     pub system_config_before: SystemConfigTarget,
     pub register_stack_before: RegisterStackTarget,
+    #[serde_as(as = "[_; ASSET_LIST_SIZE]")]
     pub all_assets_before: [AssetTarget; ASSET_LIST_SIZE],
-    pub all_margined_assets_before: [MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
+    pub all_margined_assets_before: Vec<MarginedAssetTarget>,
+    #[serde_as(as = "[_; POSITION_LIST_SIZE]")]
     pub all_market_risk_details_before: [MarketRiskDetailsTarget; POSITION_LIST_SIZE],
 
     pub old_account_tree_root: HashOutTarget,
@@ -371,7 +381,9 @@ pub struct TxTarget {
     /*************************/
     pub impact_ask_order: OrderTarget,
     pub impact_bid_order: OrderTarget,
+    #[serde_as(as = "[_; ORDER_BOOK_MERKLE_LEVELS]")]
     pub impact_ask_order_book_tree_path: [OrderBookNodeTarget; ORDER_BOOK_MERKLE_LEVELS],
+    #[serde_as(as = "[_; ORDER_BOOK_MERKLE_LEVELS]")]
     pub impact_bid_order_book_tree_path: [OrderBookNodeTarget; ORDER_BOOK_MERKLE_LEVELS],
 
     /******************/
@@ -382,7 +394,7 @@ pub struct TxTarget {
 
 impl TxTarget {
     /// Initializes the transaction virtual targets
-    pub fn new(builder: &mut Builder) -> Self {
+    pub fn new(builder: &mut Builder, margined_asset_list_size: usize) -> Self {
         Self {
             tx_type: builder.add_virtual_target(),
             tx_index: builder.add_virtual_target(),
@@ -539,9 +551,9 @@ impl TxTarget {
             /*  State Tree Leaves  */
             /***********************/
             accounts_before: [
-                AccountTarget::new(builder),
-                AccountTarget::new(builder),
-                AccountTarget::new_fee_account(builder),
+                AccountTarget::new(builder, margined_asset_list_size),
+                AccountTarget::new(builder, margined_asset_list_size),
+                AccountTarget::new_fee_account(builder, margined_asset_list_size),
             ],
             account_assets_before: core::array::from_fn(|_| {
                 core::array::from_fn(|_| AccountAssetTarget::new(builder))
@@ -593,7 +605,9 @@ impl TxTarget {
             system_config_before: SystemConfigTarget::new(builder),
             register_stack_before: RegisterStackTarget::new(builder),
             all_assets_before: array::from_fn(|_| AssetTarget::new(builder)),
-            all_margined_assets_before: array::from_fn(|_| MarginedAssetTarget::new(builder)),
+            all_margined_assets_before: (0..margined_asset_list_size)
+                .map(|_| MarginedAssetTarget::new(builder))
+                .collect(),
             all_market_risk_details_before: array::from_fn(|_| {
                 MarketRiskDetailsTarget::new(builder)
             }),
@@ -646,6 +660,7 @@ impl TxTarget {
         builder: &mut Builder,
         block_created_at: Target,
         state_metadata_hash: HashOutTarget,
+        margined_asset_list_size: usize,
     ) -> (
         [U8Target; MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX], // priority operation's public data
         BoolTarget,                                                // is there a priority operation
@@ -693,13 +708,16 @@ impl TxTarget {
         });
         // Load the margin asset belongs to first asset loaded. For L1 register/update asset, load the target margin index
         let next_margin_asset_index = self.get_next_margin_asset_index(builder);
-        let mut first_asset_margin_index = assets_before[0].margin_index(builder);
+        self.assert_margined_asset_list_size(margined_asset_list_size);
+        let mut first_asset_margin_index =
+            assets_before[0].margin_index(builder, margined_asset_list_size);
         first_asset_margin_index = builder.select(
             tx_type.is_l1_register_asset,
             next_margin_asset_index,
             first_asset_margin_index,
         );
-        let second_asset_margin_index = assets_before[1].margin_index(builder);
+        let second_asset_margin_index =
+            assets_before[1].margin_index(builder, margined_asset_list_size);
         let margined_asset_before = [
             random_access_margined_assets(
                 builder,
@@ -725,6 +743,7 @@ impl TxTarget {
             &self.accounts_before,
             &assets_before,
             first_asset_margin_index,
+            margined_asset_list_size,
         );
         let is_asset_used_as_margin: [[BoolTarget; NB_ASSETS_PER_TX]; NB_ACCOUNTS_PER_TX] =
             core::array::from_fn(|i| {
@@ -789,6 +808,7 @@ impl TxTarget {
         let tx_state = &mut TxState {
             first_asset_margin_index,
             next_margin_asset_index,
+            margined_asset_list_size,
             new_instructions: [BaseRegisterInfoTarget::empty(builder); NEW_INSTRUCTIONS_MAX_SIZE],
             new_instructions_count: builder.zero(),
             register_stack: self.register_stack_before,
@@ -1121,12 +1141,27 @@ impl TxTarget {
         )
     }
 
+    pub(crate) fn assert_margined_asset_list_size(&self, margined_asset_list_size: usize) {
+        assert_eq!(
+            self.all_margined_assets_before.len(),
+            margined_asset_list_size,
+            "all_margined_assets_before size mismatch"
+        );
+        for account in self.accounts_before.iter() {
+            account.assert_margined_asset_list_size(margined_asset_list_size);
+        }
+    }
+
     fn get_next_margin_asset_index(&self, builder: &mut Builder) -> Target {
-        let mut margin_index = builder.constant_u64(NIL_MARGIN_ASSET_INDEX);
+        let margined_asset_list_size = self.all_margined_assets_before.len();
+        let mut margin_index = builder.constant_usize(margined_asset_list_size);
         let mut applied = builder._false();
-        for i in 0..MARGINED_ASSET_LIST_SIZE {
+        for i in 0..margined_asset_list_size {
             let i_target = builder.constant_usize(i);
-            let is_empty = builder.is_zero(self.all_margined_assets_before[i].asset_index);
+            let is_empty = builder.is_equal_constant(
+                self.all_margined_assets_before[i].asset_index,
+                NIL_ASSET_INDEX,
+            );
             let flag = builder.and_not(is_empty, applied);
             margin_index = builder.select(flag, i_target, margin_index);
             applied = builder.or(applied, flag);
@@ -1162,7 +1197,7 @@ impl TxTarget {
         positions_before: &[AccountPositionTarget; NB_ACCOUNTS_PER_TX - 1],
         current_market_details_before: &MarketRiskDetailsTarget,
         all_market_risk_details_before: &[MarketRiskDetailsTarget; POSITION_LIST_SIZE],
-        all_margined_assets_before: &[MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
+        all_margined_assets_before: &[MarginedAssetTarget],
     ) -> [RiskInfoTarget; NB_ACCOUNTS_PER_TX - 1] {
         let default_strategy_index = builder.constant_usize(DEFAULT_STRATEGY_INDEX);
 
@@ -1225,7 +1260,7 @@ impl TxTarget {
             );
             let use_pool_non_usdc = builder.and(tx_type.is_share_burn_tx, is_pool_insurance_fund);
             let zero_non_usdc = builder.and_not(tx_type.is_share_burn_tx, is_pool_insurance_fund);
-            for i in 1..MARGINED_ASSET_LIST_SIZE {
+            for i in 1..margined_assets.len() {
                 let zeroed =
                     builder.select_bigint(zero_non_usdc, &zero_bigint, &margined_assets[i].balance);
                 margined_assets[i].balance = builder.select_bigint(
@@ -1641,7 +1676,7 @@ impl TxTarget {
     ) {
         for acc in 0..NB_ACCOUNTS_PER_TX {
             for ass in 0..NB_ASSETS_PER_TX {
-                for ma in 0..MARGINED_ASSET_LIST_SIZE {
+                for ma in 0..tx_state.margined_asset_list_size {
                     let is_margin_index =
                         builder.is_equal_constant(asset_margin_indices[ass], ma as u64);
                     tx_state.accounts[acc].margined_assets[ma] =
@@ -3574,14 +3609,11 @@ impl TxTarget {
         all_assets: &[AssetTarget; ASSET_LIST_SIZE],
         old_assets: &[AssetTarget; NB_ASSETS_PER_TX],
         new_assets: &[AssetTarget; NB_ASSETS_PER_TX],
-        all_margined_assets: &[MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
+        all_margined_assets: &[MarginedAssetTarget],
         margin_indices: &[Target; NB_ASSETS_PER_TX],
         old_margined_assets: &[MarginedAssetTarget; NB_ASSETS_PER_TX],
         new_margined_assets: &[MarginedAssetTarget; NB_ASSETS_PER_TX],
-    ) -> (
-        [AssetTarget; ASSET_LIST_SIZE],
-        [MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
-    ) {
+    ) -> ([AssetTarget; ASSET_LIST_SIZE], Vec<MarginedAssetTarget>) {
         let (diff0, diff1) = (
             diff_assets(builder, &new_assets[0], &old_assets[0]),
             diff_assets(builder, &new_assets[1], &old_assets[1]),
@@ -3613,8 +3645,8 @@ impl TxTarget {
         let diff_margined_asset_1 =
             diff_margined_assets(builder, &new_margined_assets[1], &old_margined_assets[1]);
 
-        let new_all_margined_assets: [MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE] = (0
-            ..MARGINED_ASSET_LIST_SIZE as u64)
+        let new_all_margined_assets: Vec<MarginedAssetTarget> = (0..all_margined_assets.len()
+            as u64)
             .map(|asset_index| {
                 let mut margined_asset = all_margined_assets[asset_index as usize].clone();
 
@@ -3638,9 +3670,7 @@ impl TxTarget {
 
                 margined_asset
             })
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap();
+            .collect();
 
         (new_all_assets, new_all_margined_assets)
     }
@@ -4180,6 +4210,13 @@ impl<T: Witness<F> + PartialWitnessCurve<F>, F: PrimeField64 + Extendable<5> + R
         self.set_register_info_target(&a.register_stack_before, &b.register_stack_before)?;
         for (t, asset) in a.all_assets_before.iter().zip(b.all_assets_before.iter()) {
             self.set_asset_target(t, asset)?;
+        }
+        if b.all_margined_assets_before.len() != a.all_margined_assets_before.len() {
+            anyhow::bail!(
+                "margined assets length mismatch: witness has {}, circuit expects {}",
+                b.all_margined_assets_before.len(),
+                a.all_margined_assets_before.len()
+            );
         }
         for (t, margined_asset) in a
             .all_margined_assets_before

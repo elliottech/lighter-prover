@@ -93,7 +93,7 @@ impl<F: PrimeField64 + Extendable<5> + RichField> Default for AccountDelta<F> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AccountDeltaTarget {
     pub account_index: Target,
     pub l1_address: BigUintTarget,

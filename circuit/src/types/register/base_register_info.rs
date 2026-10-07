@@ -186,7 +186,7 @@ impl BaseRegisterInfo {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 pub struct BaseRegisterInfoTarget {
     pub instruction_type: Target,
     pub market_index: Target,

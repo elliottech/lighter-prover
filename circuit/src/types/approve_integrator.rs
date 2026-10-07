@@ -114,7 +114,7 @@ impl ApproveIntegratorMessage {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ApproveIntegratorMessageTarget {
     pub account_index: Target,
     pub api_key_index: Target,

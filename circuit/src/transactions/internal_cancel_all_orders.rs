@@ -27,7 +27,7 @@ pub struct InternalCancelAllOrdersTx {
     pub market_index: u16,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct InternalCancelAllOrdersTxTarget {
     pub account_index: Target, // 48 bits
     pub market_index: Target,  // 8 bits, perps only

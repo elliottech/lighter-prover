@@ -86,7 +86,7 @@ impl SystemConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 pub struct SystemConfigTarget {
     pub liquidity_pool_index: Target,
     pub staking_pool_index: Target,

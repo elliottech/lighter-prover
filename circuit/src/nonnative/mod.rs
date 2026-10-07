@@ -32,7 +32,8 @@ use crate::uint::u32::witness::GeneratedValuesU32;
 use crate::utils::ceil_div_usize;
 pub mod split_nonnative;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(bound = "")]
 pub struct NonNativeTarget<FF: Field> {
     pub value: BigUintTarget,
     pub _phantom: PhantomData<FF>,
@@ -330,7 +331,6 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilderNonNative<F, D>
         self.connect_biguint(&sum_expected, &sum_actual);
 
         // Range-check result.
-
         let cmp = self.is_lte_biguint(&sum.value, &modulus);
         let one = self.one();
         self.connect(cmp.target, one);

@@ -107,7 +107,7 @@ impl<F: Field + Extendable<5> + RichField> ChangePubKeyMessage<F> {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChangePubKeyMessageTarget {
     pub account_index: Target,
     pub api_key_index: Target,

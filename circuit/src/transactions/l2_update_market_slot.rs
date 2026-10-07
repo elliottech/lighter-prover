@@ -33,7 +33,7 @@ pub struct L2UpdateMarketSlotTx {
     pub market_operator_account_index: i64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct L2UpdateMarketSlotTxTarget {
     pub account_index: Target,
     pub api_key_index: Target,

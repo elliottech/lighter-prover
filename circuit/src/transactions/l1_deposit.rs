@@ -53,7 +53,7 @@ pub struct L1DepositTx {
     pub accepted_amount: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct L1DepositTxTarget {
     pub account_index: Target,
     pub l1_address: BigUintTarget,

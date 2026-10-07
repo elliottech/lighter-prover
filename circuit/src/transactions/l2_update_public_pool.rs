@@ -44,7 +44,7 @@ pub struct L2UpdatePublicPoolTx {
     pub min_operator_share_rate: i64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct L2UpdatePublicPoolTxTarget {
     pub account_index: Target, // 48 bits
     pub api_key_index: Target, // 8 bits

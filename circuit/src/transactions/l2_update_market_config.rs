@@ -37,7 +37,7 @@ pub struct L2UpdateMarketConfigTx {
     pub funding_premium_multiplier: u16,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct L2UpdateMarketConfigTxTarget {
     pub account_index: Target,
     pub api_key_index: Target,

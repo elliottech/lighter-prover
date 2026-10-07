@@ -23,6 +23,7 @@ pub const NUM_HASH_OUT_ELTS: usize = 4;
 /// Represents a ~256 bit hash output.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(bound = "")]
+#[repr(transparent)]
 pub struct HashOut<F: Field> {
     pub elements: [F; NUM_HASH_OUT_ELTS],
 }
@@ -85,6 +86,10 @@ where
 }
 
 impl<F: RichField> GenericHashOut<F> for HashOut<F> {
+    fn for_each_element(&self, f: impl FnMut(F)) {
+        self.elements.into_iter().for_each(f);
+    }
+
     fn to_bytes(&self) -> Vec<u8> {
         self.elements
             .into_iter()
@@ -116,7 +121,7 @@ impl<F: Field> Default for HashOut<F> {
 }
 
 /// Represents a ~256 bit hash output.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct HashOutTarget {
     pub elements: [Target; NUM_HASH_OUT_ELTS],
 }
@@ -154,7 +159,7 @@ impl TryFrom<&[Target]> for HashOutTarget {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MerkleCapTarget(pub Vec<HashOutTarget>);
 
 /// Hash consisting of a byte array.

@@ -9,7 +9,9 @@ use core::ops::Range;
 
 use anyhow::Result;
 
+use crate::field::batch_util::batch_multiply_add_inplace;
 use crate::field::extension::{Extendable, FieldExtension};
+use crate::field::types::Field;
 use crate::gates::gate::Gate;
 use crate::gates::util::StridedConstraintConsumer;
 use crate::hash::hash_types::RichField;
@@ -19,13 +21,28 @@ use crate::iop::target::Target;
 use crate::iop::witness::{PartitionWitness, Witness, WitnessWrite};
 use crate::plonk::circuit_builder::CircuitBuilder;
 use crate::plonk::circuit_data::CommonCircuitData;
-use crate::plonk::vars::{EvaluationTargets, EvaluationVars, EvaluationVarsBase};
+use crate::plonk::vars::{
+    EvaluationTargets, EvaluationVars, EvaluationVarsBase, EvaluationVarsBaseBatch,
+};
 use crate::util::serialization::{Buffer, IoResult, Read, Write};
 
 /// Computes `sum alpha^i c_i` for a vector `c_i` of `num_coeffs` elements of the extension field.
 #[derive(Debug, Clone, Default)]
 pub struct ReducingExtensionGate<const D: usize> {
     pub num_coeffs: usize,
+}
+
+#[cfg(feature = "std")]
+fn reducing_extension_stack_scratch_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !std::env::var_os("LIGHTER_REDUCING_STACK").is_some_and(|value| value == "0")
+    })
+}
+
+#[cfg(not(feature = "std"))]
+fn reducing_extension_stack_scratch_enabled() -> bool {
+    true
 }
 
 impl<const D: usize> ReducingExtensionGate<D> {
@@ -124,6 +141,81 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for ReducingExtens
         for i in 0..self.num_coeffs {
             yield_constr.many((acc * alpha + coeffs[i] - accs[i]).to_basefield_array());
             acc = accs[i];
+        }
+    }
+
+    /// Contiguous-column fused evaluation: reads each wire as a contiguous
+    /// `n`-point column, evaluates one accumulator step at a time and
+    /// multiply-adds the filtered constraint rows straight into the shared
+    /// buffer, avoiding the per-point strided writes and per-point `Vec`
+    /// allocations of the default path.
+    fn eval_unfiltered_base_batch_accumulate(
+        &self,
+        vars_base: EvaluationVarsBaseBatch<F>,
+        filters: &[F],
+        combined_gate_constraints: &mut [F],
+    ) {
+        let n = vars_base.len();
+        assert_eq!(filters.len(), n);
+        assert!(combined_gate_constraints.len() >= <Self as Gate<F, D>>::num_constraints(self) * n);
+
+        let wires = vars_base.local_wires;
+        let ext = |start: usize, p: usize| {
+            let mut arr = [F::ZERO; D];
+            for (d, a) in arr.iter_mut().enumerate() {
+                *a = wires[(start + d) * n + p];
+            }
+            F::Extension::from_basefield_array(arr)
+        };
+
+        const STACK_POINTS: usize = 32;
+        const STACK_BASE_VALUES: usize = 128;
+        let use_stack = reducing_extension_stack_scratch_enabled()
+            && n <= STACK_POINTS
+            && D * n <= STACK_BASE_VALUES;
+        let mut alpha_stack = [F::Extension::ZERO; STACK_POINTS];
+        let mut acc_stack = [F::Extension::ZERO; STACK_POINTS];
+        let mut scratch_stack = [F::ZERO; STACK_BASE_VALUES];
+        let mut alpha_heap;
+        let mut acc_heap;
+        let mut scratch_heap;
+        let (alphas, accs, scratch): (&mut [F::Extension], &mut [F::Extension], &mut [F]) =
+            if use_stack {
+                (
+                    &mut alpha_stack[..n],
+                    &mut acc_stack[..n],
+                    &mut scratch_stack[..D * n],
+                )
+            } else {
+                alpha_heap = vec![F::Extension::ZERO; n];
+                acc_heap = vec![F::Extension::ZERO; n];
+                scratch_heap = vec![F::ZERO; D * n];
+                (&mut alpha_heap, &mut acc_heap, &mut scratch_heap)
+            };
+        for p in 0..n {
+            alphas[p] = ext(Self::wires_alpha().start, p);
+            accs[p] = ext(Self::wires_old_acc().start, p);
+        }
+
+        for i in 0..self.num_coeffs {
+            let coeff_start = Self::wires_coeff(i).start;
+            let acc_start = self.wires_accs(i).start;
+            for p in 0..n {
+                let next_acc = ext(acc_start, p);
+                let constraint = accs[p] * alphas[p] + ext(coeff_start, p) - next_acc;
+                let arr = constraint.to_basefield_array();
+                for (d, a) in arr.iter().enumerate() {
+                    scratch[d * n + p] = *a;
+                }
+                accs[p] = next_acc;
+            }
+            for d in 0..D {
+                batch_multiply_add_inplace(
+                    &mut combined_gate_constraints[(i * D + d) * n..][..n],
+                    &scratch[d * n..][..n],
+                    filters,
+                );
+            }
         }
     }
 

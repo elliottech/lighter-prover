@@ -214,7 +214,11 @@ mod tests {
     fn generate_trace_rejects_non_canonical_s() {
         let mut instance = crate::reference::deterministic_instance(1).unwrap();
         let mut signature_bytes = *instance.signature.as_bytes();
-        for (limb, chunk) in signature_bytes[..FP5_BYTES].chunks_exact_mut(4).enumerate() {
+        for (limb, chunk) in signature_bytes[..FP5_BYTES]
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .enumerate() {
             chunk.copy_from_slice(&(SCALAR_MODULUS_U32[limb] as u32).to_le_bytes());
         }
         instance.signature = SignatureBytes::from_array(signature_bytes);

@@ -27,7 +27,7 @@ pub struct InternalPendingUnlockTx {
     pub asset_index: u16,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct InternalPendingUnlockTxTarget {
     pub account_index: Target,
     pub asset_index: Target,

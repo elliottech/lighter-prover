@@ -7,7 +7,7 @@ readme = "../../README.md"
 
 [features]
 default = []
-plonky2-nightly = ["dep:plonky2", "dep:starky", "dep:anyhow"]
+plonky2-nightly = ["dep:plonky2", "dep:anyhow"]
 reference = ["p3-schnorr/reference"]
 # Exposes a deliberately unconstrained public-input-only circuit for tests and
 # benchmarks. It is not a Schnorr verifier and must never be used in production.
@@ -25,7 +25,6 @@ p3-schnorr = { path = "../p3-schnorr" }
 p3-symmetric.workspace = true
 p3-uni-stark.workspace = true
 plonky2 = { path = "../../../plonky2/plonky2", package = "plonky2", optional = true }
-starky = { path = "../../../plonky2/starky", package = "starky", optional = true }
 anyhow = { version = "1.0.40", default-features = false, optional = true }
 thiserror.workspace = true
 

@@ -8,6 +8,7 @@ use core::ops::Range;
 
 use anyhow::Result;
 
+use crate::field::batch_util::batch_multiply_add_inplace;
 use crate::field::extension::{Extendable, FieldExtension};
 use crate::gates::gate::Gate;
 use crate::gates::util::StridedConstraintConsumer;
@@ -18,7 +19,9 @@ use crate::iop::target::Target;
 use crate::iop::witness::{PartitionWitness, Witness, WitnessWrite};
 use crate::plonk::circuit_builder::CircuitBuilder;
 use crate::plonk::circuit_data::{CircuitConfig, CommonCircuitData};
-use crate::plonk::vars::{EvaluationTargets, EvaluationVars, EvaluationVarsBase};
+use crate::plonk::vars::{
+    EvaluationTargets, EvaluationVars, EvaluationVarsBase, EvaluationVarsBaseBatch,
+};
 use crate::util::serialization::{Buffer, IoResult, Read, Write};
 
 /// A gate which can perform a weighted multiply-add, i.e. `result = c0.x.y + c1.z`. If the config
@@ -106,6 +109,72 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for ArithmeticExte
                 (multiplicand_0 * multiplicand_1).scalar_mul(const_0) + addend.scalar_mul(const_1);
 
             yield_constr.many((output - computed_output).to_basefield_array());
+        }
+    }
+
+    /// Contiguous-column fused evaluation: reads each wire as a contiguous
+    /// `n`-point column and multiply-adds the filtered constraint rows
+    /// straight into the shared buffer, avoiding the per-point strided writes
+    /// of the default path.
+    fn eval_unfiltered_base_batch_accumulate(
+        &self,
+        vars_base: EvaluationVarsBaseBatch<F>,
+        filters: &[F],
+        combined_gate_constraints: &mut [F],
+    ) {
+        let n = vars_base.len();
+        assert_eq!(filters.len(), n);
+        assert!(combined_gate_constraints.len() >= <Self as Gate<F, D>>::num_constraints(self) * n);
+
+        let wires = vars_base.local_wires;
+        let constants = vars_base.local_constants;
+        let const_0 = &constants[..n];
+        let const_1 = &constants[n..2 * n];
+        let ext = |start: usize, p: usize| {
+            let mut arr = [F::ZERO; D];
+            for (d, a) in arr.iter_mut().enumerate() {
+                *a = wires[(start + d) * n + p];
+            }
+            F::Extension::from_basefield_array(arr)
+        };
+
+        // One `D x n` constraint block, reused across the `num_ops` operations
+        // (the point loop below fully overwrites it per op). Stack-allocated for
+        // the usual 32-point batch to avoid a malloc/free per batch.
+        const STACK_SCRATCH: usize = 128;
+        let scratch_len = D * n;
+        let mut scratch_stack = [F::ZERO; STACK_SCRATCH];
+        let mut scratch_heap;
+        let scratch: &mut [F] = if scratch_len <= STACK_SCRATCH {
+            &mut scratch_stack[..scratch_len]
+        } else {
+            scratch_heap = vec![F::ZERO; scratch_len];
+            &mut scratch_heap
+        };
+        for i in 0..self.num_ops {
+            let m0_start = Self::wires_ith_multiplicand_0(i).start;
+            let m1_start = Self::wires_ith_multiplicand_1(i).start;
+            let addend_start = Self::wires_ith_addend(i).start;
+            let output_start = Self::wires_ith_output(i).start;
+            for p in 0..n {
+                let multiplicand_0 = ext(m0_start, p);
+                let multiplicand_1 = ext(m1_start, p);
+                let addend = ext(addend_start, p);
+                let output = ext(output_start, p);
+                let computed_output = (multiplicand_0 * multiplicand_1).scalar_mul(const_0[p])
+                    + addend.scalar_mul(const_1[p]);
+                let arr = (output - computed_output).to_basefield_array();
+                for (d, a) in arr.iter().enumerate() {
+                    scratch[d * n + p] = *a;
+                }
+            }
+            for d in 0..D {
+                batch_multiply_add_inplace(
+                    &mut combined_gate_constraints[(i * D + d) * n..][..n],
+                    &scratch[d * n..][..n],
+                    filters,
+                );
+            }
         }
     }
 

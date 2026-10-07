@@ -70,7 +70,9 @@ impl<F: RichField, H: Hasher<F>> Challenger<F, H> {
     }
 
     pub fn observe_hash<OH: Hasher<F>>(&mut self, hash: OH::Hash) {
-        self.observe_elements(&hash.to_vec())
+        // Absorb the same elements in the same order without materializing
+        // the `to_vec` temporary.
+        hash.for_each_element(|element| self.observe_element(element));
     }
 
     pub fn observe_cap<OH: Hasher<F>>(&mut self, cap: &MerkleCap<F, OH>) {
@@ -110,9 +112,13 @@ impl<F: RichField, H: Hasher<F>> Challenger<F, H> {
     where
         F: RichField + Extendable<D>,
     {
-        let mut arr = [F::ZERO; D];
-        arr.copy_from_slice(&self.get_n_challenges(D));
-        F::Extension::from_basefield_array(arr)
+        // `get_n_challenges(D)` heap-allocates a `D`-element `Vec` that is
+        // copied into `arr` and dropped immediately. Drawing the coefficients
+        // directly keeps the identical draw order — `from_fn` evaluates its
+        // closure for indices 0..D in order, which is exactly the order
+        // `get_n_challenges` pushes in — so the transcript is unchanged, and
+        // `get_hash` already uses this idiom in this file.
+        F::Extension::from_basefield_array(core::array::from_fn(|_| self.get_challenge()))
     }
 
     pub fn get_n_extension_challenges<const D: usize>(&mut self, n: usize) -> Vec<F::Extension>

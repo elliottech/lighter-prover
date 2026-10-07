@@ -202,7 +202,7 @@ pub fn schnorr_sign_hashed_message(
 /////////////////////////////////////////////
 /////////////////////////////////////////////
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SchnorrSigTarget {
     pub s: NonNativeTarget<ECgFp5Scalar>,
     pub e: NonNativeTarget<ECgFp5Scalar>,

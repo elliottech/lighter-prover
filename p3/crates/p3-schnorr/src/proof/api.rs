@@ -47,7 +47,7 @@ pub fn schnorr_stark_config() -> SignatureBatchStarkConfig {
         query_proof_of_work_bits: PLONKY2_FRI_PROOF_OF_WORK_BITS,
         mmcs: challenge_mmcs,
     };
-    let pcs = Pcs::new(Radix2DitParallel::default(), val_mmcs, fri_params);
+    let pcs = Pcs::new(crate::metal_dft::MetalDft::default(), val_mmcs, fri_params);
     let challenger = DuplexChallenger::new(perm);
     StarkConfig::new(pcs, challenger)
 }

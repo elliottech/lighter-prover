@@ -14,7 +14,7 @@ use crate::comparison::CircuitBuilderSubtractiveComparison;
 use crate::eddsa::gadgets::base_field::QuinticExtensionTarget;
 use crate::eddsa::schnorr::hash_to_quintic_extension_circuit;
 use crate::tx_interface::{Apply, TxHash, Verify};
-use crate::types::config::{BIG_U96_LIMBS, Builder, F};
+use crate::types::config::{BIG_U96_LIMBS, BIG_U128_LIMBS, Builder, F};
 use crate::types::constants::*;
 use crate::types::market_details::MarketFlags;
 use crate::types::tx_state::TxState;
@@ -39,7 +39,7 @@ pub struct L2UpdateLeverageTx {
     pub margin_mode: u8,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct L2UpdateLeverageTxTarget {
     pub account_index: Target,
     pub api_key_index: Target,
@@ -225,6 +225,12 @@ impl Apply for L2UpdateLeverageTxTarget {
             tx_state.market.public_market_index,
         );
 
+        let old_position_initial_margin_fraction = tx_state.positions[OWNER_ACCOUNT_ID]
+            .get_initial_margin_fraction(
+                builder,
+                tx_state.market_risk_details.default_initial_margin_fraction,
+                tx_state.market_risk_details.min_initial_margin_fraction,
+            );
         tx_state.positions[OWNER_ACCOUNT_ID].initial_margin_fraction = builder.select(
             self.success,
             self.initial_margin_fraction,
@@ -263,21 +269,41 @@ impl Apply for L2UpdateLeverageTxTarget {
             ); // 16 bits
         let position_initial_margin_fraction_big =
             builder.target_to_biguint_single_limb_unsafe(position_initial_margin_fraction);
+        let old_position_initial_margin_fraction_big =
+            builder.target_to_biguint_single_limb_unsafe(old_position_initial_margin_fraction);
 
         // mark_price * quote_multiplier * margin_fraction_multiplier * initial_margin_fraction
-        let common_multiplier = builder.mul_biguint_non_carry(
+        let new_common_multiplier = builder.mul_biguint_non_carry(
             &normalized_position_notional_multiplier,
             &position_initial_margin_fraction_big,
+            BIG_U96_LIMBS,
+        );
+        let old_common_multiplier = builder.mul_biguint_non_carry(
+            &normalized_position_notional_multiplier,
+            &old_position_initial_margin_fraction_big,
             BIG_U96_LIMBS,
         );
 
         let position_abs_big =
             builder.biguint_u16_to_biguint(&tx_state.positions[OWNER_ACCOUNT_ID].position.abs);
-        let position_requirement =
-            builder.mul_biguint_non_carry(&position_abs_big, &common_multiplier, BIG_U96_LIMBS);
+        let new_position_requirement =
+            builder.mul_biguint_non_carry(&position_abs_big, &new_common_multiplier, BIG_U96_LIMBS);
+        let old_position_requirement =
+            builder.mul_biguint_non_carry(&position_abs_big, &old_common_multiplier, BIG_U96_LIMBS);
+        let initial_margin_requirement = builder.add_biguint_non_carry(
+            &old_risk_parameters.initial_margin_requirement,
+            &new_position_requirement,
+            BIG_U128_LIMBS,
+        );
+        let (initial_margin_requirement, borrow) =
+            builder.try_sub_biguint(&initial_margin_requirement, &old_position_requirement);
+        builder.conditional_assert_zero(self.success, borrow.0);
+        let (fits_u96, initial_margin_requirement) =
+            builder.try_trim_biguint(&initial_margin_requirement, BIG_U96_LIMBS);
+        builder.conditional_assert_true(self.success, fits_u96);
 
         let mut new_risk_parameters = old_risk_parameters.clone();
-        new_risk_parameters.initial_margin_requirement = position_requirement;
+        new_risk_parameters.initial_margin_requirement = initial_margin_requirement;
 
         let is_valid_risk_change =
             old_risk_parameters.is_valid_risk_change(builder, &new_risk_parameters);

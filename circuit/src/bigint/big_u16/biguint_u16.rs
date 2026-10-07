@@ -18,7 +18,7 @@ use crate::uint::u16::witness::{GeneratedValuesU16, WitnessU16};
 use crate::uint::u32::gadgets::arithmetic_u32::U32Target;
 use crate::utils::ceil_div_usize;
 
-#[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BigUintU16Target {
     pub limbs: Vec<U16Target>,
 }

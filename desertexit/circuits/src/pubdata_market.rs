@@ -117,3 +117,133 @@ pub fn all_public_market_details_hash(
     }
     builder.hash_n_to_hash_no_pad::<Poseidon2Hash>(bucket_hash_elements)
 }
+
+#[cfg(test)]
+mod tests {
+    use anyhow::Result;
+    use circuit::bigint::big_u16::{BigIntU16Target, CircuitBuilderBiguint16};
+    use circuit::bigint::bigint::{CircuitBuilderBigInt, SignTarget};
+    use circuit::builder::Builder;
+    use circuit::types::config::{C, CIRCUIT_CONFIG, D, F};
+    use circuit::types::market_details::MarketRiskDetailsTarget;
+    use num::bigint::Sign;
+    use num::{BigInt, Signed};
+    use plonky2::field::types::Field;
+    use plonky2::iop::witness::PartialWitness;
+    use rand::{Rng, thread_rng};
+
+    use crate::pubdata_account::PubdataAccountPositionTarget;
+    use crate::pubdata_market::PubdataMarketDetailsTarget;
+
+    fn constant_bigint_u16(builder: &mut Builder<F, D>, value: &BigInt) -> BigIntU16Target {
+        BigIntU16Target {
+            abs: builder.constant_biguint_u16(&value.abs().to_biguint().unwrap()),
+            sign: SignTarget::new_unsafe(match value.sign() {
+                Sign::Plus => builder.one(),
+                Sign::Minus => builder.neg_one(),
+                Sign::NoSign => builder.zero(),
+            }),
+        }
+    }
+
+    #[test]
+    fn test_hash_equivalence() -> Result<()> {
+        let mut rng = thread_rng();
+
+        let mut builder = Builder::<F, D>::new(CIRCUIT_CONFIG);
+
+        let mut markets = vec![];
+        let mut pubdata_markets = vec![];
+        for _ in 0..255 {
+            let funding_rate_prefix_sum = constant_bigint_u16(
+                &mut builder,
+                &num::BigInt::from(rng.r#gen::<u64>() & ((1u64 << 63) - 1)),
+            );
+            let mark_price = builder.constant(F::from_canonical_u64(rng.r#gen::<u32>() as u64));
+            let qm20: u32 = rng.r#gen::<u32>() & ((1u32 << 20) - 1);
+            let quote_multiplier = builder.constant(F::from_canonical_u64(qm20 as u64));
+            markets.push(MarketRiskDetailsTarget {
+                funding_rate_prefix_sum: funding_rate_prefix_sum.clone(),
+                mark_price,
+                quote_multiplier,
+                ..MarketRiskDetailsTarget::default()
+            });
+            pubdata_markets.push(PubdataMarketDetailsTarget {
+                funding_rate_prefix_sum: funding_rate_prefix_sum.clone(),
+                mark_price,
+                quote_multiplier,
+            });
+        }
+
+        let (_, hash1, _) = circuit::types::market_details::all_market_details_hashes(
+            &mut builder,
+            &markets.try_into().unwrap(),
+        );
+        let hash2 = crate::pubdata_market::all_public_market_details_hash(
+            &mut builder,
+            &pubdata_markets.try_into().unwrap(),
+        );
+        builder.connect_hashes(hash1, hash2);
+
+        let data = builder.build::<C>();
+        data.verify(data.prove(PartialWitness::new()).unwrap())
+    }
+
+    #[test]
+    fn test_get_funding_delta_for_position_and_market_equivalence() -> Result<()> {
+        let mut rng = thread_rng();
+
+        let mut builder = Builder::<F, D>::new(CIRCUIT_CONFIG);
+
+        for _ in 0..100 {
+            let funding_rate_prefix_sum = constant_bigint_u16(
+                &mut builder,
+                &num::BigInt::from(rng.r#gen::<u64>() & ((1u64 << 63) - 1)),
+            );
+            let mark_price = builder.constant(F::from_canonical_u64(rng.r#gen::<u32>() as u64));
+            let quote_multiplier = builder.constant(F::from_canonical_u64(
+                (rng.r#gen::<u32>() & ((1u32 << 20) - 1)) as u64,
+            ));
+            let market = MarketRiskDetailsTarget {
+                funding_rate_prefix_sum: funding_rate_prefix_sum.clone(),
+                mark_price,
+                quote_multiplier,
+                ..MarketRiskDetailsTarget::default()
+            };
+            let pubdata_market = PubdataMarketDetailsTarget {
+                funding_rate_prefix_sum: funding_rate_prefix_sum.clone(),
+                mark_price,
+                quote_multiplier,
+            };
+
+            let position = constant_bigint_u16(
+                &mut builder,
+                &if rng.r#gen::<bool>() {
+                    num::BigInt::from(rng.gen_range(0u128..=(1u128 << 56)))
+                } else {
+                    -num::BigInt::from(rng.gen_range(0u128..=(1u128 << 56)))
+                },
+            );
+
+            let pos = PubdataAccountPositionTarget {
+                position: position.clone(),
+                last_funding_rate_prefix_sum: funding_rate_prefix_sum.clone(),
+            };
+
+            let pnl1 = circuit::liquidation::get_funding_delta_for_position_and_market(
+                &mut builder,
+                &circuit::types::account_position::AccountPositionTarget {
+                    position: position.clone(),
+                    last_funding_rate_prefix_sum: funding_rate_prefix_sum.clone(),
+                    ..circuit::types::account_position::AccountPositionTarget::default()
+                },
+                &market,
+            );
+            let pnl2 = pubdata_market.get_funding_delta_for_position_and_market(&mut builder, &pos);
+            builder.connect_bigint(&pnl1, &pnl2);
+        }
+
+        let data = builder.build::<C>();
+        data.verify(data.prove(PartialWitness::new()).unwrap())
+    }
+}

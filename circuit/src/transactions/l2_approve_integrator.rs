@@ -42,7 +42,7 @@ pub struct L2ApproveIntegratorTx {
     pub approval_expiry: i64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct L2ApproveIntegratorTxTarget {
     pub account_index: Target,
     pub api_key_index: Target,

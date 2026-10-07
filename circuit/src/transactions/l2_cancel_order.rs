@@ -41,7 +41,7 @@ pub struct L2CancelOrderTx {
     pub index: i64, // cloindex or oindex
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct L2CancelOrderTxTarget {
     pub account_index: Target,       // 48 bits
     pub api_key_index: Target,       // 8 bits

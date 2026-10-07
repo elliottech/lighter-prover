@@ -22,7 +22,8 @@ use crate::iop::witness::{PartitionWitness, Witness, WitnessWrite};
 use crate::plonk::circuit_builder::CircuitBuilder;
 use crate::plonk::circuit_data::CommonCircuitData;
 use crate::plonk::vars::{
-    EvaluationTargets, EvaluationVars, EvaluationVarsBase, EvaluationVarsBasePacked,
+    EvaluationTargets, EvaluationVars, EvaluationVarsBase, EvaluationVarsBaseBatch,
+    EvaluationVarsBasePacked,
 };
 use crate::util::serialization::{Buffer, IoResult, Read, Write};
 
@@ -197,16 +198,13 @@ impl<F: RichField + Extendable<D> + Poseidon2, const D: usize> Gate<F, D> for Po
         constraints
     }
 
-    fn eval_unfiltered_base_batch(
-        &self,
-        vars_base: crate::plonk::vars::EvaluationVarsBaseBatch<F>,
-    ) -> Vec<F> {
+    fn eval_unfiltered_base_batch(&self, vars_base: EvaluationVarsBaseBatch<F>) -> Vec<F> {
         self.eval_unfiltered_base_batch_packed(vars_base)
     }
 
     fn eval_unfiltered_base_batch_accumulate(
         &self,
-        vars_base: crate::plonk::vars::EvaluationVarsBaseBatch<F>,
+        vars_base: EvaluationVarsBaseBatch<F>,
         filters: &[F],
         combined_gate_constraints: &mut [F],
     ) {
@@ -239,7 +237,17 @@ impl<F: RichField + Extendable<D> + Poseidon2, const D: usize> Gate<F, D> for Po
             }};
         }
 
-        let mut states = vec![[F::ZERO; WIDTH]; n];
+        // Like the constraint-row scratch above: batches are 32 points, so the
+        // per-point permutation states live on the stack too, with a heap
+        // fallback only for oversized batches.
+        let mut states_stack = [[F::ZERO; WIDTH]; 64];
+        let mut states_heap;
+        let states: &mut [[F; WIDTH]] = if n <= 64 {
+            &mut states_stack[..n]
+        } else {
+            states_heap = vec![[F::ZERO; WIDTH]; n];
+            &mut states_heap
+        };
 
         // Assert that `swap` is binary.
         let swap = col(Self::WIRE_SWAP);
@@ -832,7 +840,6 @@ mod tests {
     use crate::iop::witness::PartialWitness;
     use crate::plonk::circuit_data::CircuitConfig;
     use crate::plonk::config::{GenericConfig, Poseidon2GoldilocksConfig};
-    use crate::plonk::vars::EvaluationVarsBaseBatch;
 
     #[test]
     fn wire_indices() {
@@ -932,7 +939,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::chunks_exact_to_as_chunks)]
     fn direct_filtered_accumulation_matches_materialized_batch() {
         const D: usize = 2;
         const N: usize = 11;

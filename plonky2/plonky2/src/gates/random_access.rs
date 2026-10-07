@@ -6,6 +6,7 @@ use alloc::{
     vec::Vec,
 };
 use core::marker::PhantomData;
+use core::mem::MaybeUninit;
 
 use anyhow::Result;
 use itertools::Itertools;
@@ -14,7 +15,7 @@ use crate::field::extension::Extendable;
 use crate::field::packable::Packable;
 use crate::field::packed::PackedField;
 use crate::field::types::Field;
-use crate::gates::gate::Gate;
+use crate::gates::gate::{Gate, U32QuotientGate};
 use crate::gates::packed_util::PackedEvaluableBase;
 use crate::gates::util::StridedConstraintConsumer;
 use crate::hash::hash_types::RichField;
@@ -332,7 +333,17 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for RandomAccessGa
         // so only its `vec_size / 2` output columns need scratch storage. The
         // former path zero-filled and copied all `vec_size` input columns here,
         // then immediately consumed and discarded that mirror.
-        let mut items = Vec::with_capacity((vec_size / 2) * n);
+        let item_count = (vec_size / 2) * n;
+        // The ranked shape is bits=4 over a 32-point batch: eight folded
+        // columns fit exactly here. Larger generic shapes retain heap storage.
+        let mut items_stack = [MaybeUninit::<F>::uninit(); 8 * 32];
+        let mut items_heap;
+        let items_uninit: &mut [MaybeUninit<F>] = if item_count <= items_stack.len() {
+            &mut items_stack[..item_count]
+        } else {
+            items_heap = vec![MaybeUninit::uninit(); item_count];
+            &mut items_heap
+        };
 
         for copy in 0..self.num_copies {
             // Assert that each bit wire value is indeed boolean.
@@ -366,7 +377,6 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for RandomAccessGa
             // each pair based on the corresponding bit. Build the first level
             // straight from the wire columns; this performs the same field
             // expression in the same order as the mirror-backed reference.
-            items.clear();
             if self.bits != 0 {
                 let b = col(self.wire_bit(0, copy));
                 for k in 0..vec_size / 2 {
@@ -375,10 +385,16 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for RandomAccessGa
                     for p in 0..n {
                         let x = xs[p];
                         let y = ys[p];
-                        items.push(x + b[p] * (y - x));
+                        items_uninit[k * n + p].write(x + b[p] * (y - x));
                     }
                 }
             }
+            // SAFETY: With zero index bits the slice is empty. Otherwise the
+            // first selector level initialized every element exactly once;
+            // `MaybeUninit<F>` has the same layout and alignment as `F`.
+            let items = unsafe {
+                core::slice::from_raw_parts_mut(items_uninit.as_mut_ptr().cast::<F>(), item_count)
+            };
             let mut level_size = vec_size / 2;
             for i in 1..self.bits {
                 let b = col(self.wire_bit(i, copy));
@@ -507,6 +523,14 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for RandomAccessGa
     fn num_constraints(&self) -> usize {
         let constraints_per_copy = self.bits + 2;
         self.num_copies * constraints_per_copy + self.num_extra_constants
+    }
+
+    fn u32_quotient_gate(&self) -> Option<U32QuotientGate> {
+        Some(U32QuotientGate::RandomAccess {
+            bits: self.bits,
+            num_ops: self.num_copies,
+            num_extra_constants: self.num_extra_constants,
+        })
     }
 
     fn extra_constant_wires(&self) -> Vec<(usize, usize)> {
@@ -677,7 +701,7 @@ mod tests {
         // raw words.
         fn value(i: usize) -> F {
             let small = ((i as u64).wrapping_mul(0x9e37_79b9) ^ 0x5a5a_a5a5) & 0xffff;
-            if i.is_multiple_of(3) {
+            if i % 3 == 0 {
                 GoldilocksField(F::ORDER + small)
             } else {
                 F::from_canonical_u64(small)

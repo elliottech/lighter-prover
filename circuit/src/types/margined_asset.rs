@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 use anyhow::Result;
+use log::warn;
 use num::{BigUint, Zero};
 use plonky2::field::extension::Extendable;
 use plonky2::field::types::PrimeField64;
@@ -19,7 +20,6 @@ use crate::deserializers;
 use crate::eddsa::gadgets::curve::PartialWitnessCurve;
 use crate::poseidon2::Poseidon2Hash;
 use crate::types::config::BIG_U96_LIMBS;
-use crate::types::constants::*;
 use crate::uint::u32::gadgets::arithmetic_u32::U32Target;
 use crate::utils::CircuitBuilderUtils;
 
@@ -108,7 +108,7 @@ impl MarginedAsset {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct MarginedAssetTarget {
     pub asset_index: Target,
     pub loan_to_value: Target,
@@ -333,11 +333,17 @@ impl MarginedAssetTarget {
 pub fn random_access_margined_assets(
     builder: &mut Builder,
     access_index: Target,
-    v: &[MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
+    v: &[MarginedAssetTarget],
 ) -> MarginedAssetTarget {
+    if v.len().is_power_of_two() {
+        warn!(
+            "The length of the margined asset list is a power of two, which is in-efficient for random access"
+        );
+    }
+
     let mut vv = vec![];
     vv.extend_from_slice(v);
-    vv.push(MarginedAssetTarget::empty(builder)); // append an empty asset for the case when we accessing nil index
+    vv.push(MarginedAssetTarget::empty(builder)); // append an empty asset for the case when we accessing non-margin asset
     MarginedAssetTarget {
         asset_index: builder
             .random_access(access_index, vv.iter().map(|x| x.asset_index).collect()),
@@ -501,7 +507,7 @@ pub fn connect_margined_assets(
 
 pub fn all_margined_assets_hash(
     builder: &mut Builder,
-    assets: &[MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
+    assets: &[MarginedAssetTarget],
 ) -> HashOutTarget {
     let mut elements = vec![];
     assets.iter().for_each(|asset| {

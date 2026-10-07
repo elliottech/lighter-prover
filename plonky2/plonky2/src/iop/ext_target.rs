@@ -17,6 +17,48 @@ use crate::plonk::circuit_builder::CircuitBuilder;
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 pub struct ExtensionTarget<const D: usize>(pub [Target; D]);
 
+// serde has no impls for const-generic-length arrays (`[T; D]` with `D` a
+// generic parameter), so the derive cannot be used here. These manual impls
+// encode the array exactly the way serde's derive encodes fixed-size arrays:
+// as a `D`-element tuple, with no length prefix.
+impl<const D: usize> serde::Serialize for ExtensionTarget<D> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeTuple;
+        let mut tup = serializer.serialize_tuple(D)?;
+        for target in &self.0 {
+            tup.serialize_element(target)?;
+        }
+        tup.end()
+    }
+}
+
+impl<'de, const D: usize> serde::Deserialize<'de> for ExtensionTarget<D> {
+    fn deserialize<De: serde::Deserializer<'de>>(deserializer: De) -> Result<Self, De::Error> {
+        struct ExtensionTargetVisitor<const D: usize>;
+        impl<'de, const D: usize> serde::de::Visitor<'de> for ExtensionTargetVisitor<D> {
+            type Value = ExtensionTarget<D>;
+
+            fn expecting(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+                write!(f, "an extension target of {D} base targets")
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut targets = [Target::default(); D];
+                for (i, slot) in targets.iter_mut().enumerate() {
+                    *slot = seq
+                        .next_element()?
+                        .ok_or_else(|| serde::de::Error::invalid_length(i, &self))?;
+                }
+                Ok(ExtensionTarget(targets))
+            }
+        }
+        deserializer.deserialize_tuple(D, ExtensionTargetVisitor::<D>)
+    }
+}
+
 impl<const D: usize> Default for ExtensionTarget<D> {
     fn default() -> Self {
         Self([Target::default(); D])
@@ -150,7 +192,6 @@ pub fn flatten_target<const D: usize>(l: &[ExtensionTarget<D>]) -> Vec<Target> {
 }
 
 /// Batch every D-sized chunks into extension targets.
-#[allow(clippy::chunks_exact_to_as_chunks)]
 pub fn unflatten_target<const D: usize>(l: &[Target]) -> Vec<ExtensionTarget<D>> {
     debug_assert_eq!(l.len() % D, 0);
     l.chunks_exact(D)

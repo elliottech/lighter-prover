@@ -33,7 +33,7 @@ pub struct InternalSettleBinaryOptionsPositionTx {
     pub market_index: i16,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct InternalSettleBinaryOptionsPositionTxTarget {
     pub account_index: Target,
     pub market_index: Target,

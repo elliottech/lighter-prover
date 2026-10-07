@@ -214,14 +214,17 @@ unsafe impl PackedField for WideGoldilocksField {
         }
     }
 
+    /// Delegates to the two `NeonGoldilocksField` halves, each of which fuses
+    /// its lane pair into one interleaved multiply-accumulate-reduce block.
+    /// Routing lane by lane through the scalar path instead would emit four
+    /// separate assembly blocks; the compiler schedules a block as a unit, so
+    /// their serial dependency chains could not overlap.
     #[inline]
     fn multiply_accumulate(&self, x: Self, y: Self) -> Self {
-        let out = self.lanes();
-        let lhs = x.lanes();
-        let rhs = y.lanes();
-        Self::from_lanes(core::array::from_fn(|lane| {
-            Field::multiply_accumulate(&out[lane], lhs[lane], rhs[lane])
-        }))
+        Self([
+            self.0[0].multiply_accumulate(x.0[0], y.0[0]),
+            self.0[1].multiply_accumulate(x.0[1], y.0[1]),
+        ])
     }
 }
 
@@ -368,6 +371,78 @@ mod tests {
                     packed_a.square().as_slice(),
                     core::array::from_fn::<_, 4, _>(|lane| a[lane].square())
                 );
+            }
+        }
+    }
+
+    /// The packed `multiply_accumulate` override must agree with the scalar one
+    /// on the RAW `u64` representative, not merely modulo `ORDER`.
+    ///
+    /// `GoldilocksField`'s `PartialEq` canonicalises, so the assertions above
+    /// would pass for any congruent value. Non-canonical representatives do
+    /// reach Merkle hashing and witness comparison in this prover, so the
+    /// packed and scalar paths must be bit-identical.
+    #[test]
+    fn multiply_accumulate_matches_scalar_raw_representative() {
+        fn raw(x: GoldilocksField) -> u64 {
+            x.0
+        }
+
+        let values = boundary_values();
+        // xorshift64*, so the test needs no rng dependency and is reproducible.
+        let mut s: u64 = 0xDEAD_BEEF_CAFE_F00D;
+        let mut next = move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            GoldilocksField(s)
+        };
+
+        let mut check =
+            |acc: [GoldilocksField; 4], x: [GoldilocksField; 4], y: [GoldilocksField; 4]| {
+                let packed = WideGoldilocksField::from_slice(&acc).multiply_accumulate(
+                    *WideGoldilocksField::from_slice(&x),
+                    *WideGoldilocksField::from_slice(&y),
+                );
+                let got: [u64; 4] = core::array::from_fn(|lane| raw(packed.as_slice()[lane]));
+                let want: [u64; 4] = core::array::from_fn(|lane| {
+                    raw(Field::multiply_accumulate(&acc[lane], x[lane], y[lane]))
+                });
+                assert_eq!(got, want, "acc={acc:?} x={x:?} y={y:?}");
+            };
+
+        // Every boundary triple, rotated across lanes so each lane sees a
+        // different combination (and therefore a different borrow/carry mix).
+        for i in 0..values.len() {
+            for j in 0..values.len() {
+                for k in 0..values.len() {
+                    let acc = core::array::from_fn(|lane| values[(i + lane) % values.len()]);
+                    let x = core::array::from_fn(|lane| values[(j + 2 * lane) % values.len()]);
+                    let y = core::array::from_fn(|lane| values[(k + 3 * lane) % values.len()]);
+                    check(acc, x, y);
+                }
+            }
+        }
+
+        for _ in 0..200_000 {
+            let acc = core::array::from_fn(|_| next());
+            let x = core::array::from_fn(|_| next());
+            let y = core::array::from_fn(|_| next());
+            check(acc, x, y);
+        }
+
+        // Random accumulator against boundary operands: where a wrong carry
+        // fold hides.
+        for &v in values.iter() {
+            for _ in 0..2_000 {
+                let acc = core::array::from_fn(|_| next());
+                let x = core::array::from_fn(|_| v);
+                let y = core::array::from_fn(|_| next());
+                check(acc, x, y);
+                let acc = core::array::from_fn(|_| v);
+                let x = core::array::from_fn(|_| next());
+                let y = core::array::from_fn(|_| next());
+                check(acc, x, y);
             }
         }
     }

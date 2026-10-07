@@ -138,7 +138,6 @@ pub struct StarkProofWithPublicInputs<
     /// A STARK proof.
     pub proof: StarkProof<F, C, D>,
     /// Public inputs associated to this STARK proof.
-    // TODO: Maybe make it generic over a `S: Stark` and replace with `[F; S::PUBLIC_INPUTS]`.
     pub public_inputs: Vec<F>,
 }
 
@@ -191,7 +190,6 @@ pub struct StarkProofChallengesTarget<const D: usize> {
     pub fri_challenges: FriChallengesTarget<D>,
 }
 /// Randomness for all STARK proofs contained in a MultiProof.
-// TODO: remove?
 #[derive(Debug)]
 pub struct MultiProofChallenges<F: RichField + Extendable<D>, const D: usize, const N: usize> {
     /// Randomness used in each STARK proof.

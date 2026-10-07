@@ -54,7 +54,7 @@ impl Default for BinaryOptionsPosition {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct BinaryOptionsPositionTarget {
     pub public_market_index: Target, // 48 bits
     pub size: BigIntU16Target,       // 56 bits

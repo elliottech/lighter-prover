@@ -72,8 +72,7 @@ where
     pub account_trading_mode: u8,
 
     #[serde(rename = "ma")]
-    #[serde(deserialize_with = "deserializers::margined_account_assets")]
-    pub margined_assets: [AccountMarginedAsset; MARGINED_ASSET_LIST_SIZE], // 96 bits
+    pub margined_assets: Vec<AccountMarginedAsset>, // 96 bits
 
     #[serde(rename = "ab")]
     #[serde(deserialize_with = "deserializers::aggregated_balances")]
@@ -148,7 +147,9 @@ where
             l1_address: BigUint::ZERO,
             account_type: 0,
             account_trading_mode: ACCOUNT_ACCOUNT_TRADING_MODE_SIMPLE,
-            margined_assets: [AccountMarginedAsset::empty(); MARGINED_ASSET_LIST_SIZE],
+            // Default account has zero-length margined assets; the witness setter treats an empty
+            // list as `margined_asset_list_size` empty entries.
+            margined_assets: Vec::new(),
             aggregated_balances: [BigInt::ZERO; NB_ASSETS_PER_TX],
             positions: array::from_fn(|_| AccountPosition::default()),
             public_pool_shares: array::from_fn(|_| PublicPoolShare::default()),
@@ -170,7 +171,8 @@ where
         }
     }
 }
-#[derive(Debug, Clone)]
+#[serde_with::serde_as]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AccountTarget {
     pub master_account_index: Target,
     pub account_index: Target,
@@ -178,8 +180,9 @@ pub struct AccountTarget {
     pub account_type: Target,
     pub account_trading_mode: Target,
 
-    pub margined_assets: [AccountMarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
+    pub margined_assets: Vec<AccountMarginedAssetTarget>,
     pub aggregated_balances: [BigIntTarget; NB_ASSETS_PER_TX],
+    #[serde_as(as = "[_; POSITION_LIST_SIZE]")]
     pub positions: [AccountPositionTarget; POSITION_LIST_SIZE],
     pub binary_options_position: BinaryOptionsPositionTarget,
 
@@ -212,7 +215,9 @@ impl Default for AccountTarget {
             account_type: Target::default(),
             account_trading_mode: Target::default(),
 
-            margined_assets: array::from_fn(|_| AccountMarginedAssetTarget::default()),
+            // Default target has zero-length margined assets; use `AccountTarget::new` to allocate
+            // `margined_asset_list_size` entries.
+            margined_assets: Vec::new(),
             aggregated_balances: array::from_fn(|_| BigIntTarget::default()),
 
             positions: array::from_fn(|_| AccountPositionTarget::default()),
@@ -245,7 +250,7 @@ impl Default for AccountTarget {
 }
 
 impl AccountTarget {
-    pub fn new(builder: &mut Builder) -> Self {
+    pub fn new(builder: &mut Builder, margined_asset_list_size: usize) -> Self {
         Self {
             master_account_index: builder.add_virtual_target(),
             account_index: builder.add_virtual_target(),
@@ -253,7 +258,9 @@ impl AccountTarget {
             account_type: builder.add_virtual_target(),
             account_trading_mode: builder.add_virtual_target(),
 
-            margined_assets: array::from_fn(|_| AccountMarginedAssetTarget::new(builder)), // safe because it is read from the state using merkle proofs
+            margined_assets: (0..margined_asset_list_size)
+                .map(|_| AccountMarginedAssetTarget::new(builder))
+                .collect(), // safe because it is read from the state using merkle proofs
             aggregated_balances: array::from_fn(|_| {
                 builder.add_virtual_bigint_target_unsafe(BIG_U96_LIMBS) // safe because it is read from the state using merkle proofs
             }),
@@ -283,7 +290,7 @@ impl AccountTarget {
         }
     }
 
-    pub fn new_fee_account(builder: &mut Builder) -> Self {
+    pub fn new_fee_account(builder: &mut Builder, margined_asset_list_size: usize) -> Self {
         Self {
             master_account_index: builder.add_virtual_target(),
             account_index: builder.add_virtual_target(),
@@ -291,7 +298,9 @@ impl AccountTarget {
             account_type: builder.add_virtual_target(),
             account_trading_mode: builder.add_virtual_target(),
 
-            margined_assets: array::from_fn(|_| AccountMarginedAssetTarget::new(builder)), // safe because it is read from the state using merkle proofs
+            margined_assets: (0..margined_asset_list_size)
+                .map(|_| AccountMarginedAssetTarget::new(builder))
+                .collect(), // safe because it is read from the state using merkle proofs
             aggregated_balances: array::from_fn(|_| {
                 builder.add_virtual_bigint_target_unsafe(BIG_U96_LIMBS) // safe because it is read from the state using merkle proofs
             }),
@@ -601,17 +610,29 @@ impl AccountTarget {
         self.margined_assets[margin_index].balance.clone()
     }
 
+    pub fn assert_margined_asset_list_size(&self, margined_asset_list_size: usize) {
+        assert_eq!(
+            self.margined_assets.len(),
+            margined_asset_list_size,
+            "account margined_assets size mismatch"
+        );
+    }
+
     pub fn get_margined_asset_balances<const NB_ACCOUNTS: usize>(
         builder: &mut Builder,
         accounts: &[AccountTarget; NB_ACCOUNTS],
         assets: &[AssetTarget; NB_ASSETS_PER_TX],
         first_margin_index: Target,
+        margined_asset_list_size: usize,
     ) -> [[AccountMarginedAssetTarget; NB_ASSETS_PER_TX]; NB_ACCOUNTS] {
-        let second_margin_index = assets[1].margin_index(builder);
+        for account in accounts.iter() {
+            account.assert_margined_asset_list_size(margined_asset_list_size);
+        }
+        let second_margin_index = assets[1].margin_index(builder, margined_asset_list_size);
 
         array::from_fn(|i| {
             let mut v = accounts[i].margined_assets.to_vec();
-            v.push(AccountMarginedAssetTarget::empty(builder));
+            v.push(AccountMarginedAssetTarget::empty(builder)); // for non-margined assets
             [
                 random_access_account_margined_asset_target(builder, first_margin_index, &v),
                 random_access_account_margined_asset_target(builder, second_margin_index, &v),
@@ -1002,8 +1023,21 @@ impl<T: Witness<F> + PartialWitnessCurve<F>, F: PrimeField64 + Extendable<5> + R
             a.account_trading_mode,
             F::from_canonical_u8(b.account_trading_mode),
         )?;
-        for i in 0..MARGINED_ASSET_LIST_SIZE {
-            self.set_account_margined_asset_target(&a.margined_assets[i], &b.margined_assets[i])?;
+        // An account witness without margined assets is treated as having all of them empty.
+        if !b.margined_assets.is_empty() && b.margined_assets.len() != a.margined_assets.len() {
+            anyhow::bail!(
+                "margined assets length mismatch: witness has {}, circuit expects {}",
+                b.margined_assets.len(),
+                a.margined_assets.len()
+            );
+        }
+        for (i, target) in a.margined_assets.iter().enumerate() {
+            let witness = b
+                .margined_assets
+                .get(i)
+                .copied()
+                .unwrap_or_else(AccountMarginedAsset::empty);
+            self.set_account_margined_asset_target(target, &witness)?;
         }
         for i in 0..NB_ASSETS_PER_TX {
             self.set_bigint_target(&a.aggregated_balances[i], &b.aggregated_balances[i])?;

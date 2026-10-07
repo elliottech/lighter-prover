@@ -42,8 +42,8 @@ use crate::iop::target::{BoolTarget, Target};
 use crate::iop::wire::Wire;
 use crate::plonk::circuit_builder::LookupWire;
 use crate::plonk::circuit_data::{
-    CircuitConfig, CircuitData, CommonCircuitData, ProverCircuitData, ProverOnlyCircuitData,
-    VerifierCircuitData, VerifierCircuitTarget, VerifierOnlyCircuitData,
+    CircuitConfig, CircuitData, CommonCircuitData, GeneratorWatchIndex, ProverCircuitData,
+    ProverOnlyCircuitData, VerifierCircuitData, VerifierCircuitTarget, VerifierOnlyCircuitData,
 };
 use crate::plonk::config::{GenericConfig, GenericHashOut, Hasher};
 use crate::plonk::plonk_common::salt_size;
@@ -182,14 +182,26 @@ pub trait Read {
     }
 
     /// Reads a vector of elements from the field `F` from `self`.
+    ///
+    /// Written as a reserving push loop, like [`Self::read_usize_vec`] and
+    /// [`Self::read_usize_encoded_u32_vec`] above, rather than `collect`ing a
+    /// `Result<Vec<_>, _>`: that collect routes through `iter::process_results`,
+    /// whose shunt iterator reports a lower size-hint bound of zero whatever the
+    /// underlying `Range` knows, so the vector starts at capacity one and grows by
+    /// doubling -- 17 reallocations, and one full copy of everything already read,
+    /// for a 2^16-element column. The elements, their order and the error behaviour
+    /// are unchanged; only the allocation is.
     #[inline]
     fn read_field_vec<F>(&mut self, length: usize) -> IoResult<Vec<F>>
     where
         F: Field64,
     {
-        (0..length)
-            .map(|_| self.read_field())
-            .collect::<Result<Vec<_>, _>>()
+        let mut res = Vec::with_capacity(length);
+        for _ in 0..length {
+            res.push(self.read_field()?);
+        }
+
+        Ok(res)
     }
 
     /// Reads an element from the field extension of `F` from `self.`
@@ -364,6 +376,7 @@ pub trait Read {
             },
             num_leaves,
             digests,
+            level_digests: None,
             cap,
         })
     }
@@ -775,6 +788,7 @@ pub trait Read {
             degree_log,
             rate_bits,
             blinding,
+            even_columns: Default::default(),
         })
     }
 
@@ -889,6 +903,8 @@ pub trait Read {
                 generator_watch_counts[generator_idx] += 1;
             }
         }
+        let generator_indices_by_watches =
+            GeneratorWatchIndex::from_map(generator_indices_by_watches);
 
         let constants_sigmas_commitment = self.read_polynomial_batch()?;
         let sigmas_len = self.read_usize()?;
@@ -904,6 +920,13 @@ pub trait Read {
         let public_inputs = self.read_target_vec()?;
 
         let representative_map = self.read_usize_encoded_u32_vec()?;
+        let fixed_routed_wires = crate::plonk::permutation_argument::fixed_routed_wire_mask(
+            &representative_map,
+            common_data.config.num_wires,
+            common_data.config.num_routed_wires,
+            subgroup.len(),
+        )
+        .ok_or(IoError)?;
 
         let is_some = self.read_bool()?;
         let fft_root_table = match is_some {
@@ -914,7 +937,7 @@ pub trait Read {
                     let len = self.read_usize()?;
                     table.push(self.read_field_vec(len)?);
                 }
-                Some(table)
+                Some(Arc::new(table))
             }
             false => None,
         };
@@ -937,19 +960,32 @@ pub trait Read {
             lut_to_lookups.push(self.read_target_lut()?);
         }
 
+        // Runtime-only, like `generator_watch_counts`: a pure function of `generators`.
+        let generators_defer_until_ready = generators
+            .iter()
+            .all(|generator| generator.0.defers_until_ready());
+
         Ok(ProverOnlyCircuitData {
             generators,
             generator_indices_by_watches,
             generator_watch_counts,
+            generators_defer_until_ready,
             constants_sigmas_commitment,
             sigmas,
             subgroup,
             public_inputs,
             representative_map,
+            fixed_routed_wires,
             fft_root_table,
             circuit_digest,
             lookup_rows,
             lut_to_lookups,
+            // Runtime-only: the cache is not serialized; the quotient path
+            // falls back to the strided gather.
+            constants_sigmas_quotient_cache: None,
+            constants_sigmas_quotient_step: 0,
+            constants_sigmas_quotient_domain: 0,
+            low_range_selector_filter_cache: Default::default(),
         })
     }
 
@@ -1484,7 +1520,12 @@ pub trait Write {
             self.write_usize(leaf.len())?;
             self.write_field_vec(&leaf)?;
         }
-        self.write_hash_vec::<F, H>(&tree.digests)?;
+        match &tree.level_digests {
+            // GPU-built trees keep their digests in level order; materialize
+            // the interleaved layout the wire format expects (cold path).
+            Some(levels) => self.write_hash_vec::<F, H>(&levels.to_interleaved())?,
+            None => self.write_hash_vec::<F, H>(&tree.digests)?,
+        }
         self.write_usize(tree.cap.height())?;
         self.write_merkle_cap(&tree.cap)?;
 
@@ -1909,11 +1950,21 @@ pub trait Write {
             // Runtime-only: reconstructed from `generator_indices_by_watches` on read, so it
             // contributes no bytes and the serialized format is unchanged.
             generator_watch_counts: _,
+            // Runtime-only: re-derived from `generators` on read; contributes no bytes.
+            generators_defer_until_ready: _,
+            // Runtime-only: contributes no bytes; the serialized format is unchanged.
+            constants_sigmas_quotient_cache: _,
+            constants_sigmas_quotient_step: _,
+            constants_sigmas_quotient_domain: _,
+            low_range_selector_filter_cache: _,
             constants_sigmas_commitment,
             sigmas,
             subgroup,
             public_inputs,
             representative_map,
+            // Runtime-only: reconstructed from `representative_map` on read, so it contributes
+            // no bytes and the serialized format is unchanged.
+            fixed_routed_wires: _,
             fft_root_table,
             circuit_digest,
             lookup_rows,
@@ -1926,9 +1977,11 @@ pub trait Write {
         }
 
         self.write_usize(generator_indices_by_watches.len())?;
-        for (k, v) in generator_indices_by_watches {
-            self.write_usize(*k)?;
-            self.write_usize_vec(v)?;
+        for (k, v) in generator_indices_by_watches.iter() {
+            self.write_usize(k)?;
+            // Byte-identical to `write_usize_vec` on the widened vector; the
+            // watcher payload is `u32` in memory but 8-byte LE on the wire.
+            self.write_usize_encoded_u32_vec(v)?;
         }
 
         self.write_polynomial_batch(constants_sigmas_commitment)?;
@@ -2425,6 +2478,10 @@ mod tests {
         assert_eq!(
             decoded.representative_map,
             circuit.prover_only.representative_map
+        );
+        assert_eq!(
+            decoded.fixed_routed_wires, circuit.prover_only.fixed_routed_wires,
+            "runtime fixed-factor mask was not reconstructed from the representative map"
         );
         assert_eq!(
             decoded.generator_watch_counts, circuit.prover_only.generator_watch_counts,

@@ -70,7 +70,7 @@ pub struct L2CreateOrderTx {
     pub trigger_price: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct L2CreateOrderTxTarget {
     pub account_index: Target, // 48 bits
     pub api_key_index: Target, // 8 bits

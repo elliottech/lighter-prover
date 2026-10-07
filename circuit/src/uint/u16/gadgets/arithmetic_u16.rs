@@ -18,7 +18,9 @@ use crate::uint::u16::gates::add_many_u16::U16AddManyGate;
 use crate::uint::u16::gates::arithmetic_u16::U16ArithmeticGate;
 use crate::uint::u16::gates::subtraction_u16::U16SubtractionGate;
 
-#[derive(Clone, Copy, Eq, PartialEq, Hash, Debug, Default)]
+#[derive(
+    Clone, Copy, Eq, PartialEq, Hash, Debug, Default, serde::Serialize, serde::Deserialize,
+)]
 pub struct U16Target(pub Target);
 
 pub trait CircuitBuilderU16<F: RichField + Extendable<D>, const D: usize> {

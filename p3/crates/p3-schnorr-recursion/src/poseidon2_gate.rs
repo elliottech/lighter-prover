@@ -136,9 +136,8 @@ fn sbox_p<F: Field>(x: F) -> F {
 /// then cross-chunk mixing by column sums.
 fn external_linear_layer<F: Field>(state: &mut [F; P3_WIDTH]) {
     // Apply mat4 to each group of 4.
-    for chunk in state.chunks_exact_mut(4) {
-        let x: &mut [F; 4] = chunk.try_into().unwrap();
-        apply_mat4(x);
+    for chunk in state.as_chunks_mut::<4>().0 {
+        apply_mat4(chunk);
     }
     // Cross-sum: each element gets the sum of the element at its position mod 4
     // across all four groups.
@@ -222,9 +221,8 @@ fn p3_poseidon2_permute<F: Field>(state: &mut [F; P3_WIDTH]) {
 fn external_linear_layer_ext<F: RichField + Extendable<D>, const D: usize>(
     state: &mut [F::Extension; P3_WIDTH],
 ) {
-    for chunk in state.chunks_exact_mut(4) {
-        let x: &mut [F::Extension; 4] = chunk.try_into().unwrap();
-        apply_mat4(x);
+    for chunk in state.as_chunks_mut::<4>().0 {
+        apply_mat4(chunk);
     }
     let sums: [F::Extension; 4] =
         core::array::from_fn(|k| (0..P3_WIDTH).step_by(4).map(|j| state[j + k]).sum());
@@ -256,9 +254,8 @@ fn external_linear_layer_circuit<F: RichField + Extendable<D>, const D: usize>(
     builder: &mut CircuitBuilder<F, D>,
     state: &mut [ExtensionTarget<D>; P3_WIDTH],
 ) {
-    for chunk in state.chunks_exact_mut(4) {
-        let x: &mut [ExtensionTarget<D>; 4] = chunk.try_into().unwrap();
-        apply_mat4_circuit(builder, x);
+    for chunk in state.as_chunks_mut::<4>().0 {
+        apply_mat4_circuit(builder, chunk);
     }
     let sums: [ExtensionTarget<D>; 4] = core::array::from_fn(|k| {
         (0..P3_WIDTH)

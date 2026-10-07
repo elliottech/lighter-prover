@@ -205,7 +205,8 @@ where
     }
 }
 
-#[derive(Debug)]
+#[serde_with::serde_as]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 /// In circuit represantion of [`crate::block::BlockTxChainWitness`]
 pub struct BlockTxChainWitnessTarget {
     pub block_number: Target,
@@ -226,6 +227,7 @@ pub struct BlockTxChainWitnessTarget {
     pub on_chain_operations_pub_data: Vec<[U8Target; ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE]>,
 
     pub priority_operations_count: Target,
+    #[serde_as(as = "[_; MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX]")]
     pub priority_operations_pub_data: [U8Target; MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX],
 
     pub new_public_market_details_hash: HashOutTarget,

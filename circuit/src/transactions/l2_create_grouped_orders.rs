@@ -77,7 +77,7 @@ pub struct L2CreateGroupedOrdersTx {
     pub orders: [TxOrder; MAX_NB_GROUPED_ORDERS],
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TxOrderTarget {
     pub public_market_index: Target, // 48 bits
     pub client_order_index: Target,  // 48 bits
@@ -91,7 +91,7 @@ pub struct TxOrderTarget {
     pub order_expiry: Target,  // 48 bits
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct L2CreateGroupedOrdersTxTarget {
     pub account_index: Target,
     pub api_key_index: Target,

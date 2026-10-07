@@ -10,7 +10,7 @@ use plonky2::gates::constant::ConstantGate;
 use plonky2::gates::gate::GateRef;
 use plonky2::hash::hash_types::{HashOutTarget, NUM_HASH_OUT_ELTS, RichField};
 use plonky2::iop::target::{BoolTarget, Target};
-use plonky2::iop::witness::{PartialWitness, WitnessWrite};
+use plonky2::iop::witness::PartialWitness;
 use plonky2::plonk::circuit_data::{CircuitConfig, CircuitData};
 use plonky2::plonk::config::GenericConfig;
 use plonky2::plonk::proof::ProofWithPublicInputs;
@@ -45,7 +45,13 @@ pub trait Circuit<
     /// `builder` can be used to build circuit via calling [`Builder::build()`]
     ///
     /// `target` can be used to assign partial witness in [`BlockTxCircuit::prove()`] function
-    fn define(config: CircuitConfig, tx_limit: usize, chain_id: u32, mode: u8) -> Self;
+    fn define(
+        config: CircuitConfig,
+        tx_limit: usize,
+        chain_id: u32,
+        mode: u8,
+        margined_asset_list_size: usize,
+    ) -> Self;
     /// Fills partial witness for block target with given block data
     fn generate_witness(block: &BlockTx<F>, target: &BlockTxTarget) -> Result<PartialWitness<F>>;
     /// Takes `circuit`, block witness and `target` defined in [`BlockTxCircuit::define()`] function
@@ -63,7 +69,8 @@ pub struct BlockTxCircuit {
     pub target: BlockTxTarget,
 }
 
-#[derive(Debug)]
+#[serde_with::serde_as]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct BlockTxTarget {
     pub created_at: Target, // 48 bits
 
@@ -93,6 +100,7 @@ pub struct BlockTxTarget {
     // /*************************/
     pub new_delta_root: HashOutTarget,
     pub priority_operations_count: Target,
+    #[serde_as(as = "[_; MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX]")]
     pub priority_operations_pub_data: [U8Target; MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX],
     pub on_chain_operations_count: Target,
     pub on_chain_operations_pub_data: [U8Target; ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE],
@@ -157,8 +165,14 @@ impl Default for BlockTxTarget {
 }
 
 impl Circuit<C, F, D> for BlockTxCircuit {
-    fn define(config: CircuitConfig, tx_limit: usize, chain_id: u32, mode: u8) -> Self {
-        let mut circuit = Self::new(config, tx_limit);
+    fn define(
+        config: CircuitConfig,
+        tx_limit: usize,
+        chain_id: u32,
+        mode: u8,
+        margined_asset_list_size: usize,
+    ) -> Self {
+        let mut circuit = Self::new(config, tx_limit, margined_asset_list_size);
 
         circuit.register_public_inputs();
 
@@ -170,7 +184,7 @@ impl Circuit<C, F, D> for BlockTxCircuit {
             public_market_details_hash_after,
             delta_root_after,
             tx_signature_data,
-        ) = circuit.define_tx_loop(tx_limit, chain_id, mode);
+        ) = circuit.define_tx_loop(tx_limit, chain_id, mode, margined_asset_list_size);
 
         circuit.define_post_tx_batch(
             chain_id,
@@ -200,7 +214,9 @@ impl Circuit<C, F, D> for BlockTxCircuit {
             Self::generate_witness(block, target)?
         });
         let proof = prove::<F, C, D>(&circuit.prover_only, &circuit.common, pw, &mut timing)?;
-        timed!(timing, "verify", { circuit.verify(proof.clone())? });
+        if crate::utils::eager_verify_enabled() {
+            timed!(timing, "verify", { circuit.verify(proof.clone())? });
+        }
 
         timing.print();
 
@@ -209,7 +225,26 @@ impl Circuit<C, F, D> for BlockTxCircuit {
 
     fn generate_witness(block: &BlockTx<F>, target: &BlockTxTarget) -> Result<PartialWitness<F>> {
         let mut pw = PartialWitness::new();
+        BlockTxCircuit::generate_witness_into(block, target, &mut pw)?;
+        Ok(pw)
+    }
+}
 
+impl BlockTxCircuit {
+    /// Writes the block-transaction witness into any writable witness — in
+    /// particular directly into a `PartitionWitness`-backed seeder, whose
+    /// representative slots are array-indexed, bypassing the `PartialWitness`
+    /// hash map (and its per-target hashing) entirely. The set of
+    /// (target, value) pairs written is identical to
+    /// [`Circuit::generate_witness`]'s.
+    pub fn generate_witness_into<W>(
+        block: &BlockTx<F>,
+        target: &BlockTxTarget,
+        pw: &mut W,
+    ) -> Result<()>
+    where
+        W: plonky2::iop::witness::Witness<F>,
+    {
         pw.set_target(target.created_at, F::from_canonical_i64(block.created_at))?;
         pw.set_hash_target(target.state_metadata_hash, block.state_metadata_hash)?;
 
@@ -256,13 +291,13 @@ impl Circuit<C, F, D> for BlockTxCircuit {
             .zip_eq(block.txs.iter())
             .try_for_each(|(t, tx)| pw.set_tx_target(t, tx))?;
 
-        Ok(pw)
+        Ok(())
     }
 }
 
 impl BlockTxCircuit {
     /// Initializes a new block virtual targets for the given number of transactions.
-    pub fn new(config: CircuitConfig, tx_limit: usize) -> Self {
+    pub fn new(config: CircuitConfig, tx_limit: usize, margined_asset_list_size: usize) -> Self {
         let num_constants = config.num_constants;
         let mut builder = Builder::new(config);
         // Keep the gate set reproducible by `dummy_circuit`, which always instantiates a
@@ -275,7 +310,9 @@ impl BlockTxCircuit {
                 created_at: builder.add_virtual_target(),
                 state_metadata_hash: builder.add_virtual_hash(),
 
-                txs: (0..tx_limit).map(|_| TxTarget::new(&mut builder)).collect(),
+                txs: (0..tx_limit)
+                    .map(|_| TxTarget::new(&mut builder, margined_asset_list_size))
+                    .collect(),
 
                 // ..Default::default() //
                 // Comment out the following to avoid "generators weren't run"
@@ -390,6 +427,7 @@ impl BlockTxCircuit {
         tx_limit: usize,
         chain_id: u32,
         mode: u8,
+        margined_asset_list_size: usize,
     ) -> (
         Target,                                                    // on chain operations count
         [U8Target; ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE], // on chain operations public data
@@ -447,6 +485,7 @@ impl BlockTxCircuit {
                     &mut self.builder,
                     self.target.created_at,
                     self.target.state_metadata_hash,
+                    margined_asset_list_size,
                 ),
                 TX_LIGHT => tx.define_light(
                     index,
@@ -454,6 +493,7 @@ impl BlockTxCircuit {
                     &mut self.builder,
                     self.target.created_at,
                     self.target.state_metadata_hash,
+                    margined_asset_list_size,
                 ),
                 _ => panic!("unknown tx circuit mode: {mode}"),
             };

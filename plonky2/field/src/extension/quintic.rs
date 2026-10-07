@@ -25,7 +25,52 @@ impl<F: Extendable<5>> OEF<5> for QuinticExtension<F> {
     const DTH_ROOT: F = F::DTH_ROOT;
 }
 
-impl<F: Extendable<5>> Frobenius<5> for QuinticExtension<F> {}
+impl<F: Extendable<5>> Frobenius<5> for QuinticExtension<F> {
+    default fn repeated_frobenius(&self, count: usize) -> Self {
+        if count == 0 {
+            return *self;
+        } else if count >= 5 {
+            // x |-> x^(p^5) is the identity, so x^(p^count) == x^(p^(count % 5))
+            return self.repeated_frobenius(count % 5);
+        }
+        let arr = self.0;
+
+        // z0 = DTH_ROOT^count = W^(k * count) where k = floor((p^5-1)/5)
+        let mut z0 = F::DTH_ROOT;
+        for _ in 1..count {
+            z0 *= F::DTH_ROOT;
+        }
+
+        let mut res = [F::ZERO; 5];
+        for (i, z) in z0.powers().take(5).enumerate() {
+            res[i] = arr[i] * z;
+        }
+
+        Self(res)
+    }
+}
+
+/// The degree-0 coefficient of the product `a * b` in GF(p^5), i.e.
+/// `a0*b0 + W*(a1*b4 + a2*b3 + a3*b2 + a4*b1)`.
+///
+/// `try_inverse` only needs this single coefficient of `a * a^(p + p^2 + p^3 + p^4)` (the
+/// norm, which lands in the base field), so it is exposed as its own specializable operation:
+/// the generic implementation mirrors the `c0` row of `Mul::mul` below, and the Goldilocks
+/// implementation (in `goldilocks_extensions.rs`) reuses the widening `ext5_add_prods0`
+/// helper — one final reduction instead of one per partial product — exactly as the
+/// specialized `Mul` there does.
+pub(crate) trait QuinticFirstCoeff<F: Extendable<5>> {
+    fn mul_first_coeff(&self, rhs: &Self) -> F;
+}
+
+impl<F: Extendable<5>> QuinticFirstCoeff<F> for QuinticExtension<F> {
+    #[inline]
+    default fn mul_first_coeff(&self, rhs: &Self) -> F {
+        let Self([a0, a1, a2, a3, a4]) = *self;
+        let Self([b0, b1, b2, b3, b4]) = *rhs;
+        a0 * b0 + <Self as OEF<5>>::W * (a1 * b4 + a2 * b3 + a3 * b2 + a4 * b1)
+    }
+}
 
 impl<F: Extendable<5>> FieldExtension<5> for QuinticExtension<F> {
     type BaseField = F;
@@ -107,10 +152,9 @@ impl<F: Extendable<5>> Field for QuinticExtension<F> {
 
         // g = a^r is in the base field, so only compute that
         // coefficient rather than the full product. The equation is
-        // extracted from Mul::mul(...) below.
-        let Self([a0, a1, a2, a3, a4]) = *self;
-        let Self([b0, b1, b2, b3, b4]) = f;
-        let g = a0 * b0 + <Self as OEF<5>>::W * (a1 * b4 + a2 * b3 + a3 * b2 + a4 * b1);
+        // extracted from Mul::mul(...) below and, like Mul itself, is
+        // specialized for Goldilocks with delayed reduction.
+        let g = self.mul_first_coeff(&f);
 
         Some(FieldExtension::<5>::scalar_mul(&f, g.inverse()))
     }

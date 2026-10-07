@@ -138,6 +138,19 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for Exponentiation
         self.eval_unfiltered_base_batch_packed(vars_base)
     }
 
+    fn eval_unfiltered_base_batch_accumulate(
+        &self,
+        vars_base: EvaluationVarsBaseBatch<F>,
+        filters: &[F],
+        combined_gate_constraints: &mut [F],
+    ) {
+        self.eval_unfiltered_base_batch_accumulate_packed(
+            vars_base,
+            filters,
+            combined_gate_constraints,
+        );
+    }
+
     fn eval_unfiltered_circuit(
         &self,
         builder: &mut CircuitBuilder<F, D>,
@@ -214,29 +227,53 @@ impl<F: RichField + Extendable<D>, const D: usize> PackedEvaluableBase<F, D>
     ) {
         let base = vars.local_wires[self.wire_base()];
 
-        let power_bits: Vec<_> = (0..self.num_power_bits)
-            .map(|i| vars.local_wires[self.wire_power_bit(i)])
-            .collect();
-        let intermediate_values: Vec<_> = (0..self.num_power_bits)
-            .map(|i| vars.local_wires[self.wire_intermediate_value(i)])
-            .collect();
+        // Both wire blocks are contiguous (bits at `1..1 + n`, intermediates at
+        // `2 + n..2 + 2n`), so borrow them as strided views instead of collecting
+        // copies. This runs once per packed lane group, so the two `Vec`s were
+        // allocated and filled several times per batch.
+        let power_bits = vars
+            .local_wires
+            .view(self.wire_power_bit(0)..self.wire_power_bit(0) + self.num_power_bits);
+        let intermediate_values = vars.local_wires.view(
+            self.wire_intermediate_value(0)..self.wire_intermediate_value(0) + self.num_power_bits,
+        );
 
         let output = vars.local_wires[self.wire_output()];
 
-        for i in 0..self.num_power_bits {
-            let prev_intermediate_value = if i == 0 {
+        // Rewrite `bit * base + (1 - bit)` as `1 + bit * (base - 1)`.
+        // Besides deleting one packed subtraction per bit, this exposes the
+        // existing AArch64 multiply-accumulate specialization. Evaluate two
+        // independent transitions at a time to increase instruction-level
+        // parallelism without changing constraint emission order.
+        let base_minus_one = base - P::ONES;
+        let mut i = 0;
+        while i + 1 < self.num_power_bits {
+            let prev_0 = if i == 0 {
                 P::ONES
             } else {
                 intermediate_values[i - 1].square()
             };
+            let prev_1 = intermediate_values[i].square();
 
             // power_bits is in LE order, but we accumulate in BE order.
-            let cur_bit = power_bits[self.num_power_bits - i - 1];
+            let bit_0 = power_bits[self.num_power_bits - i - 1];
+            let bit_1 = power_bits[self.num_power_bits - i - 2];
+            let mul_by_0 = P::ONES.multiply_accumulate(bit_0, base_minus_one);
+            let mul_by_1 = P::ONES.multiply_accumulate(bit_1, base_minus_one);
 
-            let not_cur_bit = P::ONES - cur_bit;
-            let computed_intermediate_value =
-                prev_intermediate_value * (cur_bit * base + not_cur_bit);
-            yield_constr.one(computed_intermediate_value - intermediate_values[i]);
+            yield_constr.one(prev_0 * mul_by_0 - intermediate_values[i]);
+            yield_constr.one(prev_1 * mul_by_1 - intermediate_values[i + 1]);
+            i += 2;
+        }
+        if i < self.num_power_bits {
+            let prev = if i == 0 {
+                P::ONES
+            } else {
+                intermediate_values[i - 1].square()
+            };
+            let bit = power_bits[self.num_power_bits - i - 1];
+            let mul_by = P::ONES.multiply_accumulate(bit, base_minus_one);
+            yield_constr.one(prev * mul_by - intermediate_values[i]);
         }
 
         yield_constr.one(output - intermediate_values[self.num_power_bits - 1]);
@@ -370,6 +407,21 @@ mod tests {
     }
 
     #[test]
+    fn eval_fns_production_67_bits() -> Result<()> {
+        const D: usize = 2;
+        type C = PoseidonGoldilocksConfig;
+        type F = <C as GenericConfig<D>>::F;
+        let config = CircuitConfig {
+            num_wires: 136,
+            num_routed_wires: 80,
+            ..CircuitConfig::standard_recursion_config()
+        };
+        let gate = ExponentiationGate::new_from_config(&config);
+        assert_eq!(gate.num_power_bits, 67);
+        test_eval_fns::<F, C, _, D>(gate)
+    }
+
+    #[test]
     fn test_gate_constraint() {
         const D: usize = 2;
         type C = PoseidonGoldilocksConfig;
@@ -430,6 +482,65 @@ mod tests {
         assert!(
             gate.eval_unfiltered(vars).iter().all(|x| x.is_zero()),
             "Gate constraints are not satisfied."
+        );
+    }
+
+    /// Manual timing harness comparing the packed-fused accumulate against the
+    /// materialize-then-add default it replaced. Run with:
+    /// `cargo test --release -p plonky2 exp_accumulate_micro -- --ignored --nocapture`
+    #[test]
+    #[ignore = "manual timing harness"]
+    fn exp_accumulate_microbenchmark() {
+        use core::hint::black_box;
+        use std::time::Instant;
+
+        use plonky2_field::types::Sample;
+
+        use crate::field::batch_util::batch_multiply_add_inplace;
+        use crate::gates::gate::Gate;
+        use crate::plonk::vars::EvaluationVarsBaseBatch;
+
+        const D: usize = 2;
+        type F = GoldilocksField;
+        let gate = ExponentiationGate::<F, D>::new_from_config(
+            &CircuitConfig::standard_recursion_config(),
+        );
+        let n = 32;
+        let wires = F::rand_vec(gate.num_wires() * n);
+        let constants: Vec<F> = Vec::new();
+        let hash = crate::hash::hash_types::HashOut::ZERO;
+        let filters = F::rand_vec(n);
+        let nc = gate.num_constraints();
+        let mut combined = vec![F::ZERO; nc * n];
+        let iters = 50_000u32;
+        let vars = EvaluationVarsBaseBatch::new(n, &constants, &wires, &hash);
+
+        let mut t_fused = 0.0f64;
+        let mut t_mat = 0.0f64;
+        for _ in 0..4 {
+            let s = Instant::now();
+            for _ in 0..iters {
+                gate.eval_unfiltered_base_batch_accumulate(
+                    vars,
+                    &filters,
+                    black_box(&mut combined),
+                );
+            }
+            t_fused += s.elapsed().as_secs_f64();
+
+            let s = Instant::now();
+            for _ in 0..iters {
+                let res = gate.eval_unfiltered_base_batch(vars);
+                for (acc, row) in combined.chunks_exact_mut(n).zip(res.chunks_exact(n)) {
+                    batch_multiply_add_inplace(acc, row, &filters);
+                }
+            }
+            t_mat += s.elapsed().as_secs_f64();
+        }
+        let per = |t: f64| t / (4.0 * iters as f64) * 1e6;
+        println!(
+            "exponentiation accumulate per batch (n=32): packed-fused {:.2} us, materialized-default {:.2} us",
+            per(t_fused), per(t_mat)
         );
     }
 }

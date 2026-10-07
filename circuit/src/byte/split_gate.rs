@@ -4,11 +4,11 @@
 use core::ops::Range;
 
 use anyhow::Result;
-use itertools::Itertools;
+use plonky2::field::batch_util::batch_multiply_add_inplace;
 use plonky2::field::extension::Extendable;
 use plonky2::field::packed::PackedField;
 use plonky2::field::types::Field;
-use plonky2::gates::gate::Gate;
+use plonky2::gates::gate::{Gate, U32QuotientGate};
 use plonky2::gates::packed_util::PackedEvaluableBase;
 use plonky2::gates::util::StridedConstraintConsumer;
 use plonky2::hash::hash_types::RichField;
@@ -191,8 +191,93 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for ByteDecomposit
                 out[p] -= sum_col[p];
             }
         }
-        assert!(chunks.next().is_none());
         res
+    }
+
+    fn eval_unfiltered_base_batch_accumulate(
+        &self,
+        vars_base: EvaluationVarsBaseBatch<F>,
+        filters: &[F],
+        combined_gate_constraints: &mut [F],
+    ) {
+        let n = vars_base.len();
+        assert_eq!(filters.len(), n);
+        let num_constraints = <Self as Gate<F, D>>::num_constraints(self);
+        assert!(combined_gate_constraints.len() >= num_constraints * n);
+
+        let wires = vars_base.local_wires;
+        let three = F::from_canonical_usize(3);
+        let four = F::from_canonical_usize(4);
+        let base = F::from_canonical_usize(256);
+        // Batches are 32 points in this prover; keep the scratch row on the
+        // stack and fall back to the heap only for oversized batches.
+        let mut scratch_stack = [F::ZERO; 64];
+        let mut scratch_heap;
+        let scratch: &mut [F] = if n <= 64 {
+            &mut scratch_stack[..n]
+        } else {
+            scratch_heap = vec![F::ZERO; n];
+            &mut scratch_heap
+        };
+        let mut constraint_index = 0;
+
+        for i in 0..self.num_ops {
+            let aux = self.i_th_aux_limbs(i);
+            // Range products per aux limb: x(x-1)(x-2)(x-3) = y(y+2), y = x(x-3).
+            for limb_wire in aux.clone() {
+                let col = &wires[limb_wire * n..][..n];
+                for p in 0..n {
+                    let x = col[p];
+                    let y = x * (x - three);
+                    scratch[p] = y * (y + F::TWO);
+                }
+                let combined = &mut combined_gate_constraints
+                    [constraint_index * n..(constraint_index + 1) * n];
+                batch_multiply_add_inplace(combined, scratch, filters);
+                constraint_index += 1;
+            }
+
+            // Each byte equals its four aux limbs combined by powers of 4,
+            // accumulated per point by Horner from the most significant limb.
+            let bytes = self.i_th_limbs(i);
+            for (byte_index, byte_wire) in bytes.clone().enumerate() {
+                let chunk_start = aux.start + 4 * byte_index;
+                scratch.copy_from_slice(&wires[(chunk_start + 3) * n..][..n]);
+                for k in (0..3).rev() {
+                    let limb = &wires[(chunk_start + k) * n..][..n];
+                    for p in 0..n {
+                        scratch[p] = scratch[p] * four + limb[p];
+                    }
+                }
+                let byte_col = &wires[byte_wire * n..][..n];
+                for p in 0..n {
+                    scratch[p] -= byte_col[p];
+                }
+                let combined = &mut combined_gate_constraints
+                    [constraint_index * n..(constraint_index + 1) * n];
+                batch_multiply_add_inplace(combined, scratch, filters);
+                constraint_index += 1;
+            }
+
+            // The sum equals the bytes combined by powers of 256.
+            scratch.copy_from_slice(&wires[(bytes.end - 1) * n..][..n]);
+            for byte_wire in (bytes.start..bytes.end - 1).rev() {
+                let col = &wires[byte_wire * n..][..n];
+                for p in 0..n {
+                    scratch[p] = scratch[p] * base + col[p];
+                }
+            }
+            let sum_col = &wires[self.i_th_sum(i) * n..][..n];
+            for p in 0..n {
+                scratch[p] -= sum_col[p];
+            }
+            let combined =
+                &mut combined_gate_constraints[constraint_index * n..(constraint_index + 1) * n];
+            batch_multiply_add_inplace(combined, scratch, filters);
+            constraint_index += 1;
+        }
+
+        debug_assert_eq!(constraint_index, num_constraints);
     }
 
     fn eval_unfiltered_circuit(
@@ -273,6 +358,13 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for ByteDecomposit
     fn num_constraints(&self) -> usize {
         (1 + self.num_limbs * 5) * self.num_ops
     }
+
+    fn u32_quotient_gate(&self) -> Option<U32QuotientGate> {
+        Some(U32QuotientGate::ByteDecomposition {
+            num_ops: self.num_ops,
+            num_limbs: self.num_limbs,
+        })
+    }
 }
 
 impl<F: RichField + Extendable<D>, const D: usize> PackedEvaluableBase<F, D>
@@ -343,35 +435,24 @@ impl<F: RichField + Extendable<D>, const D: usize> SimpleGenerator<F, D>
             .to_canonical_u64();
 
         // Set bytes
-        let limbs = dummy_gate
-            .i_th_limbs(self.i)
-            .map(|i| Target::wire(self.row, i));
-        let limbs_value = (0..self.num_limbs)
-            .scan(sum_value, |acc, _| {
-                let tmp = *acc % (256_u64);
-                *acc /= 256_u64;
-                Some(F::from_canonical_u64(tmp))
-            })
-            .collect::<Vec<_>>();
-
-        for (b, b_value) in limbs.zip_eq(limbs_value) {
-            out_buffer.set_target(b, b_value)?;
+        // Direct limb-decomposition loops: same limbs in the same order as the
+        // previous `scan`/`collect` into temporary `Vec`s, minus the heap
+        // allocations per generator execution. `i_th_limbs`/`i_th_aux_limbs`
+        // are ranges of exactly `num_limbs`/`4 * num_limbs` columns, so the
+        // pairing is exhaustive exactly as `zip_eq` required.
+        let mut acc = sum_value;
+        for i in dummy_gate.i_th_limbs(self.i) {
+            let tmp = acc % 256_u64;
+            acc /= 256_u64;
+            out_buffer.set_target(Target::wire(self.row, i), F::from_canonical_u64(tmp))?;
         }
 
         // Set aux limbs
-        let limbs = dummy_gate
-            .i_th_aux_limbs(self.i)
-            .map(|i| Target::wire(self.row, i));
-        let limbs_value = (0..4 * self.num_limbs)
-            .scan(sum_value, |acc, _| {
-                let tmp = *acc % (4_u64);
-                *acc /= 4_u64;
-                Some(F::from_canonical_u64(tmp))
-            })
-            .collect::<Vec<_>>();
-
-        for (b, b_value) in limbs.zip_eq(limbs_value) {
-            out_buffer.set_target(b, b_value)?;
+        let mut acc = sum_value;
+        for i in dummy_gate.i_th_aux_limbs(self.i) {
+            let tmp = acc % 4_u64;
+            acc /= 4_u64;
+            out_buffer.set_target(Target::wire(self.row, i), F::from_canonical_u64(tmp))?;
         }
 
         Ok(())
@@ -420,13 +501,72 @@ mod tests {
         test_eval_fns::<F, C, _, D>(ByteDecompositionGate::new(1, 1))
     }
 
+    // `test_eval_fns` only checks a batch of one point; compare the batched
+    // path against per-point `eval_unfiltered` across a multi-point batch.
     #[test]
     fn base_batch_matches_eval_unfiltered_across_batch() {
-        use crate::gate_batch_testing::assert_base_batch_matches_eval_unfiltered;
+        use plonky2::field::extension::FieldExtension;
+        use plonky2::field::types::Field64;
+        use plonky2::hash::hash_types::HashOut;
+        use plonky2::plonk::vars::{EvaluationVars, EvaluationVarsBaseBatch};
+        use rand::Rng;
+
+        const D: usize = 2;
+        type F = GoldilocksField;
+
+        let mut rng = rand::thread_rng();
+        for (num_limbs, num_ops) in [(1, 1), (4, 2), (8, 1)] {
+            let gate = ByteDecompositionGate::new(num_limbs, num_ops);
+            let n = 32;
+            let num_wires = <ByteDecompositionGate as Gate<F, D>>::num_wires(&gate);
+            let num_constraints = <ByteDecompositionGate as Gate<F, D>>::num_constraints(&gate);
+            let wires_batch: Vec<F> = (0..num_wires * n)
+                .map(|_| F::from_canonical_u64(rng.gen_range(0..GoldilocksField::ORDER)))
+                .collect();
+            let public_inputs_hash = HashOut::<F>::ZERO;
+            let vars_batch =
+                EvaluationVarsBaseBatch::new(n, &[], &wires_batch, &public_inputs_hash);
+            let batch_out = <ByteDecompositionGate as Gate<F, D>>::eval_unfiltered_base_batch(
+                &gate, vars_batch,
+            );
+            assert_eq!(batch_out.len(), n * num_constraints);
+
+            for p in 0..n {
+                let wires_one: Vec<<F as Extendable<D>>::Extension> = (0..num_wires)
+                    .map(|w| {
+                        <<F as Extendable<D>>::Extension as FieldExtension<D>>::from_basefield(
+                            wires_batch[w * n + p],
+                        )
+                    })
+                    .collect();
+                let vars_one = EvaluationVars::<F, D> {
+                    local_constants: &[],
+                    local_wires: &wires_one,
+                    public_inputs_hash: &public_inputs_hash,
+                };
+                let expected = gate.eval_unfiltered(vars_one);
+                for (j, expected_j) in expected.iter().enumerate() {
+                    assert_eq!(
+                        <<F as Extendable<D>>::Extension as FieldExtension<D>>::from_basefield(
+                            batch_out[j * n + p]
+                        ),
+                        *expected_j,
+                        "num_limbs {num_limbs}, num_ops {num_ops}, point {p}, constraint {j}"
+                    );
+                }
+            }
+        }
+    }
+
+    // The direct filtered accumulation override must produce bit-identical
+    // values to materializing the batch then multiply-adding row by row.
+    #[test]
+    fn direct_filtered_accumulation_matches_materialized_batch() {
+        use crate::gate_batch_testing::assert_direct_accumulation_matches_materialized_batch;
 
         for (num_limbs, num_ops) in [(1, 1), (4, 2), (8, 1)] {
             let gate = ByteDecompositionGate::new(num_limbs, num_ops);
-            assert_base_batch_matches_eval_unfiltered(&gate);
+            assert_direct_accumulation_matches_materialized_batch(&gate);
         }
     }
 }

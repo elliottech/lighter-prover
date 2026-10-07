@@ -29,6 +29,7 @@ SRS_FILE=${SRS_FILE:-"./srs_file"} # Path to the SRS file. Source: https://aztec
 DELTA_ACCOUNT_COUNT=79
 DELTA_MARKET_COUNT=4096
 PUBDATA_MODE=${PUBDATA_MODE:-"blob"}
+MARGINED_ASSET_LIST_SIZE=${MARGINED_ASSET_LIST_SIZE:-7}
 
 echo "Using:"
 echo "TX_PER_PROOF: $TX_PER_PROOF"
@@ -40,6 +41,7 @@ echo "SRS_FILE: $SRS_FILE"
 echo "DELTA_ACCOUNT_COUNT: $DELTA_ACCOUNT_COUNT"
 echo "DELTA_MARKET_COUNT: $DELTA_MARKET_COUNT"
 echo "PUBDATA_MODE: $PUBDATA_MODE"
+echo "MARGINED_ASSET_LIST_SIZE: $MARGINED_ASSET_LIST_SIZE"
 
 # Wait y/Y for user input to continue
 read -p "Press y/Y to continue with the build: " -n 1 -r
@@ -58,7 +60,7 @@ cargo build --release --bin build_delta_circuit;
 cargo build --release --bin build_delta_recursion_circuit;
 
 echo "Running block circuit builder"
-./target/release/build_block_circuit --chain-id $CHAIN_ID --tx-per-proof $TX_PER_PROOF --light-tx-per-proof $LIGHT_TX_PER_PROOF --on-chain-operations-limit $ON_CHAIN_OPERATIONS_LIMIT --priority-operations-limit $PRIORITY_OPERATIONS_LIMIT
+./target/release/build_block_circuit --chain-id $CHAIN_ID --tx-per-proof $TX_PER_PROOF --light-tx-per-proof $LIGHT_TX_PER_PROOF --on-chain-operations-limit $ON_CHAIN_OPERATIONS_LIMIT --priority-operations-limit $PRIORITY_OPERATIONS_LIMIT --margined-asset-list-size $MARGINED_ASSET_LIST_SIZE
 export block_circuit=$(ls -t block-circuit*.bin | head -n 1)
 export block_tx_circuit=$(ls -t block-tx-circuit*.bin | head -n 1)
 export block_tx_light_circuit=$(ls -t block-tx-light-circuit*.bin | head -n 1)

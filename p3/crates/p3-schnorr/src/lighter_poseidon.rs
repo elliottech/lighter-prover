@@ -332,8 +332,8 @@ fn internal_linear_layer<R: PrimeCharacteristicRing>(state: &mut [R; LIGHTER_POS
 /// The external linear layer: [`apply_mat4`] on each 4-lane chunk, then mix
 /// across chunks by adding each chunk's column sums.
 fn external_linear_layer<R: PrimeCharacteristicRing>(state: &mut [R; LIGHTER_POSEIDON_WIDTH]) {
-    for chunk in state.chunks_exact_mut(4) {
-        apply_mat4(chunk.try_into().expect("chunk length is 4"));
+    for chunk in state.as_chunks_mut::<4>().0 {
+        apply_mat4(chunk);
     }
 
     let sums: [R; 4] = core::array::from_fn(|k| {

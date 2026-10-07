@@ -111,7 +111,7 @@ pub mod default {
     use crate::gates::arithmetic_extension::ArithmeticExtensionGenerator;
     use crate::gates::base_sum::BaseSplitGenerator;
     use crate::gates::coset_interpolation::InterpolationGenerator;
-    use crate::gates::equality_base::EqualityBaseGenerator;
+    use crate::gates::equality_base::{EqualityBaseGenerator, EqualityRowInverseGenerator};
     use crate::gates::exponentiation::ExponentiationGenerator;
     use crate::gates::lookup::LookupGenerator;
     use crate::gates::lookup_table::LookupTableGenerator;
@@ -168,6 +168,7 @@ pub mod default {
             DummyProofGenerator<F, C, D>,
             EqualityGenerator,
             EqualityBaseGenerator<F,D>,
+            EqualityRowInverseGenerator,
             SelectionBaseGenerator<F, D>,
             ExponentiationGenerator<F, D>,
             InterpolationGenerator<F, D>,

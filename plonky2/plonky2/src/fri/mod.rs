@@ -147,13 +147,12 @@ impl FriParams {
 
         challenger.observe_element(F::from_bool(self.hiding));
         challenger.observe_element(F::from_canonical_usize(self.degree_bits));
-        challenger.observe_elements(
-            &self
-                .reduction_arity_bits
-                .iter()
-                .map(|&e| F::from_canonical_usize(e))
-                .collect::<Vec<_>>(),
-        );
+        // `observe_elements` is a plain loop over `observe_element`, so materialising the
+        // converted arities into a `Vec` first was an allocation whose only consumer read
+        // it back element by element. Same elements, same transcript order.
+        for &arity_bits in &self.reduction_arity_bits {
+            challenger.observe_element(F::from_canonical_usize(arity_bits));
+        }
     }
 
     pub fn observe_target<F, H, const D: usize>(

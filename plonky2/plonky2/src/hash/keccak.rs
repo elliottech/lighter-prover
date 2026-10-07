@@ -60,7 +60,6 @@ impl<F: RichField> PlonkyPermutation<F> for KeccakPermutation<F> {
         }
     }
 
-    #[allow(clippy::chunks_exact_to_as_chunks)]
     fn permute(&mut self) {
         let mut state_bytes = vec![0u8; SPONGE_WIDTH * size_of::<u64>()];
         for i in 0..SPONGE_WIDTH {

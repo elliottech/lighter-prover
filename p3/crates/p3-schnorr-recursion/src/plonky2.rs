@@ -320,11 +320,8 @@ fn mds_light_permutation_targets(
     builder: &mut CircuitBuilder<F, RECURSION_D>,
     state: &mut [Target; POSEIDON_WIDTH],
 ) {
-    for chunk in state.chunks_exact_mut(4) {
-        apply_mat4_targets(
-            builder,
-            chunk.try_into().expect("Poseidon chunk length must be 4"),
-        );
+    for chunk in state.as_chunks_mut::<4>().0 {
+        apply_mat4_targets(builder, chunk);
     }
 
     let sums: [Target; 4] = core::array::from_fn(|k| {
@@ -689,7 +686,7 @@ pub fn prove_insecure_public_input_shell(
 
     let values = public_inputs.public_values();
     let mut witness = PartialWitness::new();
-    for (target, value) in circuit.public_inputs.iter().zip(values.into_iter()) {
+    for (target, value) in circuit.public_inputs.iter().zip(values) {
         witness
             .set_target(*target, goldilocks_from_p3(value))
             .map_err(|err| RecursionError::Plonky2Witness(err.to_string()))?;
@@ -734,7 +731,7 @@ pub fn prove_transcript_verifier(
     for (target, value) in circuit
         .public_inputs
         .iter()
-        .zip(public_inputs.public_values().into_iter())
+        .zip(public_inputs.public_values())
     {
         witness
             .set_target(*target, goldilocks_from_p3(value))

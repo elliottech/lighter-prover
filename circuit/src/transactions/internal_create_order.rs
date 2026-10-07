@@ -55,7 +55,7 @@ impl InternalCreateOrderTx {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct InternalCreateOrderTxTarget {
     pub account_index: Target,
     pub order_index: Target,

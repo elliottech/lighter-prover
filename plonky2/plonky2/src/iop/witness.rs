@@ -218,9 +218,15 @@ pub trait Witness<F: Field>: WitnessWrite<F> {
     where
         F: RichField + Extendable<D>,
     {
-        F::Extension::from_basefield_array(
-            self.get_targets(&et.to_target_array()).try_into().unwrap(),
-        )
+        // Read the D coordinates straight into the array. The previous form went
+        // through `get_targets`, which collects into a `Vec` — one malloc/free
+        // pair per extension-field read, for D=2 a 16-byte allocation that fits
+        // in two registers. The arithmetic-extension, multiplication-extension,
+        // reducing and Poseidon-MDS generators call this on the order of 10^5 to
+        // 10^6 times per proof. Same read order, same panic behaviour: the
+        // length is a compile-time `D`, so the old `try_into().unwrap()` could
+        // never fail.
+        F::Extension::from_basefield_array(core::array::from_fn(|i| self.get_target(et.0[i])))
     }
 
     fn get_extension_targets<const D: usize>(&self, ets: &[ExtensionTarget<D>]) -> Vec<F::Extension>
@@ -244,8 +250,11 @@ pub trait Witness<F: Field>: WitnessWrite<F> {
     }
 
     fn get_hash_target(&self, ht: HashOutTarget) -> HashOut<F> {
+        // Same allocation-free read as `get_extension_target`; `elements` is a
+        // fixed `[Target; 4]`, so the collect-then-`try_into` was a heap round
+        // trip for 32 bytes.
         HashOut {
-            elements: self.get_targets(&ht.elements).try_into().unwrap(),
+            elements: core::array::from_fn(|i| self.get_target(ht.elements[i])),
         }
     }
 
@@ -349,8 +358,21 @@ pub struct PartitionWitness<'a, F: Field> {
 impl<'a, F: Field> PartitionWitness<'a, F> {
     pub fn new(num_wires: usize, degree: usize, representative_map: &'a [u32]) -> Self {
         let len = representative_map.len();
+        // `values` is left uninitialized: `F` has no `IsZero` specialization,
+        // so `vec![F::ZERO; len]` is a real serial store pass (~70-100 MB per
+        // transaction proof, ~285 MB for the final block) at the head of the
+        // serial witness lane. Every reader is `set_bitmap`-guarded —
+        // `set_target_returning_rep`, `try_get_target`, and (since this
+        // change) `full_witness` — so an unset slot's storage is never read;
+        // the bitmap itself IS zeroed (u64 hits the `alloc_zeroed` path).
+        // Unset slots still yield exactly `F::ZERO` at every observation
+        // point, so proof bytes are unchanged.
+        let mut values = Vec::with_capacity(len);
+        // SAFETY: `F` is a plain field element (`Copy`, no drop); all reads
+        // are bitmap-guarded per the invariant above.
+        unsafe { values.set_len(len) };
         Self {
-            values: vec![F::ZERO; len],
+            values,
             set_bitmap: vec![0u64; len.div_ceil(64)],
             representative_map,
             num_wires,
@@ -373,6 +395,42 @@ impl<'a, F: Field> PartitionWitness<'a, F> {
     /// target was already set, returns `None`.
     pub fn set_target_returning_rep(&mut self, target: Target, value: F) -> Result<Option<usize>> {
         let rep_index = self.representative_map[self.target_index(target)] as usize;
+        if self.is_set_by_rep_index(rep_index) {
+            let old_value = self.values[rep_index];
+            if value != old_value {
+                return Err(anyhow!(
+                    "Partition containing {:?} was set twice with different values: {} != {}",
+                    target,
+                    old_value,
+                    value
+                ));
+            }
+
+            Ok(None)
+        } else {
+            self.values[rep_index] = value;
+            self.mark_set(rep_index);
+            Ok(Some(rep_index))
+        }
+    }
+
+    /// [`Self::set_target_returning_rep`] with the representative supplied by
+    /// the caller instead of gathered from `representative_map`.
+    ///
+    /// The representative must be the one `representative_map` holds for
+    /// `target`; the caller is responsible for that (see
+    /// [`crate::iop::generator::PartitionSeedLayout`], which records it from
+    /// this very map under a pointer-equality binding to the owning prover
+    /// data). Everything after the gather -- the set-bitmap probe, the
+    /// contradiction check, the store and the mark -- is the identical
+    /// sequence on the identical slot, so the resulting witness is bit-for-bit
+    /// what `set_target_returning_rep` would have produced.
+    pub fn set_rep_index_returning_new(
+        &mut self,
+        rep_index: usize,
+        target: Target,
+        value: F,
+    ) -> Result<Option<usize>> {
         if self.is_set_by_rep_index(rep_index) {
             let old_value = self.values[rep_index];
             if value != old_value {
@@ -433,8 +491,16 @@ impl<'a, F: Field> PartitionWitness<'a, F> {
                     let mut wire_index = chunk * chunk_rows * num_wires;
                     for i in 0..rows {
                         for column in columns.iter_mut() {
-                            column[i]
-                                .write(self.values[self.representative_map[wire_index] as usize]);
+                            let rep = self.representative_map[wire_index] as usize;
+                            // Bitmap-guarded: unset slots are uninitialized
+                            // storage and must read as F::ZERO (identical to
+                            // the dense-zero representation this replaces).
+                            let value = if self.is_set_by_rep_index(rep) {
+                                self.values[rep]
+                            } else {
+                                F::ZERO
+                            };
+                            column[i].write(value);
                             wire_index += 1;
                         }
                     }
@@ -458,9 +524,15 @@ impl<'a, F: Field> PartitionWitness<'a, F> {
         let mut wire_index = 0;
         for _ in 0..self.degree {
             for column in wire_values.iter_mut() {
-                // Unset slots hold `F::ZERO` in the dense `values` vector, so this is exactly
-                // the old `values[rep].unwrap_or(F::ZERO)` without touching the bitmap.
-                column.push(self.values[self.representative_map[wire_index] as usize]);
+                // Bitmap-guarded like the parallel path: unset slots are
+                // uninitialized storage and read as `F::ZERO`.
+                let rep = self.representative_map[wire_index] as usize;
+                let value = if self.is_set_by_rep_index(rep) {
+                    self.values[rep]
+                } else {
+                    F::ZERO
+                };
+                column.push(value);
                 wire_index += 1;
             }
         }

@@ -106,7 +106,7 @@ impl Default for TxAttributes {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct TxAttributesTarget {
     inner_types: [Target; NB_ATTRIBUTES_PER_TX],
     inner_values: [Target; NB_ATTRIBUTES_PER_TX],
@@ -275,7 +275,7 @@ impl TxAttributesTarget {
         let should_be_false = builder.and_not(is_integrator_index_nil, is_both_fees_nil);
         builder.assert_false(should_be_false);
 
-        // Disallow self-trade specifications if integrator index is set
+        // Disallow self-trade specifications if an integrator is set
         let is_self_trade_modes_nil = builder.and(
             is_self_trade_behavior_mode_nil,
             is_self_trade_equality_mode_nil,
@@ -432,4 +432,81 @@ pub fn is_integrator_fee_disabled(
         integrator_fee_collector_index,
         ATTR_NIL_VALUES[ATTR_INTEGRATOR_FEE_COLLECTOR_INDEX],
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use plonky2::iop::witness::PartialWitness;
+
+    use super::*;
+    use crate::types::config::{C, CIRCUIT_CONFIG};
+
+    #[test]
+    fn validates_integrator_and_self_trade_exclusivity() {
+        let mut builder = Builder::new(CIRCUIT_CONFIG);
+        let target = TxAttributesTarget::new(&mut builder);
+        let data = builder.build::<C>();
+
+        for (attributes, should_succeed) in [
+            (
+                TxAttributes {
+                    attribute_types: [
+                        ATTR_INTEGRATOR_FEE_COLLECTOR_INDEX as u8,
+                        ATTR_SELF_TRADE_BEHAVIOR_MODE as u8,
+                        ATTR_NIL as u8,
+                        ATTR_NIL as u8,
+                    ],
+                    attribute_values: [1, SELF_TRADE_BEHAVIOR_EXPIRE_TAKER as i64, 0, 0],
+                },
+                false,
+            ),
+            (
+                TxAttributes {
+                    attribute_types: [
+                        ATTR_INTEGRATOR_FEE_COLLECTOR_INDEX as u8,
+                        ATTR_SELF_TRADE_EQUALITY_MODE as u8,
+                        ATTR_NIL as u8,
+                        ATTR_NIL as u8,
+                    ],
+                    attribute_values: [1, SELF_TRADE_EQUALITY_MASTER_ACCOUNT_INDEX as i64, 0, 0],
+                },
+                false,
+            ),
+            (
+                TxAttributes {
+                    attribute_types: [
+                        ATTR_INTEGRATOR_FEE_COLLECTOR_INDEX as u8,
+                        ATTR_NIL as u8,
+                        ATTR_NIL as u8,
+                        ATTR_NIL as u8,
+                    ],
+                    attribute_values: [1, 0, 0, 0],
+                },
+                true,
+            ),
+            (
+                TxAttributes {
+                    attribute_types: [
+                        ATTR_SELF_TRADE_BEHAVIOR_MODE as u8,
+                        ATTR_NIL as u8,
+                        ATTR_NIL as u8,
+                        ATTR_NIL as u8,
+                    ],
+                    attribute_values: [SELF_TRADE_BEHAVIOR_EXPIRE_TAKER as i64, 0, 0, 0],
+                },
+                true,
+            ),
+        ] {
+            let mut witness = PartialWitness::<F>::new();
+            witness
+                .set_attributes_tx_target(&target, &attributes)
+                .unwrap();
+
+            let proof = data.prove(witness);
+            assert_eq!(proof.is_ok(), should_succeed);
+            if let Ok(proof) = proof {
+                data.verify(proof).unwrap();
+            }
+        }
+    }
 }

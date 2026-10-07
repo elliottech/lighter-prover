@@ -37,7 +37,7 @@ pub struct InternalLiquidatePositionTx {
     pub base_amount: i64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct InternalLiquidatePositionTxTarget {
     pub account_index: Target,
     pub market_index: Target,

@@ -43,7 +43,7 @@ pub struct L2UnstakeAssetsTx {
     pub share_amount: i64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct L2UnstakeAssetsTxTarget {
     pub account_index: Target,
     pub api_key_index: Target,

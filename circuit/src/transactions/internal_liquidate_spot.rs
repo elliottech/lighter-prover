@@ -35,7 +35,7 @@ pub struct InternalLiquidateSpotTx {
     pub base_amount: i64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct InternalLiquidateSpotTxTarget {
     pub account_index: Target,
     pub asset_index: Target,

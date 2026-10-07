@@ -30,7 +30,7 @@ pub struct ApprovedIntegrator {
     pub expiry: i64,
 }
 
-#[derive(Debug, Clone, Default, Copy)]
+#[derive(Debug, Clone, Default, Copy, serde::Serialize, serde::Deserialize)]
 pub struct ApprovedIntegratorTarget {
     pub integrator_account_index: Target,
     pub max_perps_taker_fee: Target,

@@ -87,7 +87,7 @@ impl Default for AccountPosition {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct AccountPositionTarget {
     pub public_market_index: Target,                   // 48 bits
     pub last_funding_rate_prefix_sum: BigIntU16Target, // 63 bits

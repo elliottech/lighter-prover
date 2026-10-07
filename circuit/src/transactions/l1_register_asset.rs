@@ -49,7 +49,7 @@ pub struct L1RegisterAssetTx {
     pub index_price: i64, // Given by sequencer
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct L1RegisterAssetTxTarget {
     pub asset_index: Target,
     pub extension_multiplier: BigUintTarget,
@@ -247,11 +247,13 @@ impl Verify for L1RegisterAssetTxTarget {
         self.success = builder.and(self.success, is_asset_empty);
 
         // If the asset joins the margined asset list but next available margin index is nil, reject the transaction
-        let is_margin_index_nil =
-            builder.is_equal_constant(tx_state.next_margin_asset_index, NIL_MARGIN_ASSET_INDEX);
-        let is_margin_index_nil_and_in_margin_list =
-            builder.and(self.in_margin_list, is_margin_index_nil);
-        self.success = builder.and_not(self.success, is_margin_index_nil_and_in_margin_list);
+        let is_margin_index_invalid = builder.is_equal_constant(
+            tx_state.next_margin_asset_index,
+            tx_state.margined_asset_list_size as u64,
+        );
+        let invalid_margin_index_and_in_margin_list =
+            builder.and(self.in_margin_list, is_margin_index_invalid);
+        self.success = builder.and_not(self.success, invalid_margin_index_and_in_margin_list);
 
         // If the asset joins the margined asset list and margin index is not nil, check that margin index is empty
         let is_margin_index_empty = tx_state.margined_asset[TX_ASSET_ID].is_empty(builder);
@@ -265,10 +267,15 @@ impl Apply for L1RegisterAssetTxTarget {
         let zero_biguint = builder.zero_biguint();
         let zero = builder.zero();
 
-        let is_margin_index_nil =
-            builder.is_equal_constant(tx_state.next_margin_asset_index, NIL_MARGIN_ASSET_INDEX);
-        let margin_index =
-            builder.select(is_margin_index_nil, zero, tx_state.next_margin_asset_index);
+        let is_margin_index_invalid = builder.is_equal_constant(
+            tx_state.next_margin_asset_index,
+            tx_state.margined_asset_list_size as u64,
+        );
+        let margin_index = builder.select(
+            is_margin_index_invalid,
+            zero,
+            tx_state.next_margin_asset_index,
+        );
         let margin_index = builder.select(self.in_margin_list, margin_index, zero);
         tx_state.assets[TX_ASSET_ID] = select_asset_target(
             builder,

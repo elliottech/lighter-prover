@@ -37,7 +37,7 @@ pub struct L1SetSystemConfigTx {
     pub max_integrator_perps_maker_fee: i64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct L1SetSystemConfigTxTarget {
     pub liquidity_pool_index: Target,
     pub staking_pool_index: Target,

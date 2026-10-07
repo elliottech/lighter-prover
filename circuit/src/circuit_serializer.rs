@@ -21,7 +21,9 @@ use plonky2::gates::arithmetic_extension::{ArithmeticExtensionGate, ArithmeticEx
 use plonky2::gates::base_sum::{BaseSplitGenerator, BaseSumGate};
 use plonky2::gates::constant::ConstantGate;
 use plonky2::gates::coset_interpolation::{CosetInterpolationGate, InterpolationGenerator};
-use plonky2::gates::equality_base::{EqualityBaseGenerator, EqualityGate};
+use plonky2::gates::equality_base::{
+    EqualityBaseGenerator, EqualityGate, EqualityRowInverseGenerator,
+};
 use plonky2::gates::exponentiation::{ExponentiationGate, ExponentiationGenerator};
 use plonky2::gates::lookup::{LookupGate, LookupGenerator};
 use plonky2::gates::lookup_table::{LookupTableGate, LookupTableGenerator};
@@ -233,6 +235,7 @@ where
         CopyGenerator,
         EqualityGenerator,
         EqualityBaseGenerator<F, D>,
+        EqualityRowInverseGenerator,
         ExponentiationGenerator<F, D>,
         InterpolationGenerator<F, D>,
         LookupGenerator,
@@ -373,6 +376,7 @@ where
         CopyGenerator,
         EqualityGenerator,
         EqualityBaseGenerator<F,D>,
+        EqualityRowInverseGenerator,
         ExponentiationGenerator<F, D>,
         InterpolationGenerator<F, D>,
         LookupGenerator,
@@ -500,6 +504,7 @@ where
         CopyGenerator,
         EqualityGenerator,
         EqualityBaseGenerator<F,D>,
+        EqualityRowInverseGenerator,
         ExponentiationGenerator<F, D>,
         InterpolationGenerator<F, D>,
         LookupGenerator,
@@ -583,6 +588,7 @@ where
         CopyGenerator,
         EqualityGenerator,
         EqualityBaseGenerator<F,D>,
+        EqualityRowInverseGenerator,
         ExponentiationGenerator<F, D>,
         InterpolationGenerator<F, D>,
         LookupGenerator,
@@ -665,6 +671,7 @@ where
         CopyGenerator,
         EqualityGenerator,
         EqualityBaseGenerator<F, D>,
+        EqualityRowInverseGenerator,
         ExponentiationGenerator<F, D>,
         InterpolationGenerator<F, D>,
         LookupGenerator,
@@ -707,5 +714,94 @@ where
         U32InterleaveGenerator,
         UninterleaveToU32Generator,
         EvaluateSequenceBaseGenerator<F, D>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    use plonky2::plonk::circuit_builder::CircuitBuilder;
+    use plonky2::plonk::circuit_data::{CircuitConfig, CircuitData};
+    use plonky2::util::serialization::Buffer;
+
+    use super::*;
+    use crate::ecdsa::curve::secp256k1::Secp256K1;
+    use crate::types::config::{C, D};
+
+    /// A minimal circuit containing an `EqualityGate` row, so its prover data holds
+    /// both `EqualityBaseGenerator` and `EqualityRowInverseGenerator` instances.
+    fn equality_circuit() -> CircuitData<F, C, D> {
+        let mut config = CircuitConfig::standard_recursion_config();
+        // Route `is_equal` through the EqualityGate, as the production configs do.
+        config.optimization_flags |= 1 << 3;
+        let mut builder = CircuitBuilder::<F, D>::new(config);
+        let x = builder.add_virtual_target();
+        let y = builder.add_virtual_target();
+        let _ = builder.is_equal(x, y);
+        builder.build::<C>()
+    }
+
+    fn assert_equality_generators_roundtrip<S: WitnessGeneratorSerializer<F, D>>(
+        serializer: &S,
+        data: &CircuitData<F, C, D>,
+    ) {
+        let mut seen_per_slot = false;
+        let mut seen_row_inverse = false;
+        for generator in &data.prover_only.generators {
+            let id = generator.0.id();
+            if id != "EqualityBaseGenerator" && id != "EqualityRowInverseGenerator" {
+                continue;
+            }
+            seen_per_slot |= id == "EqualityBaseGenerator";
+            seen_row_inverse |= id == "EqualityRowInverseGenerator";
+
+            let mut bytes = Vec::new();
+            serializer
+                .write_generator(&mut bytes, generator, &data.common)
+                .expect("write_generator failed");
+            let mut buf = Buffer::new(&bytes);
+            let restored = serializer
+                .read_generator(&mut buf, &data.common)
+                .expect("read_generator failed");
+            assert_eq!(restored.0.id(), id);
+
+            let mut bytes2 = Vec::new();
+            serializer
+                .write_generator(&mut bytes2, &restored, &data.common)
+                .expect("write_generator after round-trip failed");
+            assert_eq!(
+                bytes, bytes2,
+                "round-tripped generator serialized differently"
+            );
+        }
+        assert!(seen_per_slot, "no EqualityBaseGenerator in circuit");
+        assert!(
+            seen_row_inverse,
+            "no EqualityRowInverseGenerator in circuit"
+        );
+    }
+
+    /// Both equality generators must round-trip through every generator serializer
+    /// registry defined in this file.
+    #[test]
+    fn equality_generators_roundtrip_through_all_serializers() {
+        let data = equality_circuit();
+        assert_equality_generators_roundtrip(
+            &BlockGeneratorSerializer::<C, D, Secp256K1>::default(),
+            &data,
+        );
+        assert_equality_generators_roundtrip(
+            &RecursionGeneratorSerializer::<C, D>::default(),
+            &data,
+        );
+        assert_equality_generators_roundtrip(
+            &InnerWrapperGeneratorSerializer::<C, D, F>::default(),
+            &data,
+        );
+        assert_equality_generators_roundtrip(
+            &DefaultPoseidonBN128GeneratorSerializer::<C, D>::default(),
+            &data,
+        );
+        assert_equality_generators_roundtrip(&DeltaGeneratorSerializer::<C, D>::default(), &data);
     }
 }

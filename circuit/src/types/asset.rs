@@ -74,7 +74,7 @@ impl Asset {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct AssetTarget {
     pub extension_multiplier: BigUintTarget,
     pub min_transfer_amount: BigUintTarget,
@@ -136,14 +136,14 @@ impl AssetTarget {
         builder.not(is_disabled)
     }
 
-    pub fn margin_index(&self, builder: &mut Builder) -> Target {
-        let nil_margined_asset_index = builder.constant_u64(MARGINED_ASSET_LIST_SIZE as u64);
+    /// Returns the margin slot index of the asset if it is margin enabled/priced only
+    /// Returns out-of-bounds index if the asset is not in the margin list. Be careful when using returned value
+    /// to access from the margined asset list. See [`crate::types::account::AccountTarget::get_margined_asset_balances`]
+    /// and [`crate::types::margined_asset::random_access_margined_assets`]
+    pub fn margin_index(&self, builder: &mut Builder, margined_asset_list_size: usize) -> Target {
+        let out_of_bounds_index = builder.constant_usize(margined_asset_list_size);
         let is_in_margin_list = self.is_in_margin_list(builder);
-        builder.select(
-            is_in_margin_list,
-            self.margin_index,
-            nil_margined_asset_index,
-        )
+        builder.select(is_in_margin_list, self.margin_index, out_of_bounds_index)
     }
 
     pub fn print(&self, builder: &mut Builder, tag: &str) {

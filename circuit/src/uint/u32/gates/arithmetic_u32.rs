@@ -11,10 +11,11 @@
 use core::marker::PhantomData;
 
 use anyhow::Result;
+use plonky2::field::batch_util::batch_multiply_add_inplace;
 use plonky2::field::extension::Extendable;
 use plonky2::field::packed::PackedField;
 use plonky2::field::types::Field;
-use plonky2::gates::gate::Gate;
+use plonky2::gates::gate::{Gate, U32QuotientGate};
 use plonky2::gates::packed_util::PackedEvaluableBase;
 use plonky2::gates::util::StridedConstraintConsumer;
 use plonky2::hash::hash_types::RichField;
@@ -181,7 +182,6 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for U32ArithmeticG
     }
 
     fn eval_unfiltered_base_batch(&self, vars_base: EvaluationVarsBaseBatch<F>) -> Vec<F> {
-        assert_eq!(1 << Self::limb_bits(), 4);
         let n = vars_base.len();
         let wires = vars_base.local_wires;
         let three = F::from_canonical_usize(3);
@@ -225,6 +225,7 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for U32ArithmeticG
             for j in (0..Self::num_limbs()).rev() {
                 let limb = &wires[self.wire_ith_output_jth_limb(i, j) * n..][..n];
                 let out = chunks.next().unwrap();
+                debug_assert_eq!(1 << Self::limb_bits(), 4);
                 for p in 0..n {
                     let x = limb[p];
                     let y = x * (x - three);
@@ -248,8 +249,117 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for U32ArithmeticG
                 out[p] = combined_high[p] - output_high[p];
             }
         }
-        assert!(chunks.next().is_none());
         res
+    }
+
+    fn eval_unfiltered_base_batch_accumulate(
+        &self,
+        vars_base: EvaluationVarsBaseBatch<F>,
+        filters: &[F],
+        combined_gate_constraints: &mut [F],
+    ) {
+        let n = vars_base.len();
+        assert_eq!(filters.len(), n);
+        let num_constraints = self.num_constraints();
+        assert!(combined_gate_constraints.len() >= num_constraints * n);
+
+        let wires = vars_base.local_wires;
+        let three = F::from_canonical_usize(3);
+        let limb_base = F::from_canonical_u64(1u64 << Self::limb_bits());
+        let base32 = F::from_canonical_u64(1 << 32u64);
+        let u32_max = F::from_canonical_u32(u32::MAX);
+        let midpoint = Self::num_limbs() / 2;
+        // Batches are 32 points in this prover; keep the scratch row on the
+        // stack and fall back to the heap only for oversized batches.
+        let mut scratch_stack = [F::ZERO; 64];
+        let mut scratch_heap;
+        let scratch: &mut [F] = if n <= 64 {
+            &mut scratch_stack[..n]
+        } else {
+            scratch_heap = vec![F::ZERO; n];
+            &mut scratch_heap
+        };
+        let mut constraint_index = 0;
+
+        for i in 0..self.num_ops {
+            let multiplicand_0 = &wires[self.wire_ith_multiplicand_0(i) * n..][..n];
+            let multiplicand_1 = &wires[self.wire_ith_multiplicand_1(i) * n..][..n];
+            let addend = &wires[self.wire_ith_addend(i) * n..][..n];
+            let output_low = &wires[self.wire_ith_output_low_half(i) * n..][..n];
+            let output_high = &wires[self.wire_ith_output_high_half(i) * n..][..n];
+            let inverse = &wires[self.wire_ith_inverse(i) * n..][..n];
+
+            // Canonicity: (inverse * (u32::MAX - output_high) - 1) * output_low.
+            for p in 0..n {
+                let diff = u32_max - output_high[p];
+                let hi_not_max = inverse[p] * diff - F::ONE;
+                scratch[p] = hi_not_max * output_low[p];
+            }
+            let combined =
+                &mut combined_gate_constraints[constraint_index * n..(constraint_index + 1) * n];
+            batch_multiply_add_inplace(combined, scratch, filters);
+            constraint_index += 1;
+
+            // combined_output - computed_output.
+            for p in 0..n {
+                let computed = multiplicand_0[p] * multiplicand_1[p] + addend[p];
+                scratch[p] = output_high[p] * base32 + output_low[p] - computed;
+            }
+            let combined =
+                &mut combined_gate_constraints[constraint_index * n..(constraint_index + 1) * n];
+            batch_multiply_add_inplace(combined, scratch, filters);
+            constraint_index += 1;
+
+            // Limb range products (base-4: x(x-1)(x-2)(x-3) = y(y+2), y = x(x-3))
+            // in the same descending order as `eval_unfiltered`.
+            debug_assert_eq!(1 << Self::limb_bits(), 4);
+            for j in (0..Self::num_limbs()).rev() {
+                let limb = &wires[self.wire_ith_output_jth_limb(i, j) * n..][..n];
+                for p in 0..n {
+                    let x = limb[p];
+                    let y = x * (x - three);
+                    scratch[p] = y * (y + F::TWO);
+                }
+                let combined = &mut combined_gate_constraints
+                    [constraint_index * n..(constraint_index + 1) * n];
+                batch_multiply_add_inplace(combined, scratch, filters);
+                constraint_index += 1;
+            }
+
+            // Low/high recompositions, folded high-to-low over each group
+            // exactly as the interleaved accumulation in the batch path.
+            scratch.fill(F::ZERO);
+            for j in (0..midpoint).rev() {
+                let limb = &wires[self.wire_ith_output_jth_limb(i, j) * n..][..n];
+                for p in 0..n {
+                    scratch[p] = scratch[p] * limb_base + limb[p];
+                }
+            }
+            for p in 0..n {
+                scratch[p] -= output_low[p];
+            }
+            let combined =
+                &mut combined_gate_constraints[constraint_index * n..(constraint_index + 1) * n];
+            batch_multiply_add_inplace(combined, scratch, filters);
+            constraint_index += 1;
+
+            scratch.fill(F::ZERO);
+            for j in (midpoint..Self::num_limbs()).rev() {
+                let limb = &wires[self.wire_ith_output_jth_limb(i, j) * n..][..n];
+                for p in 0..n {
+                    scratch[p] = scratch[p] * limb_base + limb[p];
+                }
+            }
+            for p in 0..n {
+                scratch[p] -= output_high[p];
+            }
+            let combined =
+                &mut combined_gate_constraints[constraint_index * n..(constraint_index + 1) * n];
+            batch_multiply_add_inplace(combined, scratch, filters);
+            constraint_index += 1;
+        }
+
+        debug_assert_eq!(constraint_index, num_constraints);
     }
 
     fn eval_unfiltered_circuit(
@@ -357,6 +467,12 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for U32ArithmeticG
 
     fn num_constraints(&self) -> usize {
         self.num_ops * (4 + Self::num_limbs())
+    }
+
+    fn u32_quotient_gate(&self) -> Option<U32QuotientGate> {
+        Some(U32QuotientGate::Arithmetic {
+            num_ops: self.num_ops,
+        })
     }
 }
 
@@ -481,9 +597,23 @@ impl<F: RichField + Extendable<D>, const D: usize> SimpleGenerator<F, D>
         out_buffer.set_wire(output_high_wire, output_high)?;
         out_buffer.set_wire(output_low_wire, output_low)?;
 
+        // INV_U32_MAX is the multiplicative inverse of u32::MAX in the Goldilocks
+        // field. In the common no-high-half-overflow case the output high half is
+        // zero, so diff == u32::MAX and the else branch below would otherwise
+        // recompute a fixed field inverse (a ~72-multiplication Fermat chain) on
+        // every op. Since u32::MAX == 2^32 - 1 == 2^64 (mod p) and 2 has
+        // multiplicative order 192 in Goldilocks, u32::MAX^{-1} == 2^128 (mod p)
+        // == 0xffff_fffe_0000_0001. Value-exact: this equals
+        // F::from_canonical_u64(u32::MAX as u64).inverse() for the Goldilocks
+        // field this circuit uses (checked by the debug_assert below).
+        const INV_U32_MAX: u64 = 0xffff_fffe_0000_0001;
         let diff = u32::MAX as u64 - output_high_u64;
         let inverse = if diff == 0 {
             F::ZERO
+        } else if diff == u32::MAX as u64 {
+            let inv = F::from_canonical_u64(INV_U32_MAX);
+            debug_assert_eq!(inv, F::from_canonical_u64(u32::MAX as u64).inverse());
+            inv
         } else {
             F::from_canonical_u64(diff).inverse()
         };
@@ -545,5 +675,17 @@ mod batch_tests {
             &CircuitConfig::standard_recursion_config(),
         );
         assert_base_batch_matches_eval_unfiltered(&gate);
+    }
+
+    // The direct filtered accumulation override must produce bit-identical
+    // values to materializing the batch then multiply-adding row by row.
+    #[test]
+    fn direct_filtered_accumulation_matches_materialized_batch() {
+        use crate::gate_batch_testing::assert_direct_accumulation_matches_materialized_batch;
+
+        let gate = U32ArithmeticGate::<GoldilocksField, 2>::new_from_config(
+            &CircuitConfig::standard_recursion_config(),
+        );
+        assert_direct_accumulation_matches_materialized_batch(&gate);
     }
 }

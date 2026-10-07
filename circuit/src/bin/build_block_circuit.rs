@@ -41,6 +41,9 @@ struct Args {
     chain_id: u32,
 
     #[arg(long)]
+    margined_asset_list_size: usize,
+
+    #[arg(long)]
     path: Option<std::path::PathBuf>,
 }
 
@@ -59,6 +62,10 @@ fn main() -> Result<()> {
         args.priority_operations_limit
     );
     info!("chain_id: {}", args.chain_id);
+    info!(
+        "margined_asset_list_size: {}",
+        args.margined_asset_list_size
+    );
 
     assert_eq!(
         args.on_chain_operations_limit, 1,
@@ -68,26 +75,28 @@ fn main() -> Result<()> {
         args.priority_operations_limit, 1,
         "only 1 priority operation is supported"
     );
-    info!("tx_per_proof 0: {}", args.tx_per_proof);
-    info!("chain_id 0: {}", args.chain_id);
-
-    info!("tx_per_proof 1: {}", args.tx_per_proof);
-    info!("chain_id 1: {}", args.chain_id);
 
     // Assume 1 tx per block tx segment. Also we are assuming one priority operation per block and one priority operation and on chain operation per tx segment.
-    let heavy_tx_circuit =
-        BlockTxCircuit::define(CIRCUIT_CONFIG, args.tx_per_proof, args.chain_id, TX_HEAVY);
+    let heavy_tx_circuit = BlockTxCircuit::define(
+        CIRCUIT_CONFIG,
+        args.tx_per_proof,
+        args.chain_id,
+        TX_HEAVY,
+        args.margined_asset_list_size,
+    );
     let heavy_data = heavy_tx_circuit.builder.build::<C>();
     let light_tx_circuit = BlockTxCircuit::define(
         CIRCUIT_CONFIG,
         args.light_tx_per_proof,
         args.chain_id,
         TX_LIGHT,
+        args.margined_asset_list_size,
     );
     let light_data = light_tx_circuit.builder.build::<C>();
     info!("BlockTxCircuit defined!");
 
-    let pre_exec_circuit = BlockPreExecutionCircuit::define(CIRCUIT_CONFIG);
+    let pre_exec_circuit =
+        BlockPreExecutionCircuit::define(CIRCUIT_CONFIG, args.margined_asset_list_size);
     let pre_exec_data = pre_exec_circuit.builder.build::<C>();
     info!("BlockPreExecutionCircuit defined!");
 
@@ -117,6 +126,7 @@ fn main() -> Result<()> {
         &heavy_chain_circuit_data,
         &signature_batch_circuit.data,
         args.on_chain_operations_limit,
+        args.margined_asset_list_size,
     );
     let data = circuit.builder.build::<C>();
     info!("BlockCircuit defined!");

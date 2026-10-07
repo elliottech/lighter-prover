@@ -132,13 +132,6 @@ pub const EMPTY_ORDER_BOOK_TREE_ROOT: HashOut<F> = const_hash_out([
     18095351966852921172,
 ]);
 
-pub const EMPTY_ACCOUNT_HASH: HashOut<F> = const_hash_out([
-    17289273313606260951,
-    11345669838050056237,
-    17251682592702054961,
-    5290299717499980746,
-]);
-
 /// Tx Types
 pub const TX_TYPE_EMPTY: u8 = 0;
 
@@ -385,9 +378,6 @@ pub const MAX_PENDING_UNLOCKS: usize = 8;
 
 pub const ASSET_LIST_SIZE_BITS: usize = 6;
 pub const ASSET_LIST_SIZE: usize = 1 << ASSET_LIST_SIZE_BITS; // first and last slots unused
-pub const MARGINED_ASSET_LIST_SIZE_BITS: usize = 3;
-pub const MARGINED_ASSET_LIST_SIZE: usize = 7; // Last element is actually empty, reserved for nil
-pub const NIL_MARGIN_ASSET_INDEX: u64 = 7;
 
 pub const NATIVE_ASSET_INDEX: u64 = 1;
 pub const LIT_ASSET_INDEX: u64 = 2;

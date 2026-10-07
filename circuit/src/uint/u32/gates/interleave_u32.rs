@@ -11,10 +11,11 @@
 use core::ops::Range;
 
 use anyhow::Result;
+use plonky2::field::batch_util::batch_multiply_add_inplace;
 use plonky2::field::extension::Extendable;
 use plonky2::field::packed::PackedField;
 use plonky2::field::types::Field;
-use plonky2::gates::gate::Gate;
+use plonky2::gates::gate::{Gate, InterleavePairGate};
 use plonky2::gates::packed_util::PackedEvaluableBase;
 use plonky2::gates::util::StridedConstraintConsumer;
 use plonky2::hash::hash_types::RichField;
@@ -200,11 +201,65 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for U32InterleaveG
         filters: &[F],
         combined_gate_constraints: &mut [F],
     ) {
-        self.eval_unfiltered_base_batch_accumulate_packed(
-            vars_base,
-            filters,
-            combined_gate_constraints,
-        );
+        let n = vars_base.len();
+        assert_eq!(filters.len(), n);
+        let num_constraints = <Self as Gate<F, D>>::num_constraints(self);
+        assert!(combined_gate_constraints.len() >= num_constraints * n);
+
+        let wires = vars_base.local_wires;
+        let base = F::from_canonical_usize(Self::B);
+        let base_sq = F::from_canonical_usize(Self::B * Self::B);
+
+        let mut scratch_stack = [F::ZERO; 3 * 64];
+        let mut scratch_heap;
+        let scratch: &mut [F] = if n <= 64 {
+            &mut scratch_stack[..3 * n]
+        } else {
+            scratch_heap = vec![F::ZERO; 3 * n];
+            &mut scratch_heap
+        };
+        let (acc_x, rest) = scratch.split_at_mut(n);
+        let (acc_interleaved, range) = rest.split_at_mut(n);
+
+        let mut constraint_index = 0;
+        for i in 0..self.num_ops {
+            let x_row = constraint_index;
+            let interleaved_row = constraint_index + 1;
+            constraint_index += 2;
+
+            acc_x.fill(F::ZERO);
+            acc_interleaved.fill(F::ZERO);
+            for bit_wire in self.wires_ith_bit_decomposition(i) {
+                let col = &wires[bit_wire * n..][..n];
+                for p in 0..n {
+                    let bit = col[p];
+                    acc_x[p] = acc_x[p] * base + bit;
+                    acc_interleaved[p] = acc_interleaved[p] * base_sq + bit;
+                    range[p] = bit * (bit - F::ONE);
+                }
+                let combined = &mut combined_gate_constraints
+                    [constraint_index * n..(constraint_index + 1) * n];
+                batch_multiply_add_inplace(combined, range, filters);
+                constraint_index += 1;
+            }
+
+            let x_col = &wires[self.wire_ith_x(i) * n..][..n];
+            for p in 0..n {
+                acc_x[p] -= x_col[p];
+            }
+            let combined = &mut combined_gate_constraints[x_row * n..(x_row + 1) * n];
+            batch_multiply_add_inplace(combined, acc_x, filters);
+
+            let x_interleaved_col = &wires[self.wire_ith_x_interleaved(i) * n..][..n];
+            for p in 0..n {
+                acc_interleaved[p] -= x_interleaved_col[p];
+            }
+            let combined =
+                &mut combined_gate_constraints[interleaved_row * n..(interleaved_row + 1) * n];
+            batch_multiply_add_inplace(combined, acc_interleaved, filters);
+        }
+
+        debug_assert_eq!(constraint_index, num_constraints);
     }
 
     fn generators(&self, row: usize, _local_constants: &[F]) -> Vec<WitnessGeneratorRef<F, D>> {
@@ -237,6 +292,12 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for U32InterleaveG
 
     fn num_constraints(&self) -> usize {
         self.num_ops * (Self::NUM_BITS + 1 + 1)
+    }
+
+    fn interleave_pair_gate(&self) -> Option<InterleavePairGate> {
+        Some(InterleavePairGate::Interleave {
+            num_ops: self.num_ops,
+        })
     }
 
     fn serialize(
@@ -391,6 +452,7 @@ mod tests {
     use plonky2::plonk::config::{GenericConfig, PoseidonGoldilocksConfig};
 
     use super::*;
+    use crate::gate_batch_testing::assert_accumulate_matches_eval_unfiltered;
 
     #[test]
     fn low_degree() {
@@ -403,5 +465,12 @@ mod tests {
         type C = PoseidonGoldilocksConfig;
         type F = <C as GenericConfig<D>>::F;
         test_eval_fns::<F, C, _, D>(U32InterleaveGate { num_ops: 2 })
+    }
+
+    #[test]
+    fn accumulate_matches_eval_unfiltered() {
+        for num_ops in [1, 2, 3] {
+            assert_accumulate_matches_eval_unfiltered(&U32InterleaveGate { num_ops });
+        }
     }
 }

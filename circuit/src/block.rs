@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::{Arc, OnceLock};
 
 use num::BigInt;
 use plonky2::field::extension::Extendable;
@@ -58,8 +59,7 @@ where
     pub all_assets: [Asset; ASSET_LIST_SIZE],
 
     #[serde(rename = "amab")]
-    #[serde_as(as = "[_; MARGINED_ASSET_LIST_SIZE]")]
-    pub all_margined_assets: [MarginedAsset; MARGINED_ASSET_LIST_SIZE],
+    pub all_margined_assets: Vec<MarginedAsset>,
 
     #[serde(rename = "pmda")]
     #[serde_as(as = "[_; POSITION_LIST_SIZE]")]
@@ -140,9 +140,12 @@ where
     pub new_prefix_priority_operation_hash: [u8; KECCAK_HASH_OUT_BYTE_SIZE],
 
     #[serde(rename = "txs")]
+    #[serde(deserialize_with = "deserialize_txs_parallel")]
     txs: Vec<Tx<F>>,
+    /// Chunk slots share immutable padding transactions instead of cloning the
+    /// full transaction state and Merkle paths for every padded position.
     #[serde(skip)]
-    pub tx_chunks: Vec<Vec<Tx<F>>>,
+    pub tx_chunks: Vec<Vec<Arc<Tx<F>>>>,
 }
 
 impl<F> Block<F>
@@ -156,7 +159,65 @@ where
     ) -> serde_json::Result<Self> {
         Self::from_json_inner(data, tx_per_proof, light_tx_per_proof, 0, 0)
     }
+}
 
+/// Parses the `txs` array with one worker per transaction.
+///
+/// The array dominates a block witness — a single empty transaction serializes
+/// to ~107 KB because of its Merkle-path arrays, so a 500-transaction block is
+/// tens of megabytes — and the whole parse ran on one thread at the very front
+/// of the process, where only the (fast) pre-execution circuit load overlaps
+/// it. The pre-execution witness, its proof, and everything downstream wait on
+/// this.
+///
+/// Deferring each element as a `RawValue` costs one scan to find the element
+/// boundaries, then parses the bodies in parallel. Value-exact: every element
+/// is handed to the same `Tx` deserializer over the same bytes, and collecting
+/// into a `Vec` preserves order, so the block is identical. Errors stay errors;
+/// only the reported byte position changes, because an element is parsed
+/// standalone rather than at its offset in the enclosing document.
+///
+/// The borrow is sound for every caller: they all reach this through
+/// `from_json*` with a `&[u8]`, i.e. a borrowing deserializer.
+///
+/// Deserializing a `Tx` recurses far deeper than rayon's default 2 MiB worker
+/// stack allows, so the parse runs on a dedicated pool with large stacks
+/// instead of whatever pool the caller happens to be in.
+fn deserialize_txs_parallel<'de, D, F>(deserializer: D) -> Result<Vec<Tx<F>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    F: Field + Extendable<5> + RichField,
+{
+    use rayon::prelude::*;
+    use serde::de::Error as _;
+
+    let raw: Vec<&'de serde_json::value::RawValue> = serde::Deserialize::deserialize(deserializer)?;
+    tx_parse_pool()
+        .install(|| {
+            raw.into_par_iter()
+                .map(|element| serde_json::from_str::<Tx<F>>(element.get()))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(D::Error::custom)
+}
+
+const TX_PARSE_STACK_SIZE: usize = 64 << 20;
+
+fn tx_parse_pool() -> &'static rayon::ThreadPool {
+    static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+    POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .thread_name(|i| format!("tx-parse-{i}"))
+            .stack_size(TX_PARSE_STACK_SIZE)
+            .build()
+            .expect("failed to build tx parse thread pool")
+    })
+}
+
+impl<F> Block<F>
+where
+    F: Field + Extendable<5> + RichField,
+{
     /// Like [`Self::from_json`], but when the block consists only of empty txs, appends
     /// `heavy_empty_tx_count` heavy and `light_empty_tx_count` light copies of the block's
     /// trailing empty tx before chunking. Blocks with active txs are parsed unchanged.
@@ -211,38 +272,68 @@ where
                 last_heavy_index = next_index;
             }
         }
-        if txs.is_empty() {
-            for (count, circuit_type, last_index) in [
-                (heavy_empty_tx_count, TX_HEAVY, last_heavy_index),
-                (light_empty_tx_count, TX_LIGHT, last_light_index),
-            ] {
-                let mut pad = empty_template
-                    .clone()
-                    .expect("block witness must end with an empty padding tx");
-                pad.tx_circuit_type = circuit_type;
-                pad.tx_index = last_index;
-                txs.extend(std::iter::repeat_n(pad, count));
-            }
-        }
-        block.tx_chunks = Self::chunk_txs(
-            txs,
-            empty_template,
-            last_heavy_index,
-            last_light_index,
-            tx_per_proof,
-            light_tx_per_proof,
-        );
+        let empty_template =
+            empty_template.expect("block witness must end with an empty padding tx");
+        block.tx_chunks = if txs.is_empty() {
+            Self::empty_tx_chunks(
+                empty_template,
+                heavy_empty_tx_count,
+                light_empty_tx_count,
+                last_heavy_index,
+                last_light_index,
+                tx_per_proof,
+                light_tx_per_proof,
+            )
+        } else {
+            Self::chunk_txs(
+                txs,
+                empty_template,
+                last_heavy_index,
+                last_light_index,
+                tx_per_proof,
+                light_tx_per_proof,
+            )
+        };
         Ok(block)
     }
 
-    fn chunk_txs(
-        txs: Vec<Tx<F>>,
-        empty_template: Option<Tx<F>>,
+    #[allow(clippy::too_many_arguments)]
+    fn empty_tx_chunks(
+        empty_template: Tx<F>,
+        heavy_count: usize,
+        light_count: usize,
         last_heavy_index: u64,
         last_light_index: u64,
         tx_per_proof: usize,
         light_tx_per_proof: usize,
-    ) -> Vec<Vec<Tx<F>>> {
+    ) -> Vec<Vec<Arc<Tx<F>>>> {
+        let mut heavy_pad = empty_template.clone();
+        heavy_pad.tx_circuit_type = TX_HEAVY;
+        heavy_pad.tx_index = last_heavy_index;
+        let mut light_pad = empty_template;
+        light_pad.tx_circuit_type = TX_LIGHT;
+        light_pad.tx_index = last_light_index;
+
+        [
+            (heavy_count, tx_per_proof, Arc::new(heavy_pad)),
+            (light_count, light_tx_per_proof, Arc::new(light_pad)),
+        ]
+        .into_iter()
+        .flat_map(|(count, per_proof, pad)| {
+            let chunk_count = count.div_ceil(per_proof).max(1);
+            (0..chunk_count).map(move |_| vec![Arc::clone(&pad); per_proof])
+        })
+        .collect()
+    }
+
+    fn chunk_txs(
+        txs: Vec<Tx<F>>,
+        empty_template: Tx<F>,
+        last_heavy_index: u64,
+        last_light_index: u64,
+        tx_per_proof: usize,
+        light_tx_per_proof: usize,
+    ) -> Vec<Vec<Arc<Tx<F>>>> {
         let per_proof = |circuit_type: u8| {
             if circuit_type == TX_LIGHT {
                 light_tx_per_proof
@@ -252,9 +343,9 @@ where
         };
         // Txs of each circuit type are grouped together across type jumps, keeping their
         // relative execution order. A group is emitted as soon as it is full.
-        let mut chunks: Vec<Vec<Tx<F>>> = Vec::new();
-        let mut heavy_buf: Vec<Tx<F>> = Vec::new();
-        let mut light_buf: Vec<Tx<F>> = Vec::new();
+        let mut chunks: Vec<Vec<Arc<Tx<F>>>> = Vec::new();
+        let mut heavy_buf: Vec<Arc<Tx<F>>> = Vec::new();
+        let mut light_buf: Vec<Arc<Tx<F>>> = Vec::new();
         let mut has_heavy = false;
         let mut has_light = false;
         for t in txs {
@@ -267,7 +358,7 @@ where
                 &mut heavy_buf
             };
             let size = per_proof(t.tx_circuit_type);
-            buf.push(t);
+            buf.push(Arc::new(t));
             if buf.len() == size {
                 chunks.push(std::mem::take(buf));
             }
@@ -282,13 +373,13 @@ where
             if buf.is_empty() && has_txs {
                 continue;
             }
-            let mut pad = empty_template
-                .clone()
-                .expect("block witness must end with an empty padding tx");
+            let mut pad = empty_template.clone();
             pad.tx_circuit_type = circuit_type;
             pad.tx_index = last_index;
-            while buf.len() < per_proof(circuit_type) {
-                buf.push(pad.clone());
+            let pad = Arc::new(pad);
+            let size = per_proof(circuit_type);
+            while buf.len() < size {
+                buf.push(Arc::clone(&pad));
             }
             chunks.push(std::mem::take(buf));
         }
@@ -311,7 +402,7 @@ impl Block<F> {
 
 #[allow(clippy::type_complexity)]
 pub fn chunk_signature_batches(
-    tx_chunks: &[Vec<Tx<F>>],
+    tx_chunks: &[Vec<Arc<Tx<F>>>],
 ) -> (
     Vec<(QuinticExtension<F>, QuinticExtension<F>, SchnorrSig)>,
     Vec<(QuinticExtension<F>, QuinticExtension<F>, SchnorrSig)>,

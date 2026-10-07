@@ -38,7 +38,7 @@ impl InternalClaimOrderTx {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct InternalClaimOrderTxTarget {
     // outputs
     pub success: BoolTarget,

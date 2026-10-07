@@ -66,6 +66,8 @@ pub struct TxState {
     /* Helpers */
     /***********/
     pub next_margin_asset_index: Target,
+    /// Size of the margined asset list. Equal to `next_margin_asset_index` when there is no free margin slot.
+    pub margined_asset_list_size: usize,
     pub first_asset_margin_index: Target,
     pub is_new_account: [BoolTarget; NB_ACCOUNTS_PER_TX],
     pub positions: [AccountPositionTarget; NB_ACCOUNTS_PER_TX - 1],
@@ -148,6 +150,8 @@ impl Default for TxState {
             apply_pool_share_delta_flag: BoolTarget::default(),
             between_strategies_flag: BoolTarget::default(),
             next_margin_asset_index: Target::default(),
+            // Default has no margined assets; set from the circuit's `margined_asset_list_size`.
+            margined_asset_list_size: 0,
             first_asset_margin_index: Target::default(),
 
             attributes: TxAttributesTarget::default(),

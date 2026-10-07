@@ -26,7 +26,7 @@ pub struct L1CancelAllOrdersTx {
     pub account_index: i64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct L1CancelAllOrdersTxTarget {
     pub account_index: Target,
     pub master_account_index: Target,

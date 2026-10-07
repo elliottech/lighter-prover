@@ -30,7 +30,9 @@ use crate::uint::u32::gates::subtraction_u32::U32SubtractionGate;
 use crate::uint::u32::serialization::{ReadU32, WriteU32};
 use crate::uint::u32::witness::GeneratedValuesU32;
 
-#[derive(Clone, Copy, Eq, PartialEq, Hash, Debug, Default)]
+#[derive(
+    Clone, Copy, Eq, PartialEq, Hash, Debug, Default, serde::Serialize, serde::Deserialize,
+)]
 pub struct U32Target(pub Target);
 
 pub trait CircuitBuilderU32<F: RichField + Extendable<D>, const D: usize> {

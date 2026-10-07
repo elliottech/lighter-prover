@@ -10,6 +10,13 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+default = ["std"]
+# Enables the process-wide FFT root-table cache (needs std sync primitives).
+# The crate stays no_std-capable without it.
+std = []
+parallel = ["plonky2_maybe_rayon/parallel"]
+
 [dependencies]
 anyhow = { workspace = true }
 itertools = { workspace = true, features = ["use_alloc"] }
@@ -21,6 +28,7 @@ unroll = { workspace = true }
 
 # Local dependencies
 plonky2_util = { version = "1.0.0", path = "../util", default-features = false }
+plonky2_maybe_rayon = { version = "1.0.0", path = "../maybe_rayon", default-features = false }
 
 
 # Display math equations properly in documentation

@@ -75,7 +75,7 @@ pub struct L1UpdateMarketTx {
     pub order_quote_limit: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct L1UpdateMarketTxTarget {
     pub market_index: Target,
     pub market_type: Target,
@@ -306,7 +306,7 @@ impl Apply for L1UpdateMarketTxTarget {
         tx_state.market_risk_details = MarketRiskDetailsTarget {
             status: builder.select(
                 update_market_details_flag,
-                self.status,
+                order_book_status,
                 tx_state.market_risk_details.status,
             ),
             min_initial_margin_fraction: builder.select(

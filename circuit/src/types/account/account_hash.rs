@@ -2,19 +2,24 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 use core::array;
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
 
-use plonky2::hash::hash_types::HashOutTarget;
+use plonky2::hash::hash_types::{HashOut, HashOutTarget};
+use plonky2::iop::generator::generate_partial_witness;
 use plonky2::iop::target::BoolTarget;
+use plonky2::iop::witness::{PartialWitness, Witness};
 
 use crate::bigint::bigint::CircuitBuilderBigInt;
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::hash_utils::CircuitBuilderHashUtils;
 use crate::poseidon2::Poseidon2Hash;
-use crate::types::account::AccountTarget;
+use crate::types::account::{Account, AccountTarget, AccountTargetWitness};
 use crate::types::account_position::AccountPositionTarget;
-use crate::types::config::Builder;
+use crate::types::config::{Builder, C, CIRCUIT_CONFIG, F};
 use crate::types::constants::{
-    EMPTY_ACCOUNT_HASH, POSITION_HASH_BUCKET_COUNT, POSITION_HASH_BUCKET_SIZE,
+    EMPTY_ACCOUNT_ORDERS_TREE_ROOT, EMPTY_API_KEY_TREE_ROOT, EMPTY_ASSET_TREE_ROOT,
+    EMPTY_MARKET_DATA_TREE_ROOT, POSITION_HASH_BUCKET_COUNT, POSITION_HASH_BUCKET_SIZE,
     TREASURY_ACCOUNT_INDEX,
 };
 
@@ -158,6 +163,23 @@ impl AccountTarget {
         builder: &mut Builder,
         partial_hash: &[HashOutTarget; 2],
     ) -> (HashOutTarget, HashOutTarget, BoolTarget) {
+        let (non_empty_hash, non_empty_pub_data_hash) =
+            self.non_empty_hashes(builder, partial_hash);
+
+        let is_empty = self.is_empty(builder, &non_empty_hash);
+        let empty_hash = builder.zero_hash_out();
+        (
+            builder.select_hash(is_empty, &empty_hash, &non_empty_hash),
+            builder.select_hash(is_empty, &empty_hash, &non_empty_pub_data_hash),
+            is_empty,
+        )
+    }
+
+    fn non_empty_hashes(
+        &self,
+        builder: &mut Builder,
+        partial_hash: &[HashOutTarget; 2],
+    ) -> (HashOutTarget, HashOutTarget) {
         let mut pub_data_elements = vec![];
         {
             pub_data_elements.extend_from_slice(&partial_hash[1].elements);
@@ -229,13 +251,46 @@ impl AccountTarget {
         let non_empty_pub_data_hash =
             builder.hash_n_to_hash_no_pad::<Poseidon2Hash>(pub_data_elements);
 
-        let is_empty = self.is_empty(builder, &non_empty_hash);
-        let empty_hash = builder.zero_hash_out();
-        (
-            builder.select_hash(is_empty, &empty_hash, &non_empty_hash),
-            builder.select_hash(is_empty, &empty_hash, &non_empty_pub_data_hash),
-            is_empty,
+        (non_empty_hash, non_empty_pub_data_hash)
+    }
+
+    /// Returns the hash of an empty account for the given margined asset list size. Results are cached per size.
+    pub fn empty_account_hash(margined_asset_list_size: usize) -> HashOut<F> {
+        static CACHE: LazyLock<Mutex<HashMap<usize, HashOut<F>>>> =
+            LazyLock::new(|| Mutex::new(HashMap::new()));
+
+        if let Some(hash) = CACHE.lock().unwrap().get(&margined_asset_list_size) {
+            return *hash;
+        }
+        let hash = Self::compute_empty_account_hash(margined_asset_list_size);
+        CACHE.lock().unwrap().insert(margined_asset_list_size, hash);
+        hash
+    }
+
+    pub fn compute_empty_account_hash(margined_asset_list_size: usize) -> HashOut<F> {
+        let mut builder = Builder::new(CIRCUIT_CONFIG);
+        let account = AccountTarget::new(&mut builder, margined_asset_list_size);
+        let position_bucket_hashes = account.get_position_bucket_hashes(&mut builder);
+        let partial_hash = account.partial_hash(&mut builder, &position_bucket_hashes);
+        let (non_empty_hash, _) = account.non_empty_hashes(&mut builder, &partial_hash);
+        let data = builder.build::<C>();
+
+        let mut pw = PartialWitness::<F>::new();
+        pw.set_account_target(
+            &account,
+            &Account::<F> {
+                api_key_root: EMPTY_API_KEY_TREE_ROOT,
+                account_orders_root: EMPTY_ACCOUNT_ORDERS_TREE_ROOT,
+                market_data_root: EMPTY_MARKET_DATA_TREE_ROOT,
+                market_pub_data_root: EMPTY_MARKET_DATA_TREE_ROOT,
+                asset_root: EMPTY_ASSET_TREE_ROOT,
+                aggregated_balances_root: EMPTY_ASSET_TREE_ROOT,
+                ..Account::<F>::default()
+            },
         )
+        .unwrap();
+        let witness = generate_partial_witness(pw, &data.prover_only, &data.common).unwrap();
+        witness.get_hash_target(non_empty_hash)
     }
 
     fn hash_margined_assets(&self, builder: &mut Builder) -> HashOutTarget {
@@ -299,7 +354,8 @@ impl AccountTarget {
 
     /// Treasury account is reserved and should never be considered empty.
     fn is_empty(&self, builder: &mut Builder, hash: &HashOutTarget) -> BoolTarget {
-        let empty_account_hash = builder.constant_hash(EMPTY_ACCOUNT_HASH);
+        let empty_account_hash =
+            builder.constant_hash(Self::empty_account_hash(self.margined_assets.len()));
         let is_empty_account_hash = builder.is_equal_hash(hash, &empty_account_hash);
 
         let is_treasury =
@@ -374,7 +430,7 @@ mod tests {
 
         let mut builder = Builder::new(CIRCUIT_CONFIG);
 
-        let account = AccountTarget::new(&mut builder);
+        let account = AccountTarget::new(&mut builder, 7);
 
         let pbh = account.get_position_bucket_hashes(&mut builder);
         let (acc_hash, acc_pd_hash, acc_is_empty) = account.hash(&mut builder, &pbh);

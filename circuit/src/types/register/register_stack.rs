@@ -67,7 +67,7 @@ impl Default for RegisterStack {
     }
 }
 
-#[derive(Clone, Debug, Copy)]
+#[derive(Clone, Debug, Copy, serde::Serialize, serde::Deserialize)]
 pub struct RegisterStackTarget {
     pub stack: [BaseRegisterInfoTarget; REGISTER_STACK_SIZE],
     pub count: Target,

@@ -11,7 +11,7 @@ use alloc::{
 use anyhow::Result;
 use plonky2::field::extension::{Extendable, FieldExtension};
 use plonky2::field::packed::PackedField;
-use plonky2::gates::gate::Gate;
+use plonky2::gates::gate::{Gate, U32QuotientGate};
 use plonky2::gates::packed_util::PackedEvaluableBase;
 use plonky2::gates::util::StridedConstraintConsumer;
 use plonky2::hash::hash_types::RichField;
@@ -146,6 +146,56 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for QuinticSquarin
         self.eval_unfiltered_base_batch_packed(vars_base)
     }
 
+    fn eval_unfiltered_base_batch_accumulate(
+        &self,
+        vars_base: EvaluationVarsBaseBatch<F>,
+        filters: &[F],
+        combined_gate_constraints: &mut [F],
+    ) {
+        let n = vars_base.len();
+        assert_eq!(filters.len(), n);
+        assert!(combined_gate_constraints.len() >= <Self as Gate<F, D>>::num_constraints(self) * n);
+        let wires = vars_base.local_wires;
+        let col = |w: usize| &wires[w * n..][..n];
+        let const_2 = F::from_canonical_u64(2);
+        let const_3 = F::from_canonical_u64(3);
+        let const_6 = F::from_canonical_u64(6);
+        let mut chunks = combined_gate_constraints.chunks_exact_mut(n);
+
+        for i in 0..self.num_ops {
+            let a: [&[F]; 5] =
+                core::array::from_fn(|j| col(self.wire_ith_multiplicand_jth_limb(i, j)));
+            let c: [&[F]; 5] = core::array::from_fn(|j| col(self.wire_ith_output_jth_limb(i, j)));
+            let extra: [&[F]; 10] = core::array::from_fn(|j| col(self.temporary_wire(i, j)));
+            let outs: [&mut [F]; 15] = core::array::from_fn(|_| chunks.next().unwrap());
+
+            for p in 0..n {
+                let ap: [F; 5] = core::array::from_fn(|j| a[j][p]);
+                let f = filters[p];
+                // Identical expressions and order to `eval_unfiltered_base_packed`.
+                outs[0][p] += f * (ap[0] * ap[0] - extra[0][p]);
+                outs[1][p] += f * ((const_6 * ap[1] * ap[4] + extra[0][p]) - extra[1][p]);
+                outs[2][p] += f * ((const_6 * ap[2] * ap[3] + extra[1][p]) - c[0][p]);
+
+                outs[3][p] += f * (const_3 * ap[3] * ap[3] - extra[2][p]);
+                outs[4][p] += f * ((const_2 * ap[0] * ap[1] + extra[2][p]) - extra[3][p]);
+                outs[5][p] += f * ((const_6 * ap[2] * ap[4] + extra[3][p]) - c[1][p]);
+
+                outs[6][p] += f * (ap[1] * ap[1] - extra[4][p]);
+                outs[7][p] += f * ((const_2 * ap[0] * ap[2] + extra[4][p]) - extra[5][p]);
+                outs[8][p] += f * ((const_6 * ap[3] * ap[4] + extra[5][p]) - c[2][p]);
+
+                outs[9][p] += f * ((const_3 * ap[4] * ap[4]) - extra[6][p]);
+                outs[10][p] += f * ((const_2 * ap[0] * ap[3] + extra[6][p]) - extra[7][p]);
+                outs[11][p] += f * ((const_2 * ap[1] * ap[2] + extra[7][p]) - c[3][p]);
+
+                outs[12][p] += f * (ap[2] * ap[2] - extra[8][p]);
+                outs[13][p] += f * ((const_2 * ap[0] * ap[4] + extra[8][p]) - extra[9][p]);
+                outs[14][p] += f * ((const_2 * ap[1] * ap[3] + extra[9][p]) - c[4][p]);
+            }
+        }
+    }
+
     fn eval_unfiltered_circuit(
         &self,
         builder: &mut CircuitBuilder<F, D>,
@@ -250,6 +300,12 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for QuinticSquarin
     fn num_constraints(&self) -> usize {
         self.num_ops * 15
     }
+
+    fn u32_quotient_gate(&self) -> Option<U32QuotientGate> {
+        Some(U32QuotientGate::QuinticSquaring {
+            num_ops: self.num_ops,
+        })
+    }
 }
 
 impl<F: RichField + Extendable<D>, const D: usize> PackedEvaluableBase<F, D>
@@ -265,15 +321,13 @@ impl<F: RichField + Extendable<D>, const D: usize> PackedEvaluableBase<F, D>
         let const_6 = P::from(F::from_canonical_u64(6));
 
         for i in 0..self.num_ops {
-            let a = (0..5)
-                .map(|j| vars.local_wires[self.wire_ith_multiplicand_jth_limb(i, j)])
-                .collect::<Vec<_>>();
-            let c = (0..5)
-                .map(|j| vars.local_wires[self.wire_ith_output_jth_limb(i, j)])
-                .collect::<Vec<_>>();
-            let extra = (0..10)
-                .map(|j| vars.local_wires[self.temporary_wire(i, j)])
-                .collect::<Vec<_>>();
+            let a: [P; 5] = core::array::from_fn(|j| {
+                vars.local_wires[self.wire_ith_multiplicand_jth_limb(i, j)]
+            });
+            let c: [P; 5] =
+                core::array::from_fn(|j| vars.local_wires[self.wire_ith_output_jth_limb(i, j)]);
+            let extra: [P; 10] =
+                core::array::from_fn(|j| vars.local_wires[self.temporary_wire(i, j)]);
 
             //c[0]
             yield_constr.one(a[0] * a[0] - extra[0]);
@@ -301,6 +355,88 @@ impl<F: RichField + Extendable<D>, const D: usize> PackedEvaluableBase<F, D>
             yield_constr.one((const_2 * a[1] * a[3] + extra[9]) - c[4]);
         }
     }
+}
+
+/// Computes the output limbs and the intermediate (`extra`) wire values for squaring
+/// `a` in `F[u]/(u^5 - 3)`, matching the gate's constraint equations.
+///
+/// With the canonical gate constants (2, 3, 6) the small scalar multiples are computed
+/// with addition chains, which yields the same field elements while performing one
+/// modular multiplication per product instead of two or three. For any other constants
+/// it falls back to the original fully-multiplying arithmetic.
+fn quintic_square_wires<F: RichField>(
+    a: &[F; 5],
+    const_2: F,
+    const_3: F,
+    const_6: F,
+) -> ([F; 5], [F; 10]) {
+    let mut extra = [F::ZERO; 10];
+
+    if const_2 == F::TWO
+        && const_3 == F::from_canonical_u64(3)
+        && const_6 == F::from_canonical_u64(6)
+    {
+        let two = |x: F| x + x;
+        let three = |x: F| x + x + x;
+        let six = |x: F| {
+            let t = x + x + x;
+            t + t
+        };
+
+        // c[0]
+        extra[0] = a[0] * a[0];
+        extra[1] = six(a[1] * a[4]) + extra[0];
+        let c0 = six(a[2] * a[3]) + extra[1];
+
+        // c[1]
+        extra[2] = three(a[3] * a[3]);
+        extra[3] = two(a[0] * a[1]) + extra[2];
+        let c1 = six(a[2] * a[4]) + extra[3];
+
+        // c[2]
+        extra[4] = a[1] * a[1];
+        extra[5] = two(a[0] * a[2]) + extra[4];
+        let c2 = six(a[3] * a[4]) + extra[5];
+
+        // c[3]
+        extra[6] = three(a[4] * a[4]);
+        extra[7] = two(a[0] * a[3]) + extra[6];
+        let c3 = two(a[1] * a[2]) + extra[7];
+
+        // c[4]
+        extra[8] = a[2] * a[2];
+        extra[9] = two(a[0] * a[4]) + extra[8];
+        let c4 = two(a[1] * a[3]) + extra[9];
+
+        return ([c0, c1, c2, c3, c4], extra);
+    }
+
+    // c[0]
+    extra[0] = a[0] * a[0];
+    extra[1] = const_6 * a[1] * a[4] + extra[0];
+    let c0 = const_6 * a[2] * a[3] + extra[1];
+
+    // c[1]
+    extra[2] = const_3 * a[3] * a[3];
+    extra[3] = const_2 * a[0] * a[1] + extra[2];
+    let c1 = const_6 * a[2] * a[4] + extra[3];
+
+    // c[2]
+    extra[4] = a[1] * a[1];
+    extra[5] = const_2 * a[0] * a[2] + extra[4];
+    let c2 = const_6 * a[3] * a[4] + extra[5];
+
+    // c[3]
+    extra[6] = const_3 * a[4] * a[4];
+    extra[7] = const_2 * a[0] * a[3] + extra[6];
+    let c3 = const_2 * a[1] * a[2] + extra[7];
+
+    // c[4]
+    extra[8] = a[2] * a[2];
+    extra[9] = const_2 * a[0] * a[4] + extra[8];
+    let c4 = const_2 * a[1] * a[3] + extra[9];
+
+    ([c0, c1, c2, c3, c4], extra)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -338,57 +474,20 @@ impl<F: RichField + Extendable<D>, const D: usize> SimpleGenerator<F, D>
         witness: &PartitionWitness<F>,
         out_buffer: &mut GeneratedValues<F>,
     ) -> Result<()> {
-        let const_2 = self.const_2;
-        let const_3 = self.const_3;
-        let const_6 = self.const_6;
+        let a: [F; 5] = core::array::from_fn(|j| {
+            witness.get_target(Target::wire(
+                self.row,
+                self.gate.wire_ith_multiplicand_jth_limb(self.i, j),
+            ))
+        });
 
-        let a = (0..5)
-            .map(|j| {
-                witness.get_target(Target::wire(
-                    self.row,
-                    self.gate.wire_ith_multiplicand_jth_limb(self.i, j),
-                ))
-            })
-            .collect::<Vec<_>>();
-        let mut extra = [F::ZERO; 10];
-
-        // c[0]
-        extra[0] = a[0] * a[0];
-        extra[1] = const_6 * a[1] * a[4] + extra[0];
-        let c0 = const_6 * a[2] * a[3] + extra[1];
-
-        // c[1]
-        extra[2] = const_3 * a[3] * a[3];
-        extra[3] = const_2 * a[0] * a[1] + extra[2];
-        let c1 = const_6 * a[2] * a[4] + extra[3];
-
-        // c[2]
-        extra[4] = a[1] * a[1];
-        extra[5] = const_2 * a[0] * a[2] + extra[4];
-        let c2 = const_6 * a[3] * a[4] + extra[5];
-
-        // c[3]
-        extra[6] = const_3 * a[4] * a[4];
-        extra[7] = const_2 * a[0] * a[3] + extra[6];
-        let c3 = const_2 * a[1] * a[2] + extra[7];
-
-        // c[4]
-        extra[8] = a[2] * a[2];
-        extra[9] = const_2 * a[0] * a[4] + extra[8];
-        let c4 = const_2 * a[1] * a[3] + extra[9];
+        let (c, extra) = quintic_square_wires(&a, self.const_2, self.const_3, self.const_6);
 
         // Set outputs
         for j in 0..5 {
             out_buffer.set_target(
                 Target::wire(self.row, self.gate.wire_ith_output_jth_limb(self.i, j)),
-                match j {
-                    0 => c0,
-                    1 => c1,
-                    2 => c2,
-                    3 => c3,
-                    4 => c4,
-                    _ => unreachable!(),
-                },
+                c[j],
             )?;
         }
 
@@ -455,5 +554,83 @@ mod tests {
         let gate =
             QuinticSquaringGate::new_from_config(&CircuitConfig::standard_recursion_config());
         test_eval_fns::<F, C, _, D>(gate)
+    }
+
+    #[test]
+    fn square_generator_matches_reference() {
+        use plonky2::field::types::{Field, PrimeField64};
+
+        use super::quintic_square_wires;
+
+        type F = GoldilocksField;
+
+        // The original (pre-optimization) generator arithmetic, reconstructed
+        // as the reference oracle.
+        fn reference(a: &[F; 5], const_2: F, const_3: F, const_6: F) -> ([F; 5], [F; 10]) {
+            let mut extra = [F::ZERO; 10];
+            extra[0] = a[0] * a[0];
+            extra[1] = const_6 * a[1] * a[4] + extra[0];
+            let c0 = const_6 * a[2] * a[3] + extra[1];
+            extra[2] = const_3 * a[3] * a[3];
+            extra[3] = const_2 * a[0] * a[1] + extra[2];
+            let c1 = const_6 * a[2] * a[4] + extra[3];
+            extra[4] = a[1] * a[1];
+            extra[5] = const_2 * a[0] * a[2] + extra[4];
+            let c2 = const_6 * a[3] * a[4] + extra[5];
+            extra[6] = const_3 * a[4] * a[4];
+            extra[7] = const_2 * a[0] * a[3] + extra[6];
+            let c3 = const_2 * a[1] * a[2] + extra[7];
+            extra[8] = a[2] * a[2];
+            extra[9] = const_2 * a[0] * a[4] + extra[8];
+            let c4 = const_2 * a[1] * a[3] + extra[9];
+            ([c0, c1, c2, c3, c4], extra)
+        }
+
+        let const_2 = F::from_canonical_u64(2);
+        let const_3 = F::from_canonical_u64(3);
+        let const_6 = F::from_canonical_u64(6);
+        let check = |a: [F; 5]| {
+            let (c_ref, extra_ref) = reference(&a, const_2, const_3, const_6);
+            let (c_new, extra_new) = quintic_square_wires(&a, const_2, const_3, const_6);
+            for j in 0..5 {
+                assert_eq!(
+                    c_new[j].to_canonical_u64(),
+                    c_ref[j].to_canonical_u64(),
+                    "c[{j}] mismatch for a={a:?}"
+                );
+            }
+            for j in 0..10 {
+                assert_eq!(
+                    extra_new[j].to_canonical_u64(),
+                    extra_ref[j].to_canonical_u64(),
+                    "extra[{j}] mismatch for a={a:?}"
+                );
+            }
+        };
+
+        // Edge cases, including non-canonical representations.
+        let p = 0xFFFF_FFFF_0000_0001u64;
+        let specials = [0, 1, 2, 3, p - 2, p - 1, p, p + 1, u64::MAX];
+        for &x in &specials {
+            check([GoldilocksField(x); 5]);
+            for j in 0..5 {
+                let mut a = [GoldilocksField(0); 5];
+                a[j] = GoldilocksField(x);
+                check(a);
+            }
+        }
+
+        // Randomized differential over the full u64 (non-canonical included) range.
+        let mut state = 0x243F_6A88_85A3_08D3u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..100_000 {
+            let a = core::array::from_fn(|_| GoldilocksField(next()));
+            check(a);
+        }
     }
 }

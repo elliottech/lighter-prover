@@ -34,7 +34,7 @@ pub struct InternalCancelOrderTx {
     pub order_index: i64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct InternalCancelOrderTxTarget {
     pub account_index: Target,
     pub order_index: Target,

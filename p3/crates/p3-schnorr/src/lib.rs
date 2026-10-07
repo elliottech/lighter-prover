@@ -11,6 +11,7 @@ pub mod air;
 pub mod error;
 pub mod hash;
 pub mod lighter_poseidon;
+pub mod metal_dft;
 pub mod poseidon;
 pub mod proof;
 pub mod reference;

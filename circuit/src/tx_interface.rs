@@ -11,7 +11,7 @@ use crate::types::constants::{
 use crate::types::tx_state::TxState;
 use crate::types::tx_type::TxTypeTargets;
 use crate::uint::u8::U8Target;
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct TransactionTarget<Inner> {
     pub inner: Inner,
 }

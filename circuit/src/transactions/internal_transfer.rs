@@ -39,7 +39,7 @@ pub struct InternalTransferTx {
     pub amount: BigUint,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct InternalTransferTxTarget {
     pub from_account_index: Target,
     pub to_account_index: Target,

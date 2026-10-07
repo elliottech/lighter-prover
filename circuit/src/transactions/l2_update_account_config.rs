@@ -40,7 +40,7 @@ pub struct L2UpdateAccountConfigTx {
     pub account_trading_mode: u8,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct L2UpdateAccountConfigTxTarget {
     pub account_index: Target,
     pub api_key_index: Target,

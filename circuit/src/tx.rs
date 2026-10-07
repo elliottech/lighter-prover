@@ -380,8 +380,7 @@ where
     pub all_assets_before: [Asset; ASSET_LIST_SIZE],
 
     #[serde(rename = "amab")]
-    #[serde_as(as = "[_; MARGINED_ASSET_LIST_SIZE]")]
-    pub all_margined_assets_before: [MarginedAsset; MARGINED_ASSET_LIST_SIZE],
+    pub all_margined_assets_before: Vec<MarginedAsset>,
 
     #[serde(rename = "amrdb")]
     #[serde_as(as = "[_; POSITION_LIST_SIZE]")]

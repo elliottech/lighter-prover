@@ -46,7 +46,7 @@ pub struct L1WithdrawTx {
     pub amount: u64, // 60 bits
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct L1WithdrawTxTarget {
     pub account_index: Target,
     pub master_account_index: Target,

@@ -55,7 +55,7 @@ impl RiskInfoTarget {
         market_public_market_index: Target,
         current_market_details: &MarketRiskDetailsTarget,
         all_market_risk_details: &[MarketRiskDetailsTarget; POSITION_LIST_SIZE],
-        all_margined_assets: &[MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
+        all_margined_assets: &[MarginedAssetTarget],
         strategy_index: Target, // Assumed not to be nil strategy index
     ) -> Self {
         Self::new_with_mode(
@@ -79,7 +79,7 @@ impl RiskInfoTarget {
         market_public_market_index: Target,
         current_market_details: &MarketRiskDetailsTarget,
         all_market_risk_details: &[MarketRiskDetailsTarget; POSITION_LIST_SIZE],
-        all_margined_assets: &[MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
+        all_margined_assets: &[MarginedAssetTarget],
         strategy_index: Target,
     ) -> Self {
         Self::new_with_mode(
@@ -103,7 +103,7 @@ impl RiskInfoTarget {
         market_public_market_index: Target,
         current_market_details: &MarketRiskDetailsTarget,
         all_market_risk_details: &[MarketRiskDetailsTarget; POSITION_LIST_SIZE],
-        all_margined_assets: &[MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
+        all_margined_assets: &[MarginedAssetTarget],
         strategy_index: Target, // Assumed not to be nil strategy index
         light: bool,
     ) -> Self {
@@ -148,7 +148,7 @@ impl RiskParametersTarget {
         builder: &mut Builder,
         account: &AccountTarget,
         all_market_risk_details: &[MarketRiskDetailsTarget; POSITION_LIST_SIZE],
-        all_margined_assets: &[MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
+        all_margined_assets: &[MarginedAssetTarget],
         strategy_index: Target,
         light: bool,
     ) -> Self {
@@ -370,34 +370,36 @@ impl RiskParametersTarget {
     pub fn get_health(&self, builder: &mut Builder) -> Target {
         let neg_one = builder.neg_one();
 
-        let is_tav_negative = builder.is_equal(
+        let is_talt_negative = builder.is_equal(
             self.total_account_liquidation_threshold.sign.target,
             neg_one,
         );
 
-        let initial_margin_gt = builder.is_lt_biguint(
+        let is_tav_negative = builder.is_equal(self.total_account_value.sign.target, neg_one);
+        let is_abs_tav_lt_initial_margin = builder.is_lt_biguint(
             &self.total_account_value.abs,
             &self.initial_margin_requirement,
         );
-        let maintenance_margin_gt = builder.is_lt_biguint(
+        let is_below_initial_margin = builder.or(is_tav_negative, is_abs_tav_lt_initial_margin);
+        let is_below_maintenance_margin = builder.is_lt_biguint(
             &self.total_account_liquidation_threshold.abs,
             &self.maintenance_margin_requirement,
         );
-        let close_out_margin_gt = builder.is_lt_biguint(
+        let is_below_close_out_margin = builder.is_lt_biguint(
             &self.total_account_liquidation_threshold.abs,
             &self.close_out_margin_requirement,
         );
 
-        let positive_tav_result = builder.add_many([
-            initial_margin_gt.target,
-            maintenance_margin_gt.target,
-            close_out_margin_gt.target,
+        let health_if_talt_non_negative = builder.add_many([
+            is_below_initial_margin.target,
+            is_below_maintenance_margin.target,
+            is_below_close_out_margin.target,
         ]);
 
-        // If total account value is negative, health status is BANKRUPTCY
-        // Otherwise, positive_tav_result could be 0 to 3 i.e. HEALTHY to FULL_LIQUIDATION
-        let bancruptcy = builder.constant_from_u8(BANKRUPTCY);
-        builder.select(is_tav_negative, bancruptcy, positive_tav_result)
+        // If total account liquidation threshold is negative, health status is BANKRUPTCY
+        // Otherwise, health_if_talt_non_negative could be 0 to 3 i.e. HEALTHY to FULL_LIQUIDATION
+        let bankruptcy = builder.constant_from_u8(BANKRUPTCY);
+        builder.select(is_talt_negative, bankruptcy, health_if_talt_non_negative)
     }
 
     pub fn is_healthy(&self, builder: &mut Builder) -> BoolTarget {
@@ -896,8 +898,11 @@ fn position_base_notional(
     let negative_tpv_component =
         builder.select(position_is_positive, entry_quote, abs_position_notional);
 
+    let is_market_active =
+        builder.is_equal_constant(market_details.status, MARKET_STATUS_ACTIVE as u64);
+
     (
-        builder.mul(market_details.status, abs_position_notional), // Expired market (0 status) -> no margin requirement
+        builder.mul_bool(is_market_active, abs_position_notional),
         positive_tpv_component,
         negative_tpv_component,
     )
@@ -1199,8 +1204,8 @@ fn get_close_out_margin_requirement(
 
 fn get_base_total_asset_values(
     builder: &mut Builder,
-    account_margined_assets: &[AccountMarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
-    margined_assets: &[MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
+    account_margined_assets: &[AccountMarginedAssetTarget],
+    margined_assets: &[MarginedAssetTarget],
     is_insurance_fund: BoolTarget,
 ) -> (BigIntTarget, BigIntTarget, BigIntTarget) {
     let asset_margin_tick = builder.constant_biguint(&BigUint::from(ASSET_MARGIN_TICK));

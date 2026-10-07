@@ -80,7 +80,7 @@ impl Order {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct OrderTarget {
     pub price_index: Target,
     pub nonce_index: Target,

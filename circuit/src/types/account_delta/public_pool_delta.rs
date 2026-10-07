@@ -25,7 +25,7 @@ pub struct PublicPoolShareDelta {
     pub shares_delta: i64, // value is in range [0, 2^56 - 1], thus the diff is in range [-2^56 + 1, 2^56 - 1]
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 pub struct PublicPoolShareDeltaTarget {
     pub public_pool_index: Target,
     pub shares_delta: SignedTarget,
@@ -69,7 +69,7 @@ pub struct PublicPoolInfoDelta {
     pub operator_shares_delta: i64, // value is in range [0, 2^56 - 1], thus the diff is in range [-2^56 + 1, 2^56 - 1]
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct PublicPoolInfoDeltaTarget {
     pub total_shares_delta: SignedTarget,
     pub operator_shares_delta: SignedTarget,

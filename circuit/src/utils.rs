@@ -15,6 +15,18 @@ use crate::types::config::{BIG_U64_LIMBS, D, F};
 use crate::types::constants::{HOUR_IN_MS, MINUTE_IN_MS, SECOND_IN_MS};
 use crate::uint::u8::U8Target;
 
+/// Whether intermediate proofs should be eagerly verified right after proving.
+/// Always on in debug builds; enabled in release builds with
+/// `CIRCUIT_EAGER_VERIFY=true` for better error localization.
+pub fn eager_verify_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        cfg!(debug_assertions)
+            || std::env::var("CIRCUIT_EAGER_VERIFY")
+                .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+    })
+}
+
 pub fn round_unix_timestamp_to_previous_second(
     builder: &mut Builder<F, D>,
     timestamp: Target,

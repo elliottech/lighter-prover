@@ -26,7 +26,7 @@ use crate::utils::CircuitBuilderUtils;
 /// `sign`: `-1` &rarr; For negative values
 ///
 /// `sign`: `0` &rarr; For zero value
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct BigIntU16Target {
     pub abs: BigUintU16Target,
     pub sign: SignTarget,

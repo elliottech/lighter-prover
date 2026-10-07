@@ -337,13 +337,13 @@ fn fill_ec_witness_row(values: &mut [Goldilocks], offset: usize, row: &EcRowWitn
         ..offset + COL_EC_E_LT_MODULUS_DIFF_BITS + EC_SCALAR_LT_MODULUS_DIFF_BITS]
         .copy_from_slice(&row.e_lt_modulus_diff_bits);
 
-    for bit in 0..EC_WINDOW_BITS {
+    for (bit, e_addend) in row.e_addends.iter().enumerate() {
         fill_affine_point(
             values,
             offset,
             ec_e_addend_x_col(bit),
             ec_e_addend_u_col(bit),
-            &row.e_addends[bit],
+            e_addend,
         );
     }
     fill_optional_affine_point(
@@ -354,33 +354,33 @@ fn fill_ec_witness_row(values: &mut [Goldilocks], offset: usize, row: &EcRowWitn
         COL_EC_ACC_IS_IDENTITY,
         row.acc,
     );
-    for step in 0..EC_WINDOW_STEPS {
+    for (step, &ec_step) in row.steps.iter().enumerate() {
         fill_optional_affine_point(
             values,
             offset,
             ec_step_x_col(step),
             ec_step_u_col(step),
             ec_step_is_identity_col(step),
-            row.steps[step],
+            ec_step,
         );
     }
 
-    for bit in 0..EC_WINDOW_BITS {
+    for (bit, e_double) in row.e_doubles.iter().enumerate() {
         fill_double_witness(
             values,
             offset,
             ec_e_double_x_den_inv_col(bit),
             ec_e_double_u_den_inv_col(bit),
-            row.e_doubles[bit].map(|(_, witness)| witness),
+            e_double.map(|(_, witness)| witness),
         );
     }
-    for step in 0..EC_WINDOW_STEPS {
+    for (step, &add) in row.adds.iter().enumerate() {
         fill_add_witness(
             values,
             offset,
             ec_add_x_den_inv_col(step),
             ec_add_u_den_inv_col(step),
-            row.adds[step],
+            add,
         );
     }
 }

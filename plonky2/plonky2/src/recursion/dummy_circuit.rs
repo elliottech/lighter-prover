@@ -60,7 +60,6 @@ where
             .extend((start..).zip(verifier_data.constants_sigmas_cap.0[i].elements));
     }
 
-    // TODO: A bit wasteful to build a dummy circuit here. We could potentially use a proof that
     // just consists of zeros, apart from public inputs.
     dummy_proof::<F, C, D>(
         &dummy_circuit::<F, C, D>(common_data),

@@ -1,10 +1,14 @@
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
+use core::any::TypeId;
 use core::borrow::Borrow;
 
 use plonky2_maybe_rayon::*;
 
+use crate::field::extension::quadratic::QuadraticExtension;
 use crate::field::extension::{Extendable, FieldExtension};
+use crate::field::goldilocks_extensions::ext2_base_scalar_dot_slots;
+use crate::field::goldilocks_field::GoldilocksField;
 use crate::field::packed::PackedField;
 use crate::field::polynomial::PolynomialCoeffs;
 use crate::field::types::Field;
@@ -45,7 +49,6 @@ impl<F: Field> ReducingFactor<F> {
         P: PackedField<Scalar = FE>,
     {
         self.count += 1;
-        // TODO: Would like to use `FE::scalar_mul`, but it doesn't work with Packed currently.
         x * FE::from_basefield(self.base)
     }
 
@@ -107,6 +110,21 @@ impl<F: Field> ReducingFactor<F> {
         let base_powers: Vec<F> = self.base.powers().take(num_polys).collect();
         self.count += num_polys as u64;
 
+        // Production fast path: for the quadratic Goldilocks extension the
+        // whole batch reduces with one delayed reduction per extension limb
+        // per output slot (the `fri_fold_arity16` pattern generalized to the
+        // batch width) instead of a `reduce128` pair plus a canonicalizing
+        // extension add per term. Field-equal by construction; the raw
+        // representative may differ from the reduce-per-term form, under the
+        // same license as the parallel path below (every consumer treats
+        // these coefficients value-wise and proof serialization canonicalizes
+        // every limb).
+        if let Some(acc) =
+            goldilocks_ext2_reduce_polys_base::<BF, F, D>(&polys, &base_powers, max_len)
+        {
+            return PolynomialCoeffs::new(acc);
+        }
+
         let accumulate_chunk = |ps: &[_], powers: &[F]| -> Vec<F> {
             // Build the accumulator straight from the chunk's first
             // polynomial's scaled coefficients (the base tree's
@@ -146,18 +164,112 @@ impl<F: Field> ReducingFactor<F> {
             return PolynomialCoeffs::new(accumulate_chunk(&polys, &base_powers));
         }
 
-        let partials: Vec<Vec<F>> = polys
-            .par_chunks(PARALLEL_CHUNK)
-            .zip(base_powers.par_chunks(PARALLEL_CHUNK))
-            .map(|(ps, powers)| accumulate_chunk(ps, powers))
-            .collect();
+        // Coefficient slots are independent. Partition the result so each
+        // worker visits all polynomials for one cache-sized output range,
+        // deleting the full-degree partial vector per polynomial chunk and
+        // the serial merge of those vectors. Each slot receives powers in
+        // ascending polynomial order; this is field-equal to the previous
+        // regrouped sum, while proof serialization canonicalizes every limb.
+        const SLOT_BLOCK: usize = 2048;
         let mut acc = vec![F::ZERO; max_len];
-        for partial in partials {
-            for (a, p) in acc.iter_mut().zip(partial) {
-                *a += p;
-            }
-        }
+        acc.par_chunks_mut(SLOT_BLOCK)
+            .enumerate()
+            .for_each(|(block, out)| {
+                let start = block * SLOT_BLOCK;
+                for (base_power, poly) in base_powers.iter().zip(&polys) {
+                    let coeffs: &PolynomialCoeffs<BF> = Borrow::borrow(poly);
+                    if coeffs.coeffs.len() <= start {
+                        continue;
+                    }
+                    let live = (coeffs.coeffs.len() - start).min(out.len());
+                    for (a, &c) in out[..live]
+                        .iter_mut()
+                        .zip(&coeffs.coeffs[start..start + live])
+                    {
+                        *a += <F as FieldExtension<D>>::scalar_mul(base_power, c);
+                    }
+                }
+            });
         PolynomialCoeffs::new(acc)
+    }
+
+    /// Reduce a small batch of base-field polynomials and immediately fold
+    /// its linear quotient into `final_poly`.
+    ///
+    /// The regular path materializes the full extension-field composition
+    /// polynomial, then reads it backwards while writing the quotient into
+    /// `final_poly`. Opening batches after the first one are tiny (normally
+    /// the two `g * zeta` polynomials), so preserving that full-degree
+    /// intermediate only adds an allocation and a write/read pass. Compute a
+    /// cache-sized range of composition coefficients at a time instead and
+    /// feed it straight into the same descending Horner recurrence.
+    pub fn accumulate_small_polys_base_linear_quotient<
+        BF: Extendable<D, Extension = F>,
+        const D: usize,
+    >(
+        &mut self,
+        polys: impl IntoIterator<Item = impl Borrow<PolynomialCoeffs<BF>> + Sync>,
+        final_poly: &mut PolynomialCoeffs<F>,
+        z: F,
+    ) where
+        F: FieldExtension<D, BaseField = BF>,
+    {
+        let polys: Vec<_> = polys.into_iter().collect();
+        debug_assert!(polys.len() <= 16);
+        let max_len = polys
+            .iter()
+            .map(|p| p.borrow().coeffs.len())
+            .max()
+            .unwrap_or(0);
+        let base_powers: Vec<F> = self.base.powers().take(polys.len()).collect();
+        self.count += polys.len() as u64;
+        let shift = self.shift_factor();
+
+        let buf = &mut final_poly.coeffs;
+        for coefficient in buf.iter_mut().skip(max_len) {
+            *coefficient *= shift;
+        }
+        if buf.len() < max_len {
+            buf.resize(max_len, F::ZERO);
+        }
+        if max_len == 0 {
+            return;
+        }
+
+        // The padded quotient's highest coefficient is zero.
+        buf[max_len - 1] *= shift;
+
+        const SLOT_BLOCK: usize = 2048;
+        // This fixed block size is independent of runtime queue state.
+        let mut scratch = vec![F::ZERO; SLOT_BLOCK.min(max_len.saturating_sub(1))];
+        let mut end = max_len;
+        let mut acc = F::ZERO;
+        while end > 1 {
+            let start = 1.max(end.saturating_sub(SLOT_BLOCK));
+            let out = &mut scratch[..end - start];
+            if !goldilocks_ext2_reduce_polys_base_into(&polys, &base_powers, start, out) {
+                out.fill(F::ZERO);
+                for (base_power, poly) in base_powers.iter().zip(&polys) {
+                    let coeffs: &PolynomialCoeffs<BF> = Borrow::borrow(poly);
+                    if coeffs.coeffs.len() <= start {
+                        continue;
+                    }
+                    let live = (coeffs.coeffs.len() - start).min(out.len());
+                    for (reduced, &coefficient) in out[..live]
+                        .iter_mut()
+                        .zip(&coeffs.coeffs[start..start + live])
+                    {
+                        *reduced += <F as FieldExtension<D>>::scalar_mul(base_power, coefficient);
+                    }
+                }
+            }
+            for (offset, &coefficient) in out.iter().enumerate().rev() {
+                acc = acc * z + coefficient;
+                let quotient_index = start + offset - 1;
+                buf[quotient_index] = buf[quotient_index] * shift + acc;
+            }
+            end = start;
+        }
     }
 
     pub fn shift(&mut self, x: F) -> F {
@@ -182,6 +294,116 @@ impl<F: Field> ReducingFactor<F> {
     pub fn reset(&mut self) {
         self.count = 0;
     }
+}
+
+/// Goldilocks-quadratic fast path for [`ReducingFactor::reduce_polys_base`]:
+/// delegates every output slot to `ext2_base_scalar_dot_slots`, which delays
+/// modular reduction across the whole polynomial batch. Returns `None` for
+/// any other field configuration, leaving the generic path untouched.
+fn goldilocks_ext2_reduce_polys_base<BF, F, const D: usize>(
+    polys: &[impl Borrow<PolynomialCoeffs<BF>> + Sync],
+    base_powers: &[F],
+    max_len: usize,
+) -> Option<Vec<F>>
+where
+    BF: Extendable<D, Extension = F>,
+    F: FieldExtension<D, BaseField = BF>,
+{
+    // The Goldilocks/quadratic guard is hoisted above the allocation so that
+    // only the fast path — the one that assigns every slot — can ever observe
+    // the buffer. Any other field configuration returns here, before the
+    // allocation exists.
+    if TypeId::of::<BF>() != TypeId::of::<GoldilocksField>()
+        || TypeId::of::<F>() != TypeId::of::<QuadraticExtension<GoldilocksField>>()
+    {
+        return None;
+    }
+    let mut acc: Vec<F> = Vec::with_capacity(max_len);
+    // SAFETY: capacity is exactly `max_len` and `F: Field` is `Copy`, so the
+    // vector has no drop glue. Every slot in `0..max_len` is *assigned*
+    // before it is read: `goldilocks_ext2_reduce_polys_base_into` hands the
+    // whole slice (serial arm) or a `par_chunks_mut` partition of it
+    // (parallel arm) to `ext2_base_scalar_dot_slots`, which writes `*o` for
+    // every `o` in `out` unconditionally. The `vec![F::ZERO; max_len]` this
+    // replaces was therefore a dead store over the whole composition buffer.
+    unsafe { acc.set_len(max_len) };
+    if !goldilocks_ext2_reduce_polys_base_into(polys, base_powers, 0, &mut acc) {
+        return None;
+    }
+    Some(acc)
+}
+
+/// Fill one contiguous coefficient range of the Goldilocks extension fast
+/// path. Keeping the destination caller-owned lets the opening path reuse a
+/// small cache buffer instead of materializing the whole composition vector.
+fn goldilocks_ext2_reduce_polys_base_into<BF, F, const D: usize>(
+    polys: &[impl Borrow<PolynomialCoeffs<BF>> + Sync],
+    base_powers: &[F],
+    start: usize,
+    out: &mut [F],
+) -> bool
+where
+    BF: Extendable<D, Extension = F>,
+    F: FieldExtension<D, BaseField = BF>,
+{
+    if TypeId::of::<BF>() != TypeId::of::<GoldilocksField>()
+        || TypeId::of::<F>() != TypeId::of::<QuadraticExtension<GoldilocksField>>()
+    {
+        return false;
+    }
+    // SAFETY (all casts below): the `TypeId` compares prove `BF` is exactly
+    // `GoldilocksField` and `F` is exactly
+    // `QuadraticExtension<GoldilocksField>`; only the generic spelling of the
+    // types differs, so the pointer reinterpretations preserve layout,
+    // length and alignment exactly.
+    let slices: Vec<&[GoldilocksField]> = polys
+        .iter()
+        .map(|p| {
+            let coeffs = p.borrow().coeffs.as_slice();
+            unsafe {
+                core::slice::from_raw_parts(coeffs.as_ptr().cast::<GoldilocksField>(), coeffs.len())
+            }
+        })
+        .collect();
+    let powers = unsafe {
+        core::slice::from_raw_parts(
+            base_powers
+                .as_ptr()
+                .cast::<QuadraticExtension<GoldilocksField>>(),
+            base_powers.len(),
+        )
+    };
+
+    // Same shape split as the generic path: small batches stay serial, large
+    // batches partition the coefficient slots so each worker visits all
+    // polynomials for one cache-sized output range.
+    const PARALLEL_CHUNK: usize = 16;
+    const SLOT_BLOCK: usize = 2048;
+    if slices.len() <= PARALLEL_CHUNK {
+        let out = unsafe {
+            core::slice::from_raw_parts_mut(
+                out.as_mut_ptr()
+                    .cast::<QuadraticExtension<GoldilocksField>>(),
+                out.len(),
+            )
+        };
+        ext2_base_scalar_dot_slots(out, start, &slices, powers);
+    } else {
+        out.par_chunks_mut(SLOT_BLOCK)
+            .enumerate()
+            .for_each(|(block, out)| {
+                let block_start = start + block * SLOT_BLOCK;
+                let out = unsafe {
+                    core::slice::from_raw_parts_mut(
+                        out.as_mut_ptr()
+                            .cast::<QuadraticExtension<GoldilocksField>>(),
+                        out.len(),
+                    )
+                };
+                ext2_base_scalar_dot_slots(out, block_start, &slices, powers);
+            });
+    }
+    true
 }
 
 #[derive(Debug, Clone)]
@@ -351,7 +573,7 @@ mod tests {
     use anyhow::Result;
 
     use super::*;
-    use crate::field::types::Sample;
+    use crate::field::types::{PrimeField64, Sample};
     use crate::iop::witness::{PartialWitness, WitnessWrite};
     use crate::plonk::circuit_data::CircuitConfig;
     use crate::plonk::config::{GenericConfig, PoseidonGoldilocksConfig};
@@ -439,10 +661,17 @@ mod tests {
         test_reduce_gadget(100)
     }
 
-    /// The direct-construction first term in `reduce_polys_base` must be
-    /// raw-`u64` identical to the grow-and-zero-then-accumulate form it
-    /// replaced, including when the first polynomial is empty or shorter than a
-    /// later one (so the accumulator still has to grow mid-fold).
+    /// `reduce_polys_base` must agree with the legacy grow-and-zero
+    /// accumulate form on every length shape, including an empty or short
+    /// first polynomial (so the accumulator still has to grow mid-fold).
+    ///
+    /// Agreement is canonical-value equality, not raw-`u64` equality: the
+    /// Goldilocks-quadratic fast path delays reduction across the batch, so
+    /// its sub-2^64 representatives can differ from the reduce-per-term
+    /// form's while denoting the same field element — the license the
+    /// parallel slot path already documents (consumers treat these
+    /// coefficients value-wise; proof serialization canonicalizes every
+    /// limb).
     #[test]
     fn reduce_polys_base_matches_grow_and_zero() {
         const D: usize = 2;
@@ -451,7 +680,6 @@ mod tests {
         type FF = <C as GenericConfig<D>>::FE;
 
         // Reference: the pre-change body, verbatim.
-        #[allow(unused_assignments)]
         fn legacy(alpha: FF, lens: &[usize], polys: &[PolynomialCoeffs<F>]) -> Vec<FF> {
             let mut rf = ReducingFactor::new(alpha);
             let mut acc: Vec<FF> = Vec::new();
@@ -498,8 +726,65 @@ mod tests {
                 let a: [F; D] = a.to_basefield_array();
                 let e: [F; D] = e.to_basefield_array();
                 for d in 0..D {
-                    assert_eq!(a[d].0, e[d].0, "coeff {i} limb {d} for {lens:?}");
+                    assert_eq!(
+                        a[d].to_canonical_u64(),
+                        e[d].to_canonical_u64(),
+                        "coeff {i} limb {d} for {lens:?}"
+                    );
                 }
+            }
+        }
+    }
+
+    /// The delayed-reduction fast path must agree with the legacy
+    /// reduce-per-term form on batches wide enough to take the parallel
+    /// slot-partitioned branch, across block-boundary-straddling lengths and
+    /// mixed degrees.
+    #[test]
+    fn reduce_polys_base_wide_batch_matches_legacy() {
+        const D: usize = 2;
+        type C = PoseidonGoldilocksConfig;
+        type F = <C as GenericConfig<D>>::F;
+        type FF = <C as GenericConfig<D>>::FE;
+
+        fn legacy(alpha: FF, polys: &[PolynomialCoeffs<F>]) -> Vec<FF> {
+            let mut acc: Vec<FF> = Vec::new();
+            for (base_power, poly) in alpha.powers().zip(polys.iter()) {
+                let coeffs = &poly.coeffs;
+                if coeffs.len() > acc.len() {
+                    acc.resize(coeffs.len(), FF::ZERO);
+                }
+                for (a, &c) in acc.iter_mut().zip(coeffs.iter()) {
+                    *a += <FF as FieldExtension<D>>::scalar_mul(&base_power, c);
+                }
+            }
+            acc
+        }
+
+        // 40 polynomials forces the parallel branch (> PARALLEL_CHUNK); the
+        // 5000-coefficient length straddles SLOT_BLOCK boundaries, and the
+        // short/empty entries exercise the partial-coverage loop per block.
+        let mut lens = vec![5000usize; 34];
+        lens.extend([0, 1, 2047, 2048, 2049, 4096]);
+        let alpha = FF::rand();
+        let polys: Vec<PolynomialCoeffs<F>> = lens
+            .iter()
+            .map(|&n| PolynomialCoeffs::new(F::rand_vec(n)))
+            .collect();
+
+        let expected = legacy(alpha, &polys);
+        let actual = ReducingFactor::new(alpha).reduce_polys_base::<F, D>(polys.iter());
+
+        assert_eq!(actual.coeffs.len(), expected.len());
+        for (i, (a, e)) in actual.coeffs.iter().zip(expected.iter()).enumerate() {
+            let a: [F; D] = a.to_basefield_array();
+            let e: [F; D] = e.to_basefield_array();
+            for d in 0..D {
+                assert_eq!(
+                    a[d].to_canonical_u64(),
+                    e[d].to_canonical_u64(),
+                    "coeff {i} limb {d}"
+                );
             }
         }
     }

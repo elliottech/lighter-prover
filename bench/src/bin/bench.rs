@@ -27,6 +27,7 @@ use plonky2::field::types::Field;
 use plonky2::recursion::dummy_circuit::dummy_circuit;
 
 const CHAIN_ID: u32 = 304;
+const MARGINED_ASSET_LIST_SIZE: usize = 7;
 
 #[derive(Parser, Debug)]
 #[command(about = "Lighter circuits block proving benchmark")]
@@ -76,16 +77,28 @@ fn main() {
         heavy_tx_per_proof, light_tx_per_proof, heavy_chunks_count, light_chunks_count
     );
 
-    let circuit = BlockTxCircuit::define(CIRCUIT_CONFIG, heavy_tx_per_proof, CHAIN_ID, TX_HEAVY);
+    let circuit = BlockTxCircuit::define(
+        CIRCUIT_CONFIG,
+        heavy_tx_per_proof,
+        CHAIN_ID,
+        TX_HEAVY,
+        MARGINED_ASSET_LIST_SIZE,
+    );
     let bt = circuit.target;
     let data = circuit.builder.build::<C>();
 
-    let pre_exec_circuit = BlockPreExecutionCircuit::define(CIRCUIT_CONFIG);
+    let pre_exec_circuit =
+        BlockPreExecutionCircuit::define(CIRCUIT_CONFIG, MARGINED_ASSET_LIST_SIZE);
     let pbt = pre_exec_circuit.target;
     let pre_exec_data = pre_exec_circuit.builder.build::<C>();
 
-    let light_circuit =
-        BlockTxCircuit::define(CIRCUIT_CONFIG, light_tx_per_proof, CHAIN_ID, TX_LIGHT);
+    let light_circuit = BlockTxCircuit::define(
+        CIRCUIT_CONFIG,
+        light_tx_per_proof,
+        CHAIN_ID,
+        TX_LIGHT,
+        MARGINED_ASSET_LIST_SIZE,
+    );
     let light_bt = light_circuit.target;
     let light_data = light_circuit.builder.build::<C>();
 
@@ -108,6 +121,7 @@ fn main() {
         &heavy_chain_circuit_data,
         &signature_batch_circuit.data,
         1,
+        MARGINED_ASSET_LIST_SIZE,
     );
     let block_circuit_t = block_circuit.target;
     let block_circuit_data = block_circuit.builder.build::<C>();
@@ -141,7 +155,7 @@ fn main() {
     let pre_execution_total = pre_execution_time.elapsed();
 
     let pre_exec_witness =
-        BlockPreExecWitness::from_public_inputs(&pre_proof.clone().public_inputs);
+        BlockPreExecWitness::from_public_inputs(&pre_proof.public_inputs, MARGINED_ASSET_LIST_SIZE);
 
     let state_metadata = pre_exec_witness.new_state_metadata.clone();
     let created_at = block.created_at;

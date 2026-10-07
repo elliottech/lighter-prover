@@ -216,6 +216,158 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for ComparisonGate
         self.eval_unfiltered_base_batch_packed(vars_base)
     }
 
+    fn eval_unfiltered_base_batch_accumulate(
+        &self,
+        vars_base: EvaluationVarsBaseBatch<F>,
+        filters: &[F],
+        combined_gate_constraints: &mut [F],
+    ) {
+        let n = vars_base.len();
+        assert_eq!(filters.len(), n);
+        assert!(combined_gate_constraints.len() >= <Self as Gate<F, D>>::num_constraints(self) * n);
+        let wires = vars_base.local_wires;
+        let col = |w: usize| &wires[w * n..][..n];
+        let chunk_bits = self.chunk_bits();
+        let chunk_base = F::from_canonical_usize(1 << chunk_bits);
+        let chunk_size = 1usize << chunk_bits;
+        let three = F::from_canonical_usize(3);
+        let mut chunks_iter = combined_gate_constraints.chunks_exact_mut(n);
+        // Batches are 32 points in this prover; keep the scratch rows on the
+        // stack and fall back to the heap only for oversized batches.
+        let mut scratch_stack = [F::ZERO; 64];
+        let mut msd_stack = [F::ZERO; 64];
+        let mut scratch_heap;
+        let mut msd_heap;
+        let (scratch, most_significant_diff_so_far): (&mut [F], &mut [F]) = if n <= 64 {
+            (&mut scratch_stack[..n], &mut msd_stack[..n])
+        } else {
+            scratch_heap = vec![F::ZERO; n];
+            msd_heap = vec![F::ZERO; n];
+            (&mut scratch_heap, &mut msd_heap)
+        };
+
+        // combined chunks - input, for both inputs, accumulated per point by
+        // Horner over the chunk columns from most to least significant. The
+        // chunk-wire index is computed inline rather than collected, in the
+        // same most-to-least-significant order as before.
+        for second_input in [false, true] {
+            let input_wire = if second_input {
+                self.wire_second_input()
+            } else {
+                self.wire_first_input()
+            };
+            let chunk_wire = |i: usize| {
+                if second_input {
+                    self.wire_second_chunk_val(i)
+                } else {
+                    self.wire_first_chunk_val(i)
+                }
+            };
+            let out = chunks_iter.next().unwrap();
+            scratch.copy_from_slice(col(chunk_wire(self.num_chunks - 1)));
+            for i in (0..self.num_chunks - 1).rev() {
+                let chunk = col(chunk_wire(i));
+                for p in 0..n {
+                    scratch[p] = scratch[p] * chunk_base + chunk[p];
+                }
+            }
+            let input = col(input_wire);
+            for p in 0..n {
+                out[p] += filters[p] * (scratch[p] - input[p]);
+            }
+        }
+
+        for i in 0..self.num_chunks {
+            let first = col(self.wire_first_chunk_val(i));
+            let second = col(self.wire_second_chunk_val(i));
+            for value in [first, second] {
+                let out = chunks_iter.next().unwrap();
+                match chunk_size {
+                    4 => {
+                        for p in 0..n {
+                            let x = value[p];
+                            let y = x * (x - three);
+                            out[p] += filters[p] * (y * (y + F::TWO));
+                        }
+                    }
+                    2 => {
+                        for p in 0..n {
+                            let x = value[p];
+                            out[p] += filters[p] * (x * (x - F::ONE));
+                        }
+                    }
+                    _ => {
+                        for p in 0..n {
+                            let x = value[p];
+                            let mut product = x;
+                            for k in 1..chunk_size {
+                                product *= x - F::from_canonical_usize(k);
+                            }
+                            out[p] += filters[p] * product;
+                        }
+                    }
+                }
+            }
+
+            let equality_dummy = col(self.wire_equality_dummy(i));
+            let chunks_equal = col(self.wire_chunks_equal(i));
+            let intermediate_value = col(self.wire_intermediate_value(i));
+
+            let out = chunks_iter.next().unwrap();
+            for p in 0..n {
+                let difference = second[p] - first[p];
+                out[p] +=
+                    filters[p] * (difference * equality_dummy[p] - (F::ONE - chunks_equal[p]));
+            }
+            let out = chunks_iter.next().unwrap();
+            for p in 0..n {
+                out[p] += filters[p] * (chunks_equal[p] * (second[p] - first[p]));
+            }
+            let out = chunks_iter.next().unwrap();
+            for p in 0..n {
+                out[p] += filters[p]
+                    * (intermediate_value[p] - chunks_equal[p] * most_significant_diff_so_far[p]);
+                most_significant_diff_so_far[p] =
+                    intermediate_value[p] + (F::ONE - chunks_equal[p]) * (second[p] - first[p]);
+            }
+        }
+
+        let most_significant_diff = col(self.wire_most_significant_diff());
+        let out = chunks_iter.next().unwrap();
+        for p in 0..n {
+            out[p] += filters[p] * (most_significant_diff[p] - most_significant_diff_so_far[p]);
+        }
+
+        for i in 0..chunk_bits + 1 {
+            let bit = col(self.wire_most_significant_diff_bit(i));
+            let out = chunks_iter.next().unwrap();
+            for p in 0..n {
+                out[p] += filters[p] * (bit[p] * (F::ONE - bit[p]));
+            }
+        }
+
+        // (2^n + most_significant_diff) - bits_combined, Horner over bits.
+        let two_n = F::from_canonical_u64(1 << chunk_bits);
+        let out = chunks_iter.next().unwrap();
+        scratch.copy_from_slice(col(self.wire_most_significant_diff_bit(chunk_bits)));
+        for i in (0..chunk_bits).rev() {
+            let bit = col(self.wire_most_significant_diff_bit(i));
+            for p in 0..n {
+                scratch[p] = scratch[p].double() + bit[p];
+            }
+        }
+        for p in 0..n {
+            out[p] += filters[p] * ((two_n + most_significant_diff[p]) - scratch[p]);
+        }
+
+        let result_bool = col(self.wire_result_bool());
+        let top_bit = col(self.wire_most_significant_diff_bit(chunk_bits));
+        let out = chunks_iter.next().unwrap();
+        for p in 0..n {
+            out[p] += filters[p] * (result_bool[p] - top_bit[p]);
+        }
+    }
+
     fn eval_unfiltered_circuit(
         &self,
         builder: &mut CircuitBuilder<F, D>,
@@ -464,87 +616,102 @@ impl<F: RichField + Extendable<D>, const D: usize> SimpleGenerator<F, D>
 
         let result = F::from_canonical_usize((first_input_u64 <= second_input_u64) as usize);
 
-        let chunk_size = 1 << self.gate.chunk_bits();
-        let first_input_chunks: Vec<F> = (0..self.gate.num_chunks)
-            .scan(first_input_u64, |acc, _| {
-                let tmp = *acc % chunk_size;
-                *acc /= chunk_size;
-                Some(F::from_canonical_u64(tmp))
-            })
-            .collect();
-        let second_input_chunks: Vec<F> = (0..self.gate.num_chunks)
-            .scan(second_input_u64, |acc, _| {
-                let tmp = *acc % chunk_size;
-                *acc /= chunk_size;
-                Some(F::from_canonical_u64(tmp))
-            })
-            .collect();
-
-        let chunks_equal: Vec<F> = (0..self.gate.num_chunks)
-            .map(|i| F::from_bool(first_input_chunks[i] == second_input_chunks[i]))
-            .collect();
-        let equality_dummies: Vec<F> = first_input_chunks
-            .iter()
-            .zip(second_input_chunks.iter())
-            .map(|(&f, &s)| if f == s { F::ONE } else { F::ONE / (s - f) })
-            .collect();
-
-        let mut most_significant_diff_so_far = F::ZERO;
-        let mut intermediate_values = Vec::new();
-        for i in 0..self.gate.num_chunks {
-            if first_input_chunks[i] != second_input_chunks[i] {
-                most_significant_diff_so_far = second_input_chunks[i] - first_input_chunks[i];
-                intermediate_values.push(F::ZERO);
-            } else {
-                intermediate_values.push(most_significant_diff_so_far);
+        // Single allocation-free pass: chunks, equality wires, and the
+        // running most-significant-diff are computed on the fly with the same
+        // arithmetic as before, so every wire value is bit-identical.
+        let chunk_size = 1u64 << self.gate.chunk_bits();
+        let mut first_acc = first_input_u64;
+        let mut second_acc = second_input_u64;
+        // Batch the equality-dummy inversions: one field inversion for all
+        // unequal chunks via Montgomery's trick instead of one ~72-mul
+        // Fermat chain per unequal chunk. Field division is exact, so every
+        // dummy value is bit-identical to `F::ONE / diff`.
+        const MAX_CHUNKS: usize = 64;
+        assert!(self.gate.num_chunks <= MAX_CHUNKS);
+        let mut diffs = [F::ZERO; MAX_CHUNKS];
+        let mut prefix = [F::ZERO; MAX_CHUNKS];
+        let mut unequal_count = 0usize;
+        {
+            let mut first_scan = first_acc;
+            let mut second_scan = second_acc;
+            let mut running = F::ONE;
+            for _ in 0..self.gate.num_chunks {
+                let first_chunk = F::from_canonical_u64(first_scan % chunk_size);
+                let second_chunk = F::from_canonical_u64(second_scan % chunk_size);
+                first_scan /= chunk_size;
+                second_scan /= chunk_size;
+                if first_chunk != second_chunk {
+                    let diff = second_chunk - first_chunk;
+                    diffs[unequal_count] = diff;
+                    prefix[unequal_count] = running;
+                    running *= diff;
+                    unequal_count += 1;
+                }
+            }
+            if unequal_count > 0 {
+                let mut inv_running = running.inverse();
+                for k in (0..unequal_count).rev() {
+                    // inverse of diffs[k] = inv(prod of all) * prod of others.
+                    let inv_k = inv_running * prefix[k];
+                    inv_running *= diffs[k];
+                    diffs[k] = inv_k;
+                }
             }
         }
+        let mut next_unequal = 0usize;
+
+        let mut most_significant_diff_so_far = F::ZERO;
+        for i in 0..self.gate.num_chunks {
+            let first_chunk = F::from_canonical_u64(first_acc % chunk_size);
+            let second_chunk = F::from_canonical_u64(second_acc % chunk_size);
+            first_acc /= chunk_size;
+            second_acc /= chunk_size;
+
+            let equal = first_chunk == second_chunk;
+            let equality_dummy = if equal {
+                F::ONE
+            } else {
+                let inv = diffs[next_unequal];
+                next_unequal += 1;
+                inv
+            };
+            let intermediate_value = if equal {
+                most_significant_diff_so_far
+            } else {
+                F::ZERO
+            };
+            if !equal {
+                most_significant_diff_so_far = second_chunk - first_chunk;
+            }
+
+            out_buffer.set_wire(local_wire(self.gate.wire_first_chunk_val(i)), first_chunk)?;
+            out_buffer.set_wire(local_wire(self.gate.wire_second_chunk_val(i)), second_chunk)?;
+            out_buffer.set_wire(local_wire(self.gate.wire_equality_dummy(i)), equality_dummy)?;
+            out_buffer.set_wire(
+                local_wire(self.gate.wire_chunks_equal(i)),
+                F::from_bool(equal),
+            )?;
+            out_buffer.set_wire(
+                local_wire(self.gate.wire_intermediate_value(i)),
+                intermediate_value,
+            )?;
+        }
         let most_significant_diff = most_significant_diff_so_far;
-
-        let two_n = F::from_canonical_usize(1 << self.gate.chunk_bits());
-        let two_n_plus_msd = (two_n + most_significant_diff).to_canonical_u64();
-
-        let msd_bits_u64: Vec<u64> = (0..self.gate.chunk_bits() + 1)
-            .scan(two_n_plus_msd, |acc, _| {
-                let tmp = *acc % 2;
-                *acc /= 2;
-                Some(tmp)
-            })
-            .collect();
-        let msd_bits: Vec<F> = msd_bits_u64
-            .iter()
-            .map(|x| F::from_canonical_u64(*x))
-            .collect();
 
         out_buffer.set_wire(local_wire(self.gate.wire_result_bool()), result)?;
         out_buffer.set_wire(
             local_wire(self.gate.wire_most_significant_diff()),
             most_significant_diff,
         )?;
-        for i in 0..self.gate.num_chunks {
-            out_buffer.set_wire(
-                local_wire(self.gate.wire_first_chunk_val(i)),
-                first_input_chunks[i],
-            )?;
-            out_buffer.set_wire(
-                local_wire(self.gate.wire_second_chunk_val(i)),
-                second_input_chunks[i],
-            )?;
-            out_buffer.set_wire(
-                local_wire(self.gate.wire_equality_dummy(i)),
-                equality_dummies[i],
-            )?;
-            out_buffer.set_wire(local_wire(self.gate.wire_chunks_equal(i)), chunks_equal[i])?;
-            out_buffer.set_wire(
-                local_wire(self.gate.wire_intermediate_value(i)),
-                intermediate_values[i],
-            )?;
-        }
+
+        let two_n = F::from_canonical_usize(1 << self.gate.chunk_bits());
+        let mut msd_acc = (two_n + most_significant_diff).to_canonical_u64();
         for i in 0..self.gate.chunk_bits() + 1 {
             out_buffer.set_wire(
                 local_wire(self.gate.wire_most_significant_diff_bit(i)),
-                msd_bits[i],
+                F::from_canonical_u64(msd_acc % 2),
             )?;
+            msd_acc /= 2;
         }
 
         Ok(())

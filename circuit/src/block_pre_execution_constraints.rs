@@ -7,12 +7,13 @@ use log::Level;
 use plonky2::field::extension::Extendable;
 use plonky2::field::types::{Field, Field64};
 use plonky2::hash::hash_types::{HashOutTarget, RichField};
+use plonky2::iop::generator::PendingPartitionWitness;
 use plonky2::iop::target::{BoolTarget, Target};
-use plonky2::iop::witness::{PartialWitness, WitnessWrite};
+use plonky2::iop::witness::{PartialWitness, Witness, WitnessWrite};
 use plonky2::plonk::circuit_data::{CircuitConfig, CircuitData};
 use plonky2::plonk::config::GenericConfig;
 use plonky2::plonk::proof::ProofWithPublicInputs;
-use plonky2::plonk::prover::prove;
+use plonky2::plonk::prover::prove_with_partition_witness;
 use plonky2::timed;
 use plonky2::util::timing::TimingTree;
 
@@ -59,7 +60,7 @@ pub trait Circuit<
     /// `builder` can be used to build circuit via calling [`Builder::build()`]
     ///
     /// `target` can be used to assign partial witness in [`BlockPreExecutionCircuit::prove()`] function
-    fn define(config: CircuitConfig) -> Self;
+    fn define(config: CircuitConfig, margined_asset_list_size: usize) -> Self;
 
     /// Fills partial witness for block target with given block data
     fn generate_witness(
@@ -81,7 +82,8 @@ pub struct BlockPreExecutionCircuit {
     pub target: BlockPreExecutionTarget,
 }
 
-#[derive(Debug)]
+#[serde_with::serde_as]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct BlockPreExecutionTarget {
     pub block_number: Target,
     pub created_at: Target, // 48 bits
@@ -91,9 +93,12 @@ pub struct BlockPreExecutionTarget {
     /***********************/
     pub old_system_config: SystemConfigTarget,
     pub register_stack_before: RegisterStackTarget,
+    #[serde_as(as = "[_; ASSET_LIST_SIZE]")]
     pub all_assets_before: [AssetTarget; ASSET_LIST_SIZE],
-    pub all_margined_assets_before: [MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
+    pub all_margined_assets_before: Vec<MarginedAssetTarget>,
+    #[serde_as(as = "[_; POSITION_LIST_SIZE]")]
     pub all_market_details_before: [MarketDetailsTarget; POSITION_LIST_SIZE],
+    #[serde_as(as = "[_; POSITION_LIST_SIZE]")]
     pub all_market_risk_details_before: [MarketRiskDetailsTarget; POSITION_LIST_SIZE],
     pub state_metadata_target: StateMetadataTarget,
 
@@ -116,19 +121,20 @@ pub struct BlockPreExecutionTarget {
     pub next_public_market_index_before: Target,
     pub old_state_root: HashOutTarget,
 
+    #[serde_as(as = "[_; POSITION_LIST_SIZE]")]
     pub all_market_risk_details_after: [MarketRiskDetailsTarget; POSITION_LIST_SIZE], // Public
-    pub all_margined_assets_after: [MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],   // Public
-    pub new_state_metadata_target: StateMetadataTarget,                               // Public
-    pub new_state_root: HashOutTarget,                                                // Public
-    pub new_validium_root: HashOutTarget,                                             // Public
+    pub all_margined_assets_after: Vec<MarginedAssetTarget>, // Public
+    pub new_state_metadata_target: StateMetadataTarget,      // Public
+    pub new_state_root: HashOutTarget,                       // Public
+    pub new_validium_root: HashOutTarget,                    // Public
 
     // Helpers
     all_assets_hash: HashOutTarget,
 }
 
 impl Circuit<C, F, D> for BlockPreExecutionCircuit {
-    fn define(config: CircuitConfig) -> Self {
-        let mut circuit = Self::new(config);
+    fn define(config: CircuitConfig, margined_asset_list_size: usize) -> Self {
+        let mut circuit = Self::new(config, margined_asset_list_size);
 
         circuit.register_public_inputs();
 
@@ -160,11 +166,26 @@ impl Circuit<C, F, D> for BlockPreExecutionCircuit {
     ) -> Result<ProofWithPublicInputs<F, C, D>> {
         let mut timing = TimingTree::new("BlockPreExecutionCircuit::prove", Level::Debug);
 
-        let pw = timed!(timing, "witness", {
-            Self::generate_witness(block, target)?
+        // Seed the partition directly instead of routing the block's inputs through a
+        // `PartialWitness` map and replaying it; same values, same watch-count
+        // decrements, no transport map.
+        let pending = timed!(timing, "witness", {
+            PendingPartitionWitness::start_seeded(
+                &circuit.prover_only,
+                &circuit.common,
+                |seeder| Self::seed_witness_into(block, target, seeder),
+            )?
         });
-        let proof = prove::<F, C, D>(&circuit.prover_only, &circuit.common, pw, &mut timing)?;
-        timed!(timing, "verify", { circuit.verify(proof.clone())? });
+        let partition_witness = pending.finish()?;
+        let proof = prove_with_partition_witness::<F, C, D>(
+            &circuit.prover_only,
+            &circuit.common,
+            partition_witness,
+            &mut timing,
+        )?;
+        if crate::utils::eager_verify_enabled() {
+            timed!(timing, "verify", { circuit.verify(proof.clone())? });
+        }
 
         timing.print();
         Ok(proof)
@@ -175,7 +196,19 @@ impl Circuit<C, F, D> for BlockPreExecutionCircuit {
         target: &BlockPreExecutionTarget,
     ) -> Result<PartialWitness<F>> {
         let mut pw = PartialWitness::new();
+        Self::seed_witness_into(block, target, &mut pw)?;
+        Ok(pw)
+    }
+}
 
+impl BlockPreExecutionCircuit {
+    /// Seeded form of [`Circuit::generate_witness`]: writes the same targets directly
+    /// through `pw` (any partition seeder or map).
+    fn seed_witness_into<W: Witness<F> + WitnessWrite<F>>(
+        block: &BlockPreExec<F>,
+        target: &BlockPreExecutionTarget,
+        pw: &mut W,
+    ) -> Result<()> {
         pw.set_target(target.created_at, F::from_canonical_i64(block.created_at))?;
         pw.set_target(
             target.block_number,
@@ -191,6 +224,13 @@ impl Circuit<C, F, D> for BlockPreExecutionCircuit {
             .zip(block.all_assets.iter())
             .try_for_each(|(t, ai)| pw.set_asset_target(t, ai))?;
 
+        if block.all_margined_assets.len() != target.all_margined_assets_before.len() {
+            anyhow::bail!(
+                "margined assets length mismatch: witness has {}, circuit expects {}",
+                block.all_margined_assets.len(),
+                target.all_margined_assets_before.len()
+            );
+        }
         target
             .all_margined_assets_before
             .iter()
@@ -239,13 +279,11 @@ impl Circuit<C, F, D> for BlockPreExecutionCircuit {
 
         pw.set_hash_target(target.old_state_root, block.old_state_root)?;
 
-        Ok(pw)
+        Ok(())
     }
-}
 
-impl BlockPreExecutionCircuit {
     /// Initializes a new block virtual targets for the given number of transactions.
-    pub fn new(config: CircuitConfig) -> Self {
+    pub fn new(config: CircuitConfig, margined_asset_list_size: usize) -> Self {
         let mut builder = Builder::new(config);
 
         Self {
@@ -260,11 +298,9 @@ impl BlockPreExecutionCircuit {
                     .collect::<Vec<_>>()
                     .try_into()
                     .unwrap(),
-                all_margined_assets_before: (0..MARGINED_ASSET_LIST_SIZE)
+                all_margined_assets_before: (0..margined_asset_list_size)
                     .map(|_| MarginedAssetTarget::new(&mut builder))
-                    .collect::<Vec<_>>()
-                    .try_into()
-                    .unwrap(),
+                    .collect(),
                 all_market_details_before: (0..POSITION_LIST_SIZE)
                     .map(|_| MarketDetailsTarget::new(&mut builder))
                     .collect::<Vec<_>>()
@@ -276,7 +312,7 @@ impl BlockPreExecutionCircuit {
                     .try_into()
                     .unwrap(),
 
-                price_updates: PriceUpdatesTarget::new(&mut builder),
+                price_updates: PriceUpdatesTarget::new(&mut builder, margined_asset_list_size),
                 calculate_premium: builder.add_virtual_bool_target_safe(),
                 calculate_funding: builder.add_virtual_bool_target_safe(),
                 calculate_oracle_prices: builder.add_virtual_bool_target_safe(),
@@ -296,11 +332,9 @@ impl BlockPreExecutionCircuit {
                     .collect::<Vec<_>>()
                     .try_into()
                     .unwrap(),
-                all_margined_assets_after: (0..MARGINED_ASSET_LIST_SIZE)
+                all_margined_assets_after: (0..margined_asset_list_size)
                     .map(|_| MarginedAssetTarget::new(&mut builder))
-                    .collect::<Vec<_>>()
-                    .try_into()
-                    .unwrap(),
+                    .collect(),
                 new_state_metadata_target: StateMetadataTarget::new(&mut builder),
                 new_state_root: builder.add_virtual_hash(),
                 new_validium_root: builder.add_virtual_hash(),
@@ -411,7 +445,7 @@ impl BlockPreExecutionCircuit {
     ) -> (
         [MarketDetailsTarget; POSITION_LIST_SIZE],
         [MarketRiskDetailsTarget; POSITION_LIST_SIZE],
-        [MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
+        Vec<MarginedAssetTarget>,
         StateMetadataTarget,
     ) {
         let builder = &mut self.builder;
@@ -727,23 +761,26 @@ impl BlockPreExecutionCircuit {
             );
         }
 
-        let margined_assets_after = core::array::from_fn(|asset_index| {
-            builder.register_range_check(
-                self.target.price_updates.asset_index_price[asset_index],
-                ASSET_PRICE_BITS,
-            );
+        let margined_assets_after = (0..self.target.all_margined_assets_before.len())
+            .map(|asset_index| {
+                builder.register_range_check(
+                    self.target.price_updates.asset_index_price[asset_index],
+                    ASSET_PRICE_BITS,
+                );
 
-            let mut margined_asset = self.target.all_margined_assets_before[asset_index].clone();
+                let mut margined_asset =
+                    self.target.all_margined_assets_before[asset_index].clone();
 
-            let should_update_asset_index_price = self.target.calculate_oracle_prices;
-            margined_asset.index_price = builder.select(
-                should_update_asset_index_price,
-                self.target.price_updates.asset_index_price[asset_index],
-                margined_asset.index_price,
-            );
+                let should_update_asset_index_price = self.target.calculate_oracle_prices;
+                margined_asset.index_price = builder.select(
+                    should_update_asset_index_price,
+                    self.target.price_updates.asset_index_price[asset_index],
+                    margined_asset.index_price,
+                );
 
-            margined_asset
-        });
+                margined_asset
+            })
+            .collect();
 
         let mut new_state_metadata = self.target.state_metadata_target.clone();
 
@@ -781,7 +818,7 @@ impl BlockPreExecutionCircuit {
         &mut self,
         all_market_details_after: &[MarketDetailsTarget; POSITION_LIST_SIZE],
         all_market_risk_details_after: &[MarketRiskDetailsTarget; POSITION_LIST_SIZE],
-        all_margined_assets_after: &[MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
+        all_margined_assets_after: &[MarginedAssetTarget],
         new_state_metadata: &StateMetadataTarget,
     ) {
         let old_system_config_hash = self.target.old_system_config.hash(&mut self.builder);

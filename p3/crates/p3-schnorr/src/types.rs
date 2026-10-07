@@ -54,8 +54,8 @@ impl Fp5Bytes {
     /// wire bytes either become a real field element or are rejected.
     pub fn to_goldilocks_limbs(self, field: &'static str) -> Result<[Goldilocks; FP5_LIMBS]> {
         let mut out = [Goldilocks::ZERO; FP5_LIMBS];
-        for (i, chunk) in self.0.chunks_exact(8).enumerate() {
-            let value = u64::from_le_bytes(chunk.try_into().expect("chunks_exact yields 8 bytes"));
+        for (i, chunk) in self.0.as_chunks::<8>().0.iter().enumerate() {
+            let value = u64::from_le_bytes(*chunk);
             if value >= Goldilocks::ORDER_U64 {
                 return Err(Error::NonCanonicalGoldilocksLimb {
                     field,

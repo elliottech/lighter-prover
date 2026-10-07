@@ -43,6 +43,46 @@ pub fn batch_multiply_inplace<F: Field>(out: &mut [F], a: &[F]) {
         *x_out *= *x_a;
     }
 }
+/// Elementwise `out[i] = a[i] * b[i]`, writing a destination that is not also an
+/// input.
+///
+/// The LDE fill previously reached its coset-scaled state in two passes over
+/// `degree` words: `copy_from_slice` (read `a`, write `out`) followed by
+/// `batch_multiply_inplace` (read `out`, read `b`, write `out`). The
+/// intermediate unscaled copy is never observed — the FFT only ever sees the
+/// scaled values — so the copy is a materialization that can be deleted by
+/// folding the multiply into the same pass.
+///
+/// The packed/scalar split is identical to `batch_multiply_inplace`'s: the
+/// maximal `P::WIDTH` prefix uses packed multiplication and the ragged tail uses
+/// the same scalar operation, so every produced word is bit-identical to the
+/// two-pass form.
+pub fn batch_multiply_into<F: Field>(out: &mut [F], a: &[F], b: &[F]) {
+    let n = out.len();
+    assert_eq!(
+        n,
+        a.len(),
+        "output and first input must have the same length"
+    );
+    assert_eq!(
+        n,
+        b.len(),
+        "output and second input must have the same length"
+    );
+
+    let (out_packed, out_leftovers) =
+        pack_slice_with_leftovers_mut::<<F as Packable>::Packing>(out);
+    let (a_packed, a_leftovers) = pack_slice_with_leftovers::<<F as Packable>::Packing>(a);
+    let (b_packed, b_leftovers) = pack_slice_with_leftovers::<<F as Packable>::Packing>(b);
+
+    for ((x_out, x_a), x_b) in out_packed.iter_mut().zip(a_packed).zip(b_packed) {
+        *x_out = *x_a * *x_b;
+    }
+    for ((x_out, x_a), x_b) in out_leftovers.iter_mut().zip(a_leftovers).zip(b_leftovers) {
+        *x_out = *x_a * *x_b;
+    }
+}
+
 /// Elementwise multiply two slices and add the products to an output slice.
 pub fn batch_multiply_add_inplace<F: Field>(out: &mut [F], a: &[F], b: &[F]) {
     let n = out.len();
@@ -94,6 +134,55 @@ pub fn batch_add_inplace<F: Field>(out: &mut [F], a: &[F]) {
 mod tests {
     use super::*;
     use crate::goldilocks_field::GoldilocksField;
+
+    /// Q5: the fused `copy + scale` must be raw-`u64`-identical to the
+    /// two-pass `copy_from_slice` + `batch_multiply_inplace` it replaces, at
+    /// every length across the packed/leftover split, and it must assign
+    /// every destination slot (the destination is uninitialized).
+    #[test]
+    fn batch_multiply_into_matches_copy_then_inplace() {
+        const POISON: GoldilocksField = GoldilocksField(u64::MAX);
+        for n in 0..40usize {
+            let a = (0..n)
+                .map(|i| GoldilocksField::from_canonical_usize(2 * i + 3))
+                .collect::<Vec<_>>();
+            let b = (0..n)
+                .map(|i| GoldilocksField::from_canonical_usize(3 * i + 5))
+                .collect::<Vec<_>>();
+            let mut reference = vec![POISON; n];
+            reference.copy_from_slice(&a);
+            batch_multiply_inplace(&mut reference, &b);
+
+            let mut fused = vec![POISON; n];
+            batch_multiply_into(&mut fused, &a, &b);
+
+            for i in 0..n {
+                assert_ne!(fused[i].0, POISON.0, "slot {i} of {n} never written");
+                assert_eq!(fused[i].0, reference[i].0, "slot {i} of {n} differs");
+            }
+        }
+    }
+
+    /// Sabotage control: a fused writer that stopped at the packed prefix —
+    /// i.e. dropped the ragged tail — must be caught by the sweep above.
+    #[test]
+    fn fused_multiply_differential_catches_a_dropped_tail() {
+        const POISON: GoldilocksField = GoldilocksField(u64::MAX);
+        let n = 11usize;
+        let a = (0..n)
+            .map(|i| GoldilocksField::from_canonical_usize(2 * i + 3))
+            .collect::<Vec<_>>();
+        let b = (0..n)
+            .map(|i| GoldilocksField::from_canonical_usize(3 * i + 5))
+            .collect::<Vec<_>>();
+        let mut sabotaged = vec![POISON; n];
+        let split = n - n % <GoldilocksField as Packable>::Packing::WIDTH;
+        batch_multiply_into(&mut sabotaged[..split], &a[..split], &b[..split]);
+        assert!(
+            sabotaged.iter().any(|x| x.0 == POISON.0),
+            "sweep failed to notice a dropped ragged tail"
+        );
+    }
 
     #[test]
     fn batch_multiply_add_matches_scalar_with_packed_leftovers() {

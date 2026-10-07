@@ -11,7 +11,9 @@ use plonky2::iop::witness::{Witness, WitnessWrite};
 
 use crate::builder::Builder;
 
-#[derive(Clone, Copy, Eq, PartialEq, Hash, Debug, Default)]
+#[derive(
+    Clone, Copy, Eq, PartialEq, Hash, Debug, Default, serde::Serialize, serde::Deserialize,
+)]
 pub struct U8Target(pub Target);
 
 pub trait CircuitBuilderU8<F: RichField + Extendable<D>, const D: usize> {

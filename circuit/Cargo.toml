@@ -28,14 +28,13 @@ num = { workspace = true }
 itertools = { workspace = true }
 anyhow = { workspace = true }
 rand = { workspace = true }
-plonky2 = { workspace = true, default-features = true }
+plonky2 = { workspace = true, default-features = false }
 lazy_static = { workspace = true }
 serde = { workspace = true }
 rayon = { workspace = true }
 serde_with = { workspace = true }
 serde_json = { workspace = true }
 hex = { workspace = true }
-sha2 = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 bincode = { workspace = true }
@@ -46,9 +45,9 @@ clap_derive = { workspace = true }
 tiny-keccak =  { workspace = true }
 paste = { workspace = true }
 p3-schnorr-recursion = { path = "../p3/crates/p3-schnorr-recursion", features = ["plonky2-nightly"] }
-p3-schnorr = { path = "../p3/crates/p3-schnorr", features = ["reference"] }
-p3-field = "0.6.3"
-p3-goldilocks = "0.6.3"
+p3-schnorr = { path = "../p3/crates/p3-schnorr", features = ["reference", "metal"] }
+p3-field = { workspace = true }
+p3-goldilocks = { workspace = true }
 
 [dev-dependencies]
 zstd = "0.13"

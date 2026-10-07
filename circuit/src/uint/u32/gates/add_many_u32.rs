@@ -11,9 +11,10 @@
 use core::marker::PhantomData;
 
 use anyhow::Result;
+use plonky2::field::batch_util::batch_multiply_add_inplace;
 use plonky2::field::extension::Extendable;
 use plonky2::field::types::Field;
-use plonky2::gates::gate::Gate;
+use plonky2::gates::gate::{Gate, U32QuotientGate};
 use plonky2::gates::util::StridedConstraintConsumer;
 use plonky2::hash::hash_types::RichField;
 use plonky2::iop::ext_target::ExtensionTarget;
@@ -161,7 +162,6 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for U32AddManyGate
     }
 
     fn eval_unfiltered_base_batch(&self, vars_base: EvaluationVarsBaseBatch<F>) -> Vec<F> {
-        assert_eq!(1 << Self::limb_bits(), 4);
         let n = vars_base.len();
         let wires = vars_base.local_wires;
         let three = F::from_canonical_usize(3);
@@ -197,6 +197,7 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for U32AddManyGate
             for j in (0..Self::num_limbs()).rev() {
                 let limb = &wires[self.wire_ith_output_jth_limb(i, j) * n..][..n];
                 let out = chunks.next().unwrap();
+                debug_assert_eq!(1 << Self::limb_bits(), 4);
                 for p in 0..n {
                     let x = limb[p];
                     let y = x * (x - three);
@@ -221,8 +222,106 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for U32AddManyGate
                 out[p] = combined_carry[p] - output_carry[p];
             }
         }
-        assert!(chunks.next().is_none());
         res
+    }
+
+    fn eval_unfiltered_base_batch_accumulate(
+        &self,
+        vars_base: EvaluationVarsBaseBatch<F>,
+        filters: &[F],
+        combined_gate_constraints: &mut [F],
+    ) {
+        let n = vars_base.len();
+        assert_eq!(filters.len(), n);
+        let num_constraints = <Self as Gate<F, D>>::num_constraints(self);
+        assert!(combined_gate_constraints.len() >= num_constraints * n);
+
+        let wires = vars_base.local_wires;
+        let three = F::from_canonical_usize(3);
+        let base_limb = F::from_canonical_u64(1u64 << Self::limb_bits());
+        let base32 = F::from_canonical_u64(1 << 32u64);
+        // Batches are 32 points in this prover; keep the scratch row on the
+        // stack and fall back to the heap only for oversized batches.
+        let mut scratch_stack = [F::ZERO; 64];
+        let mut scratch_heap;
+        let scratch: &mut [F] = if n <= 64 {
+            &mut scratch_stack[..n]
+        } else {
+            scratch_heap = vec![F::ZERO; n];
+            &mut scratch_heap
+        };
+        let mut constraint_index = 0;
+
+        for i in 0..self.num_ops {
+            let output_result = &wires[self.wire_ith_output_result(i) * n..][..n];
+            let output_carry = &wires[self.wire_ith_output_carry(i) * n..][..n];
+
+            // output_carry * 2^32 + output_result - (sum of addends + carry).
+            scratch.copy_from_slice(&wires[self.wire_ith_carry(i) * n..][..n]);
+            for j in 0..self.num_addends {
+                let addend = &wires[self.wire_ith_op_jth_addend(i, j) * n..][..n];
+                for p in 0..n {
+                    scratch[p] += addend[p];
+                }
+            }
+            for p in 0..n {
+                scratch[p] = output_carry[p] * base32 + output_result[p] - scratch[p];
+            }
+            let combined =
+                &mut combined_gate_constraints[constraint_index * n..(constraint_index + 1) * n];
+            batch_multiply_add_inplace(combined, scratch, filters);
+            constraint_index += 1;
+
+            // Limb range products (base-4: x(x-1)(x-2)(x-3) = y(y+2), y = x(x-3))
+            // in the same descending order as `eval_unfiltered`.
+            debug_assert_eq!(1 << Self::limb_bits(), 4);
+            for j in (0..Self::num_limbs()).rev() {
+                let limb = &wires[self.wire_ith_output_jth_limb(i, j) * n..][..n];
+                for p in 0..n {
+                    let x = limb[p];
+                    let y = x * (x - three);
+                    scratch[p] = y * (y + F::TWO);
+                }
+                let combined = &mut combined_gate_constraints
+                    [constraint_index * n..(constraint_index + 1) * n];
+                batch_multiply_add_inplace(combined, scratch, filters);
+                constraint_index += 1;
+            }
+
+            // Result/carry recompositions, folded high-to-low over each group
+            // exactly as the interleaved accumulation in the batch path.
+            scratch.fill(F::ZERO);
+            for j in (0..Self::num_result_limbs()).rev() {
+                let limb = &wires[self.wire_ith_output_jth_limb(i, j) * n..][..n];
+                for p in 0..n {
+                    scratch[p] = scratch[p] * base_limb + limb[p];
+                }
+            }
+            for p in 0..n {
+                scratch[p] -= output_result[p];
+            }
+            let combined =
+                &mut combined_gate_constraints[constraint_index * n..(constraint_index + 1) * n];
+            batch_multiply_add_inplace(combined, scratch, filters);
+            constraint_index += 1;
+
+            scratch.fill(F::ZERO);
+            for j in (Self::num_result_limbs()..Self::num_limbs()).rev() {
+                let limb = &wires[self.wire_ith_output_jth_limb(i, j) * n..][..n];
+                for p in 0..n {
+                    scratch[p] = scratch[p] * base_limb + limb[p];
+                }
+            }
+            for p in 0..n {
+                scratch[p] -= output_carry[p];
+            }
+            let combined =
+                &mut combined_gate_constraints[constraint_index * n..(constraint_index + 1) * n];
+            batch_multiply_add_inplace(combined, scratch, filters);
+            constraint_index += 1;
+        }
+
+        debug_assert_eq!(constraint_index, num_constraints);
     }
 
     fn eval_unfiltered_base_one(
@@ -359,6 +458,15 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for U32AddManyGate
     fn num_constraints(&self) -> usize {
         self.num_ops * (3 + Self::num_limbs())
     }
+
+    fn u32_quotient_gate(&self) -> Option<U32QuotientGate> {
+        Some(U32QuotientGate::AddMany {
+            num_ops: self.num_ops,
+            num_addends: self.num_addends,
+            base_bits: 32,
+            num_carry_limbs: Self::num_carry_limbs(),
+        })
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -415,12 +523,16 @@ impl<F: RichField + Extendable<D>, const D: usize> SimpleGenerator<F, D>
 
         let get_local_wire = |column| witness.get_wire(local_wire(column));
 
-        let addends: Vec<_> = (0..self.gate.num_addends)
-            .map(|j| get_local_wire(self.gate.wire_ith_op_jth_addend(self.i, j)))
-            .collect();
+        // Direct left fold over ascending addend index: the same association as
+        // the previous `collect` + `fold(F::ZERO, ..)`, minus the temporary
+        // `Vec` per generator execution.
+        let mut addends_sum = F::ZERO;
+        for j in 0..self.gate.num_addends {
+            addends_sum += get_local_wire(self.gate.wire_ith_op_jth_addend(self.i, j));
+        }
         let carry = get_local_wire(self.gate.wire_ith_carry(self.i));
 
-        let output = addends.iter().fold(F::ZERO, |x, &y| x + y) + carry;
+        let output = addends_sum + carry;
         let output_u64 = output.to_canonical_u64();
 
         let output_carry_u64 = output_u64 >> 32;
@@ -437,28 +549,25 @@ impl<F: RichField + Extendable<D>, const D: usize> SimpleGenerator<F, D>
 
         let num_result_limbs = U32AddManyGate::<F, D>::num_result_limbs();
         let num_carry_limbs = U32AddManyGate::<F, D>::num_carry_limbs();
-        let limb_base = 1 << U32AddManyGate::<F, D>::limb_bits();
+        let limb_base: u64 = 1 << U32AddManyGate::<F, D>::limb_bits();
 
-        let split_to_limbs = |mut val, num| {
-            std::iter::from_fn(move || {
-                if num == 0 {
-                    None
-                } else {
-                    let ret = val % limb_base;
-                    val /= limb_base;
-                    Some(F::from_canonical_u64(ret))
-                }
-            })
-            .take(num)
-            .collect::<Vec<_>>()
-        };
-
-        let result_limbs = split_to_limbs(output_result_u64, num_result_limbs);
-        let carry_limbs = split_to_limbs(output_carry_u64, num_carry_limbs);
-
-        for (j, limb) in result_limbs.into_iter().chain(carry_limbs).enumerate() {
+        // In-place limb decomposition in the identical chained order the two
+        // `split_to_limbs` `collect`s produced: result limbs at j in
+        // 0..num_result_limbs, then carry limbs at the following indices.
+        let mut result_val = output_result_u64;
+        for j in 0..num_result_limbs {
             let wire = local_wire(self.gate.wire_ith_output_jth_limb(self.i, j));
-            out_buffer.set_wire(wire, limb)?;
+            out_buffer.set_wire(wire, F::from_canonical_u64(result_val % limb_base))?;
+            result_val /= limb_base;
+        }
+        let mut carry_val = output_carry_u64;
+        for j in 0..num_carry_limbs {
+            let wire = local_wire(
+                self.gate
+                    .wire_ith_output_jth_limb(self.i, num_result_limbs + j),
+            );
+            out_buffer.set_wire(wire, F::from_canonical_u64(carry_val % limb_base))?;
+            carry_val /= limb_base;
         }
 
         Ok(())
@@ -481,6 +590,21 @@ mod batch_tests {
                 num_addends,
             );
             assert_base_batch_matches_eval_unfiltered(&gate);
+        }
+    }
+
+    // The direct filtered accumulation override must produce bit-identical
+    // values to materializing the batch then multiply-adding row by row.
+    #[test]
+    fn direct_filtered_accumulation_matches_materialized_batch() {
+        use crate::gate_batch_testing::assert_direct_accumulation_matches_materialized_batch;
+
+        for num_addends in [2, 5, 16] {
+            let gate = U32AddManyGate::<GoldilocksField, 2>::new_from_config(
+                &CircuitConfig::standard_recursion_config(),
+                num_addends,
+            );
+            assert_direct_accumulation_matches_materialized_batch(&gate);
         }
     }
 }

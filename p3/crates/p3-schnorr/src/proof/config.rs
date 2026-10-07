@@ -66,7 +66,9 @@ pub type Hash = PaddingFreeSponge<
 /// 2-to-1 compression function for internal Merkle tree nodes.
 pub type Compress = TruncatedPermutation<Perm, 2, TRANSCRIPT_DIGEST_WIDTH, TRANSCRIPT_POSEIDON_WIDTH>;
 /// Discrete Fourier transform used by the PCS to interpolate/evaluate traces.
-pub type Dft = Radix2DitParallel<Goldilocks>;
+/// Delegates to `Radix2DitParallel<Goldilocks>` everywhere except large coset
+/// LDEs on Apple Silicon, which are GPU-offloaded (bit-identical results).
+pub type Dft = crate::metal_dft::MetalDft;
 /// Merkle-tree-based commitment scheme for base-field (trace/quotient) matrices.
 pub type ValMmcs = MerkleTreeMmcs<
     <Goldilocks as Field>::Packing,

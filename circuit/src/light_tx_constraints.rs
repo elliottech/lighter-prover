@@ -49,6 +49,7 @@ impl TxTarget {
         builder: &mut Builder,
         block_created_at: Target,
         state_metadata_hash: HashOutTarget,
+        margined_asset_list_size: usize,
     ) -> (
         [U8Target; MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX],
         BoolTarget,
@@ -101,8 +102,11 @@ impl TxTarget {
                 self.all_assets_before.to_vec(),
             )
         });
-        let first_asset_margin_index = assets_before[0].margin_index(builder);
-        let second_asset_margin_index = assets_before[1].margin_index(builder);
+        self.assert_margined_asset_list_size(margined_asset_list_size);
+        let first_asset_margin_index =
+            assets_before[0].margin_index(builder, margined_asset_list_size);
+        let second_asset_margin_index =
+            assets_before[1].margin_index(builder, margined_asset_list_size);
         let margined_asset_before = [
             random_access_margined_assets(
                 builder,
@@ -128,6 +132,7 @@ impl TxTarget {
                 array::from_ref(&self.accounts_before[OWNER_ACCOUNT_ID]),
                 &assets_before,
                 first_asset_margin_index,
+                margined_asset_list_size,
             );
         let account_margined_assets_before = account_margined_assets_before[0].clone();
         let is_asset_used_as_margin: [BoolTarget; NB_ASSETS_PER_TX] =
@@ -179,11 +184,11 @@ impl TxTarget {
 
         let _false = builder._false();
         let _true = builder._true();
-        let nil_margin_asset_index = builder.constant_u64(NIL_MARGIN_ASSET_INDEX);
         let zero_bigint = builder.zero_bigint();
         let tx_state = &mut TxState {
             first_asset_margin_index,
-            next_margin_asset_index: nil_margin_asset_index,
+            next_margin_asset_index: builder.constant_usize(margined_asset_list_size),
+            margined_asset_list_size,
             new_instructions: [BaseRegisterInfoTarget::empty(builder); NEW_INSTRUCTIONS_MAX_SIZE],
             new_instructions_count: builder.zero(),
             register_stack: self.register_stack_before,
@@ -396,7 +401,7 @@ impl TxTarget {
         owner_position_before: &AccountPositionTarget,
         current_market_details_before: &MarketRiskDetailsTarget,
         all_market_risk_details_before: &[MarketRiskDetailsTarget; POSITION_LIST_SIZE],
-        all_margined_assets_before: &[MarginedAssetTarget; MARGINED_ASSET_LIST_SIZE],
+        all_margined_assets_before: &[MarginedAssetTarget],
     ) -> RiskInfoTarget {
         let default_strategy_index = builder.constant_usize(DEFAULT_STRATEGY_INDEX);
 

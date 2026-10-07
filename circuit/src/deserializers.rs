@@ -24,14 +24,13 @@ use crate::keccak::helpers::u8_array_to_bits;
 use crate::tx_attributes::{NB_ATTRIBUTES_PER_TX, TxAttributes};
 use crate::types::account_asset::AccountAsset;
 use crate::types::account_delta::{BinaryOptionsDelta, MarketDataDelta, PublicPoolShareDelta};
-use crate::types::account_margined_asset::AccountMarginedAsset;
 use crate::types::account_position::AccountPosition;
 use crate::types::binary_options_position::BinaryOptionsPosition;
 use crate::types::constants::{
     ACCOUNT_MERKLE_LEVELS, ACCOUNT_ORDERS_MERKLE_LEVELS, API_KEY_MERKLE_LEVELS, ASSET_LIST_SIZE,
     ASSET_MERKLE_LEVELS, BINARY_OPTIONS_MARKET_SLOT_COUNT, KECCAK_HASH_OUT_BIT_SIZE,
-    KECCAK_HASH_OUT_BYTE_SIZE, MARGINED_ASSET_LIST_SIZE, MARKET_DETAILS_TREE_HEIGHT,
-    MARKET_MERKLE_LEVELS, MAX_BINARY_OPTIONS_MARKET_INDEX, MIN_BINARY_OPTIONS_MARKET_INDEX,
+    KECCAK_HASH_OUT_BYTE_SIZE, MARKET_DETAILS_TREE_HEIGHT, MARKET_MERKLE_LEVELS,
+    MAX_BINARY_OPTIONS_MARKET_INDEX, MIN_BINARY_OPTIONS_MARKET_INDEX,
     NB_ACCOUNT_ORDERS_PATHS_PER_TX, NB_ACCOUNTS_PER_TX, NB_ASSETS_PER_TX,
     ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE, POSITION_LIST_SIZE, PUBLIC_MARKET_INDEX_MERKLE_LEVELS,
     REGISTER_STACK_SIZE, SHARES_DELTA_LIST_SIZE,
@@ -128,27 +127,6 @@ where
     let mut result = [BigInt::ZERO; NB_ASSETS_PER_TX];
     for (i, num) in nums.into_iter().enumerate() {
         result[i] = BigInt::from(num);
-    }
-    Ok(result)
-}
-
-pub fn margined_account_assets<'de, D>(
-    deserializer: D,
-) -> Result<[AccountMarginedAsset; MARGINED_ASSET_LIST_SIZE], D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let nums: Vec<AccountMarginedAsset> = Deserialize::deserialize(deserializer)?;
-    if nums.len() != MARGINED_ASSET_LIST_SIZE {
-        return Err(serde::de::Error::custom(format!(
-            "Expected {} elements, got {}",
-            MARGINED_ASSET_LIST_SIZE,
-            nums.len()
-        )));
-    }
-    let mut result = core::array::from_fn(|_| AccountMarginedAsset::default());
-    for (i, num) in nums.into_iter().enumerate() {
-        result[i] = num;
     }
     Ok(result)
 }
@@ -452,21 +430,16 @@ where
     Ok(result)
 }
 
-pub fn asset_price_updates<'de, D>(
-    deserializer: D,
-) -> Result<[i64; MARGINED_ASSET_LIST_SIZE], D::Error>
+pub fn asset_price_updates<'de, D>(deserializer: D) -> Result<Vec<i64>, D::Error>
 where
     D: Deserializer<'de>,
 {
     let elements: HashMap<String, i64> = Deserialize::deserialize(deserializer)?;
-    let mut result = [0i64; MARGINED_ASSET_LIST_SIZE];
+    let mut result = vec![];
     for (i, element) in elements.into_iter() {
         if let Ok(index) = i.parse::<usize>() {
-            if index >= MARGINED_ASSET_LIST_SIZE {
-                return Err(serde::de::Error::custom(format!(
-                    "Price update index out of bounds: {}",
-                    index
-                )));
+            if index >= result.len() {
+                result.resize(index + 1, 0i64);
             }
             result[index] = element;
         } else {
@@ -516,7 +489,7 @@ where
     }
 
     let mut non_zero: Vec<(u8, i64, usize)> = Vec::new();
-    for (idx, (t, v)) in helper.at.into_iter().zip(helper.av.into_iter()).enumerate() {
+    for (idx, (t, v)) in helper.at.into_iter().zip(helper.av).enumerate() {
         if t != 0 {
             non_zero.push((t, v, idx));
         }
@@ -540,10 +513,6 @@ where
 
 pub fn default_price_updates() -> [u32; POSITION_LIST_SIZE] {
     core::array::from_fn(|_| 0u32)
-}
-
-pub fn default_asset_price_updates() -> [i64; MARGINED_ASSET_LIST_SIZE] {
-    core::array::from_fn(|_| 0i64)
 }
 
 pub fn positions<'de, D>(deserializer: D) -> Result<[AccountPosition; POSITION_LIST_SIZE], D::Error>

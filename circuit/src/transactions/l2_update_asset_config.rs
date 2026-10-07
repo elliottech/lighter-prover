@@ -37,7 +37,7 @@ pub struct L2UpdateAssetConfigTx {
     pub user_supply_cap: i64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct L2UpdateAssetConfigTxTarget {
     pub account_index: Target,
     pub api_key_index: Target,

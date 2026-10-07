@@ -28,7 +28,7 @@ use crate::uint::u32::gadgets::arithmetic_u32::{CircuitBuilderU32, U32Target};
 use crate::uint::u32::witness::{GeneratedValuesU32, WitnessU32};
 use crate::utils::{CircuitBuilderUtils, ceil_div_usize};
 
-#[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BigUintTarget {
     pub limbs: Vec<U32Target>,
 }

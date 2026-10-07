@@ -122,6 +122,16 @@ pub trait Field:
         *self * (Self::ONE + Self::TWO)
     }
 
+    /// Internal FFT hook for multiplying a value by a twiddle known to lie in
+    /// a base subfield. Ordinary fields keep the full multiplication; extension
+    /// implementations may override it with a type-safe scalar multiplication.
+    /// Callers must use ordinary `Mul` for an extension-only root row.
+    #[doc(hidden)]
+    #[inline(always)]
+    fn mul_fft_base_twiddle(twiddle: Self, value: Self) -> Self {
+        twiddle * value
+    }
+
     /// Compute the multiplicative inverse of this field element.
     fn try_inverse(&self) -> Option<Self>;
 
@@ -177,56 +187,114 @@ pub trait Field:
         }
         debug_assert!(n >= WIDTH);
 
-        // Buf is reused for a few things to save allocations.
-        // Fill buf with cumulative product of x, only taking every 4th value. Concretely, buf will
-        // be [
-        //   x[0], x[1], x[2], x[3],
-        //   x[0] * x[4], x[1] * x[5], x[2] * x[6], x[3] * x[7],
-        //   x[0] * x[4] * x[8], x[1] * x[5] * x[9], x[2] * x[6] * x[10], x[3] * x[7] * x[11],
-        //   ...
-        // ].
-        // If n is not a multiple of WIDTH, the result is truncated from the end. For example,
-        // for n == 5, we get [x[0], x[1], x[2], x[3], x[0] * x[4]].
-        // cumul_prod holds the last WIDTH elements of buf. This is redundant, but it's how we
-        // convince LLVM to keep the values in the registers.
-        let mut cumul_prod: [Self; WIDTH] = x[..WIDTH].try_into().unwrap();
+        // Preserve the historical four-chain implementation exactly for the short inputs where
+        // eight independent chains would not be available.
+        if n < 8 {
+            // Buf is reused for a few things to save allocations.
+            // Fill buf with cumulative product of x, only taking every 4th value. Concretely, buf will
+            // be [
+            //   x[0], x[1], x[2], x[3],
+            //   x[0] * x[4], x[1] * x[5], x[2] * x[6], x[3] * x[7],
+            //   x[0] * x[4] * x[8], x[1] * x[5] * x[9], x[2] * x[6] * x[10], x[3] * x[7] * x[11],
+            //   ...
+            // ].
+            // If n is not a multiple of WIDTH, the result is truncated from the end. For example,
+            // for n == 5, we get [x[0], x[1], x[2], x[3], x[0] * x[4]].
+            // cumul_prod holds the last WIDTH elements of buf. This is redundant, but it's how we
+            // convince LLVM to keep the values in the registers.
+            let mut cumul_prod: [Self; WIDTH] = x[..WIDTH].try_into().unwrap();
+            buf.extend(cumul_prod);
+            for (i, &xi) in x[WIDTH..].iter().enumerate() {
+                cumul_prod[i % WIDTH] *= xi;
+                buf.push(cumul_prod[i % WIDTH]);
+            }
+            debug_assert_eq!(buf.len(), n);
+
+            let mut a_inv = {
+                // This is where the four dependency chains meet.
+                // Take the last four elements of buf and invert them all.
+                let c01 = cumul_prod[0] * cumul_prod[1];
+                let c23 = cumul_prod[2] * cumul_prod[3];
+                let c0123 = c01 * c23;
+                let c0123inv = c0123.inverse();
+                let c01inv = c0123inv * c23;
+                let c23inv = c0123inv * c01;
+                [
+                    c01inv * cumul_prod[1],
+                    c01inv * cumul_prod[0],
+                    c23inv * cumul_prod[3],
+                    c23inv * cumul_prod[2],
+                ]
+            };
+
+            for i in (WIDTH..n).rev() {
+                // buf[i - WIDTH] has not been written to by this loop, so it equals
+                // x[i % WIDTH] * x[i % WIDTH + WIDTH] * ... * x[i - WIDTH].
+                buf[i] = buf[i - WIDTH] * a_inv[i % WIDTH];
+                // buf[i] now holds the inverse of x[i].
+                a_inv[i % WIDTH] *= x[i];
+            }
+            for i in (0..WIDTH).rev() {
+                buf[i] = a_inv[i];
+            }
+
+            for (&bi, &xi) in buf.iter().zip(x) {
+                // Sanity check only.
+                debug_assert_eq!(bi * xi, Self::ONE);
+            }
+            return;
+        }
+
+        // Larger batches have enough elements for eight independent dependency chains. This is
+        // deliberately a separate, statically-sized loop: the hot path has no runtime width
+        // selection, and `% WIDE_WIDTH` is a compile-time power-of-two operation.
+        const WIDE_WIDTH: usize = 8;
+        let mut cumul_prod: [Self; WIDE_WIDTH] = x[..WIDE_WIDTH].try_into().unwrap();
         buf.extend(cumul_prod);
-        for (i, &xi) in x[WIDTH..].iter().enumerate() {
-            cumul_prod[i % WIDTH] *= xi;
-            buf.push(cumul_prod[i % WIDTH]);
+        for (i, &xi) in x[WIDE_WIDTH..].iter().enumerate() {
+            cumul_prod[i % WIDE_WIDTH] *= xi;
+            buf.push(cumul_prod[i % WIDE_WIDTH]);
         }
         debug_assert_eq!(buf.len(), n);
 
         let mut a_inv = {
-            // This is where the four dependency chains meet.
-            // Take the last four elements of buf and invert them all.
+            // Meet the eight chains in a balanced multiplication tree, invert their total product
+            // once, then walk the same tree backwards to recover each chain inverse.
             let c01 = cumul_prod[0] * cumul_prod[1];
             let c23 = cumul_prod[2] * cumul_prod[3];
+            let c45 = cumul_prod[4] * cumul_prod[5];
+            let c67 = cumul_prod[6] * cumul_prod[7];
             let c0123 = c01 * c23;
-            let c0123inv = c0123.inverse();
+            let c4567 = c45 * c67;
+            let c01234567 = c0123 * c4567;
+            let c01234567inv = c01234567.inverse();
+            let c0123inv = c01234567inv * c4567;
+            let c4567inv = c01234567inv * c0123;
             let c01inv = c0123inv * c23;
             let c23inv = c0123inv * c01;
+            let c45inv = c4567inv * c67;
+            let c67inv = c4567inv * c45;
             [
                 c01inv * cumul_prod[1],
                 c01inv * cumul_prod[0],
                 c23inv * cumul_prod[3],
                 c23inv * cumul_prod[2],
+                c45inv * cumul_prod[5],
+                c45inv * cumul_prod[4],
+                c67inv * cumul_prod[7],
+                c67inv * cumul_prod[6],
             ]
         };
 
-        for i in (WIDTH..n).rev() {
-            // buf[i - WIDTH] has not been written to by this loop, so it equals
-            // x[i % WIDTH] * x[i % WIDTH + WIDTH] * ... * x[i - WIDTH].
-            buf[i] = buf[i - WIDTH] * a_inv[i % WIDTH];
-            // buf[i] now holds the inverse of x[i].
-            a_inv[i % WIDTH] *= x[i];
+        for i in (WIDE_WIDTH..n).rev() {
+            buf[i] = buf[i - WIDE_WIDTH] * a_inv[i % WIDE_WIDTH];
+            a_inv[i % WIDE_WIDTH] *= x[i];
         }
-        for i in (0..WIDTH).rev() {
+        for i in (0..WIDE_WIDTH).rev() {
             buf[i] = a_inv[i];
         }
 
         for (&bi, &xi) in buf.iter().zip(x) {
-            // Sanity check only.
             debug_assert_eq!(bi * xi, Self::ONE);
         }
     }
@@ -633,8 +701,75 @@ impl<F: Field> Powers<F> {
 
 #[cfg(test)]
 mod tests {
-    use super::Field;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    use super::{Field, Field64, PrimeField64};
+    use crate::extension::quadratic::QuadraticExtension;
     use crate::goldilocks_field::GoldilocksField;
+
+    /// The pre-candidate four-chain implementation, retained test-only as a differential oracle.
+    fn batch_inverse_width4_reference<F: Field>(x: &[F]) -> Vec<F> {
+        const WIDTH: usize = 4;
+
+        let n = x.len();
+        let mut buf = Vec::with_capacity(n);
+        if n == 0 {
+            return buf;
+        } else if n == 1 {
+            buf.push(x[0].inverse());
+            return buf;
+        } else if n == 2 {
+            let x01 = x[0] * x[1];
+            let x01inv = x01.inverse();
+            buf.extend([x01inv * x[1], x01inv * x[0]]);
+            return buf;
+        } else if n == 3 {
+            let x01 = x[0] * x[1];
+            let x012 = x01 * x[2];
+            let x012inv = x012.inverse();
+            let x01inv = x012inv * x[2];
+            buf.extend([x01inv * x[1], x01inv * x[0], x012inv * x01]);
+            return buf;
+        }
+
+        let mut cumul_prod: [F; WIDTH] = x[..WIDTH].try_into().unwrap();
+        buf.extend(cumul_prod);
+        for (i, &xi) in x[WIDTH..].iter().enumerate() {
+            cumul_prod[i % WIDTH] *= xi;
+            buf.push(cumul_prod[i % WIDTH]);
+        }
+
+        let mut a_inv = {
+            let c01 = cumul_prod[0] * cumul_prod[1];
+            let c23 = cumul_prod[2] * cumul_prod[3];
+            let c0123 = c01 * c23;
+            let c0123inv = c0123.inverse();
+            let c01inv = c0123inv * c23;
+            let c23inv = c0123inv * c01;
+            [
+                c01inv * cumul_prod[1],
+                c01inv * cumul_prod[0],
+                c23inv * cumul_prod[3],
+                c23inv * cumul_prod[2],
+            ]
+        };
+
+        for i in (WIDTH..n).rev() {
+            buf[i] = buf[i - WIDTH] * a_inv[i % WIDTH];
+            a_inv[i % WIDTH] *= x[i];
+        }
+        for i in (0..WIDTH).rev() {
+            buf[i] = a_inv[i];
+        }
+        buf
+    }
+
+    fn raw_goldilocks(values: &[GoldilocksField]) -> Vec<u64> {
+        values
+            .iter()
+            .map(PrimeField64::to_noncanonical_u64)
+            .collect()
+    }
 
     #[test]
     fn test_powers_nth() {
@@ -650,6 +785,116 @@ mod tests {
             for &expect_next in &powers_of_two[n + 1..] {
                 assert_eq!(iter.next(), Some(expect_next));
             }
+        }
+    }
+
+    #[test]
+    fn batch_inverse_width8_matches_width4_raw_goldilocks() {
+        type F = GoldilocksField;
+
+        let noncanonical_pool = [
+            1,
+            2,
+            3,
+            F::ORDER - 1,
+            F::ORDER + 1,
+            F::ORDER + 2,
+            u32::MAX as u64,
+            1 << 32,
+            u64::MAX - 1,
+            u64::MAX,
+        ];
+
+        for n in 0..=31 {
+            let canonical = (0..n)
+                .map(|i| F::from_canonical_u64(0x1234_5678_9abc * (i as u64 + 1) + 17))
+                .collect::<Vec<_>>();
+            let noncanonical = (0..n)
+                .map(|i| F::from_noncanonical_u64(noncanonical_pool[(5 * i + n) % 10]))
+                .collect::<Vec<_>>();
+
+            for values in [&canonical, &noncanonical] {
+                let expected = batch_inverse_width4_reference(values);
+                let mut actual = vec![F::NEG_ONE; n + 3];
+                F::batch_multiplicative_inverse_into(values, &mut actual);
+
+                assert_eq!(actual.len(), n, "n={n}");
+                assert_eq!(raw_goldilocks(&actual), raw_goldilocks(&expected), "n={n}");
+                assert!(
+                    values
+                        .iter()
+                        .zip(&actual)
+                        .all(|(&value, &inverse)| value * inverse == F::ONE),
+                    "n={n}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn batch_inverse_width8_preserves_zero_panic_semantics() {
+        type F = GoldilocksField;
+
+        for n in [1, 2, 3, 4, 7, 8, 9, 16, 19] {
+            let positions = [0, n / 2, n - 1];
+            for position in positions {
+                let mut values = (0..n)
+                    .map(|i| F::from_canonical_usize(i + 1))
+                    .collect::<Vec<_>>();
+                values[position] = F::ZERO;
+
+                let reference_panicked =
+                    catch_unwind(AssertUnwindSafe(|| batch_inverse_width4_reference(&values)))
+                        .is_err();
+                let candidate_panicked = catch_unwind(AssertUnwindSafe(|| {
+                    let mut buf = Vec::new();
+                    F::batch_multiplicative_inverse_into(&values, &mut buf);
+                }))
+                .is_err();
+                assert_eq!(
+                    candidate_panicked, reference_panicked,
+                    "n={n}, position={position}"
+                );
+                assert!(candidate_panicked, "n={n}, position={position}");
+            }
+        }
+
+        let noncanonical_zero = vec![F::ONE; 8]
+            .into_iter()
+            .enumerate()
+            .map(|(i, value)| {
+                if i == 5 {
+                    F::from_noncanonical_u64(F::ORDER)
+                } else {
+                    value
+                }
+            })
+            .collect::<Vec<_>>();
+        assert!(catch_unwind(AssertUnwindSafe(|| {
+            let mut buf = Vec::new();
+            F::batch_multiplicative_inverse_into(&noncanonical_zero, &mut buf);
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn batch_inverse_width8_remains_generic_for_quadratic_extension() {
+        type F = GoldilocksField;
+        type E = QuadraticExtension<F>;
+
+        for n in 0..=19 {
+            let values = (0..n)
+                .map(|i| {
+                    QuadraticExtension([
+                        F::from_canonical_usize(13 * i + 1),
+                        F::from_canonical_usize(17 * i + 2),
+                    ])
+                })
+                .collect::<Vec<_>>();
+            let expected = batch_inverse_width4_reference(&values);
+            let mut actual = vec![E::NEG_ONE; n + 3];
+            E::batch_multiplicative_inverse_into(&values, &mut actual);
+            assert_eq!(actual, expected, "n={n}");
         }
     }
 }

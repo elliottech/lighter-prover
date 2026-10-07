@@ -41,7 +41,7 @@ pub struct MarketDetails {
     pub interest_rate: u32, // 20 bits
 
     #[serde(rename = "ap", default)]
-    pub aggregate_premium_sum: i64,
+    pub aggregate_premium_sum: i64, // 58 bits
 
     // Warning: Witness names impact ask price as bid and vice versa
     #[serde(rename = "ia", default)]
@@ -107,7 +107,7 @@ impl MarketDetails {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct MarketDetailsTarget {
     pub aggregate_premium_sum: SignedTarget, // 58 bits + sign
     pub interest_rate: Target,               // 20 bits
@@ -678,7 +678,7 @@ impl PublicMarketDetails {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PublicMarketDetailsTarget {
     pub funding_rate_prefix_sum: BigIntTarget,
     pub mark_price: Target,
@@ -807,7 +807,7 @@ pub struct MarketRiskDetails {
     pub close_out_margin_fraction: u16,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct MarketRiskDetailsTarget {
     pub funding_rate_prefix_sum: BigIntU16Target,
     pub mark_price: Target,

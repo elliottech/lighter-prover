@@ -8,7 +8,7 @@ use anyhow::Result;
 
 use crate::field::extension::Extendable;
 use crate::field::packed::PackedField;
-use crate::gates::gate::Gate;
+use crate::gates::gate::{Gate, U32QuotientGate};
 use crate::gates::packed_util::PackedEvaluableBase;
 use crate::gates::util::StridedConstraintConsumer;
 use crate::hash::hash_types::RichField;
@@ -156,6 +156,12 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for SelectionGate 
         }
 
         constraints
+    }
+
+    fn u32_quotient_gate(&self) -> Option<U32QuotientGate> {
+        (self.num_ops == 20).then_some(U32QuotientGate::Selection {
+            num_ops: self.num_ops,
+        })
     }
 
     fn generators(&self, row: usize, _local_constants: &[F]) -> Vec<WitnessGeneratorRef<F, D>> {
@@ -307,6 +313,24 @@ mod tests {
         type F = <C as GenericConfig<D>>::F;
         let gate = SelectionGate::new_from_config(&CircuitConfig::standard_recursion_config());
         test_eval_fns::<F, C, _, D>(gate)
+    }
+
+    #[test]
+    fn metal_quotient_metadata_matches_production_shape() {
+        use crate::gates::gate::{Gate, U32QuotientGate};
+
+        type F = GoldilocksField;
+        const D: usize = 2;
+        let gate = SelectionGate::new_from_config(&CircuitConfig::standard_recursion_config());
+        assert_eq!(
+            <SelectionGate as Gate<F, D>>::u32_quotient_gate(&gate),
+            Some(U32QuotientGate::Selection { num_ops: 20 })
+        );
+        let unsupported = SelectionGate { num_ops: 19 };
+        assert_eq!(
+            <SelectionGate as Gate<F, D>>::u32_quotient_gate(&unsupported),
+            None
+        );
     }
 
     #[test]

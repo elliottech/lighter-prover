@@ -10,6 +10,7 @@ use plonky2::gates::constant::ConstantGate;
 use plonky2::gates::equality_base::EqualityGate;
 use plonky2::gates::select_base::SelectionGate;
 use plonky2::hash::hash_types::{HashOut, RichField};
+use plonky2::iop::generator::PendingPartitionWitness;
 use plonky2::iop::target::{BoolTarget, Target};
 use plonky2::iop::witness::{PartialWitness, WitnessWrite};
 use plonky2::plonk::circuit_data::{
@@ -17,6 +18,7 @@ use plonky2::plonk::circuit_data::{
 };
 use plonky2::plonk::config::GenericConfig;
 use plonky2::plonk::proof::{ProofWithPublicInputs, ProofWithPublicInputsTarget};
+use plonky2::plonk::prover::prove_with_partition_witness;
 use plonky2::timed;
 use plonky2::util::timing::TimingTree;
 
@@ -91,7 +93,7 @@ pub struct BlockTxChainCircuit {
     pub block_tx_witness_size: usize,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct BlockTxChainTarget {
     pub cyclic_proof: ProofWithPublicInputsTarget<D>, // proof of previous iteration
     pub self_verifier_data: VerifierCircuitTarget,    // Verifier Circuit Data for this circuit
@@ -198,6 +200,147 @@ impl BlockTxChainCircuit {
         (block, current_block_tx)
     }
 
+    /// Chain-step witness inputs that do not depend on the cyclic (previous chain step) proof, so
+    /// they can be seeded and their generators run before that proof is available.
+    /// The witness inputs that are constant for every recursion step of one
+    /// chain path: the circuit's own verifier data and the dummy-slot proof.
+    /// Built once per path and cloned per step — a `HashMap` clone copies the
+    /// buckets directly, replacing tens of thousands of re-hashed inserts of
+    /// the same dummy-proof and verifier-data values at every chain step.
+    pub fn witness_inputs_constant(
+        target: &BlockTxChainTarget,
+        circuit_data: &CircuitData<F, C, D>,
+        dummy_proof_cyclic: &ProofWithPublicInputs<F, C, D>,
+    ) -> Result<PartialWitness<F>> {
+        let mut pw = PartialWitness::new();
+
+        pw.set_verifier_data_target(&target.self_verifier_data, &circuit_data.verifier_only)?;
+
+        // This will take place of `DummyProofGenerator`
+        pw.set_proof_with_pis_target(
+            &target.dummy_proof_with_pis_target_cyclic,
+            dummy_proof_cyclic,
+        )?;
+
+        Ok(pw)
+    }
+
+    /// The per-step early inputs, layered onto a clone of
+    /// [`Self::witness_inputs_constant`]'s template. The map contents are
+    /// identical to building the witness from scratch — the same targets
+    /// receive the same values; only insertion order differs, which a
+    /// `HashMap` does not observe.
+    pub fn witness_inputs_early_from_template(
+        template: &PartialWitness<F>,
+        target: &BlockTxChainTarget,
+        recursion_step: u64,
+        current_block_tx_proof: &ProofWithPublicInputs<F, C, D>,
+    ) -> Result<PartialWitness<F>> {
+        let mut pw = template.clone();
+
+        pw.set_proof_with_pis_target(&target.tx_proof, current_block_tx_proof)?;
+
+        pw.set_target(target.recursion_step, F::from_canonical_u64(recursion_step))?;
+
+        Ok(pw)
+    }
+
+    pub fn witness_inputs_early(
+        target: &BlockTxChainTarget,
+        circuit_data: &CircuitData<F, C, D>,
+        recursion_step: u64,
+        dummy_proof_cyclic: &ProofWithPublicInputs<F, C, D>,
+        current_block_tx_proof: &ProofWithPublicInputs<F, C, D>,
+    ) -> Result<PartialWitness<F>> {
+        let template = Self::witness_inputs_constant(target, circuit_data, dummy_proof_cyclic)?;
+        Self::witness_inputs_early_from_template(
+            &template,
+            target,
+            recursion_step,
+            current_block_tx_proof,
+        )
+    }
+
+    /// The cyclic-proof witness inputs, fed once the previous chain step's proof is available.
+    /// Writes the full early (pre-cyclic) witness inputs — verifier data,
+    /// dummy-slot proof, tx proof, recursion step — directly into any
+    /// writable witness, bypassing the `PartialWitness` template/clone/replay
+    /// path. The set of (target, value) pairs written is identical to
+    /// [`Self::witness_inputs_early`]'s.
+    pub fn witness_inputs_early_into<W>(
+        target: &BlockTxChainTarget,
+        circuit_data: &CircuitData<F, C, D>,
+        recursion_step: u64,
+        dummy_proof_cyclic: &ProofWithPublicInputs<F, C, D>,
+        current_block_tx_proof: &ProofWithPublicInputs<F, C, D>,
+        pw: &mut W,
+    ) -> Result<()>
+    where
+        W: plonky2::iop::witness::Witness<F>,
+    {
+        pw.set_verifier_data_target(&target.self_verifier_data, &circuit_data.verifier_only)?;
+
+        pw.set_proof_with_pis_target(&target.tx_proof, current_block_tx_proof)?;
+
+        pw.set_target(target.recursion_step, F::from_canonical_u64(recursion_step))?;
+
+        // This will take place of `DummyProofGenerator`
+        pw.set_proof_with_pis_target(
+            &target.dummy_proof_with_pis_target_cyclic,
+            dummy_proof_cyclic,
+        )?;
+
+        Ok(())
+    }
+
+    /// Writes the cyclic-proof witness inputs directly into any writable
+    /// witness; identical pairs to [`Self::witness_inputs_cyclic`].
+    pub fn witness_inputs_cyclic_into<W>(
+        target: &BlockTxChainTarget,
+        cyclic_proof: &ProofWithPublicInputs<F, C, D>,
+        pw: &mut W,
+    ) -> Result<()>
+    where
+        W: plonky2::iop::witness::Witness<F>,
+    {
+        pw.set_proof_with_pis_target(&target.cyclic_proof, cyclic_proof)?;
+        Ok(())
+    }
+
+    pub fn witness_inputs_cyclic(
+        target: &BlockTxChainTarget,
+        cyclic_proof: &ProofWithPublicInputs<F, C, D>,
+    ) -> Result<PartialWitness<F>> {
+        let mut pw = PartialWitness::new();
+        pw.set_proof_with_pis_target(&target.cyclic_proof, cyclic_proof)?;
+        Ok(pw)
+    }
+
+    /// Proves a chain step whose witness inputs were supplied through a
+    /// [`PendingPartitionWitness`].
+    pub fn prove_prepared(
+        pending: PendingPartitionWitness<'_, F, C, D>,
+        circuit_data: &CircuitData<F, C, D>,
+    ) -> Result<ProofWithPublicInputs<F, C, D>> {
+        let partition_witness = pending.finish()?;
+        let proof = {
+            let mut prove_timing = TimingTree::new("BlockTxChainProve", Level::Debug);
+            let proof = prove_with_partition_witness(
+                &circuit_data.prover_only,
+                &circuit_data.common,
+                partition_witness,
+                &mut prove_timing,
+            )?;
+            prove_timing.print();
+            proof
+        };
+        if crate::utils::eager_verify_enabled() {
+            circuit_data.verify(proof.clone())?;
+        }
+
+        Ok(proof)
+    }
+
     fn perform_sanity_checks(&mut self, block: &BlockTxChainWitnessTarget) {
         let is_first_recursion = self.builder.is_zero(self.target.recursion_step);
 
@@ -234,6 +377,76 @@ impl BlockTxChainCircuit {
                     .conditional_assert_zero(is_first_recursion, pub_data.0);
             });
     }
+}
+fn cyclic_base_public_inputs(
+    block_number: u64,
+    created_at: i64,
+    new_state_root: HashOut<F>,
+    new_validium_root: HashOut<F>,
+    old_delta_root: HashOut<F>,
+) -> (HashMap<usize, F>, usize) {
+    let mut public_inputs = HashMap::new();
+    public_inputs.insert(0, F::from_canonical_u64(block_number));
+    public_inputs.insert(1, F::from_canonical_u64(created_at as u64));
+
+    for (i, elem) in [new_validium_root, new_state_root, old_delta_root]
+        .iter()
+        .flat_map(|&hash| hash.elements)
+        .enumerate()
+    {
+        public_inputs.insert(2 + i, elem);
+    }
+
+    let jump_index = 14
+        + 4 // new_public_market_details_hash
+        + CHANGE_PK_PUBLIC_INPUTS_LEN
+        + TRANSFER_PUBLIC_INPUTS_LEN
+        + APPROVE_INTEGRATOR_PUBLIC_INPUTS_LEN
+        + 1
+        + ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE
+        + 1
+        + MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX;
+    let initial_jump = JumpState::initial(new_state_root, old_delta_root).to_vec();
+    for (i, elem) in initial_jump.iter().enumerate() {
+        public_inputs.insert(jump_index + i, *elem);
+    }
+
+    let initial_state_root_index = jump_index + JUMP_STATE_SIZE;
+    for (i, elem) in new_state_root
+        .elements
+        .iter()
+        .chain(old_delta_root.elements.iter())
+        .enumerate()
+    {
+        public_inputs.insert(initial_state_root_index + i, *elem);
+    }
+    (public_inputs, initial_state_root_index)
+}
+
+/// Creates the unverified previous-proof witness for recursion step zero from a valid dummy proof.
+///
+/// The caller must use `dummy_proof` as the separately verified dummy-slot witness. Only the
+/// previous proof's public inputs are read when `recursion_step == 0`; its proof data is unselected.
+pub fn cyclic_base_witness(
+    dummy_proof: &ProofWithPublicInputs<F, C, D>,
+    block_number: u64,
+    created_at: i64,
+    new_state_root: HashOut<F>,
+    new_validium_root: HashOut<F>,
+    old_delta_root: HashOut<F>,
+) -> ProofWithPublicInputs<F, C, D> {
+    let mut proof = dummy_proof.clone();
+    let (public_inputs, _) = cyclic_base_public_inputs(
+        block_number,
+        created_at,
+        new_state_root,
+        new_validium_root,
+        old_delta_root,
+    );
+    for (index, value) in public_inputs {
+        proof.public_inputs[index] = value;
+    }
+    proof
 }
 
 impl Circuit<C, F, D> for BlockTxChainCircuit {
@@ -460,20 +673,15 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
         dummy_proof_cyclic: &ProofWithPublicInputs<F, C, D>,
         current_block_tx_proof: &ProofWithPublicInputs<F, C, D>,
     ) -> Result<PartialWitness<F>> {
-        let mut pw = PartialWitness::new();
+        let mut pw = Self::witness_inputs_early(
+            target,
+            circuit_data,
+            recursion_step,
+            dummy_proof_cyclic,
+            current_block_tx_proof,
+        )?;
 
         pw.set_proof_with_pis_target(&target.cyclic_proof, cyclic_proof)?;
-        pw.set_verifier_data_target(&target.self_verifier_data, &circuit_data.verifier_only)?;
-
-        pw.set_proof_with_pis_target(&target.tx_proof, current_block_tx_proof)?;
-
-        pw.set_target(target.recursion_step, F::from_canonical_u64(recursion_step))?;
-
-        // This will take place of `DummyProofGenerator`
-        pw.set_proof_with_pis_target(
-            &target.dummy_proof_with_pis_target_cyclic,
-            dummy_proof_cyclic,
-        )?;
 
         Ok(pw)
     }
@@ -499,7 +707,7 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
             )?
         });
         let proof = {
-            let mut prove_timing = TimingTree::new("BlockTxChainProve", Level::Trace);
+            let mut prove_timing = TimingTree::new("BlockTxChainProve", Level::Debug);
             let proof = plonky2::plonk::prover::prove(
                 &circuit_data.prover_only,
                 &circuit_data.common,
@@ -509,7 +717,9 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
             prove_timing.print();
             proof
         };
-        timed!(timing, "verify", { circuit_data.verify(proof.clone())? });
+        if crate::utils::eager_verify_enabled() {
+            timed!(timing, "verify", { circuit_data.verify(proof.clone())? });
+        }
 
         timing.print();
 
@@ -529,42 +739,13 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
         signature_count: u64,
         signature_digest_seed: [F; P3_DIGEST_STATE_WIDTH],
     ) -> ProofWithPublicInputs<F, C, D> {
-        let mut nonzero_public_inputs = HashMap::new();
-
-        nonzero_public_inputs.insert(0, F::from_canonical_u64(block_number));
-        nonzero_public_inputs.insert(1, F::from_canonical_u64(created_at as u64));
-
-        for (i, elem) in [new_validium_root, new_state_root, old_delta_root]
-            .iter()
-            .flat_map(|&hash| hash.elements)
-            .enumerate()
-        {
-            nonzero_public_inputs.insert(2 + i, elem);
-        }
-
-        let jump_index = 14
-            + 4 // new_public_market_details_hash
-            + CHANGE_PK_PUBLIC_INPUTS_LEN
-            + TRANSFER_PUBLIC_INPUTS_LEN
-            + APPROVE_INTEGRATOR_PUBLIC_INPUTS_LEN
-            + 1
-            + ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE
-            + 1
-            + MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX;
-        let initial_jump = JumpState::initial(new_state_root, old_delta_root).to_vec();
-        for (i, elem) in initial_jump.iter().enumerate() {
-            nonzero_public_inputs.insert(jump_index + i, *elem);
-        }
-
-        let initial_state_root_index = jump_index + JUMP_STATE_SIZE;
-        for (i, elem) in new_state_root
-            .elements
-            .iter()
-            .chain(old_delta_root.elements.iter())
-            .enumerate()
-        {
-            nonzero_public_inputs.insert(initial_state_root_index + i, *elem);
-        }
+        let (mut nonzero_public_inputs, initial_state_root_index) = cyclic_base_public_inputs(
+            block_number,
+            created_at,
+            new_state_root,
+            new_validium_root,
+            old_delta_root,
+        );
 
         let signature_count_index = initial_state_root_index + 8 + P3_DIGEST_STATE_WIDTH;
         nonzero_public_inputs.insert(
@@ -616,7 +797,30 @@ fn select_on_chain_pub_data(
 }
 
 // Generates `CommonCircuitData` usable for recursion.
+//
+// The result depends only on `log_gates`, the config, and compile-time
+// constants, so the three-stage throwaway build (including a full
+// 2^log_gates-gate `build`) runs once per (size, config) and later callers
+// clone the cached result.
 fn common_data_for_recursion(log_gates: usize, config: CircuitConfig) -> CommonCircuitData<F, D> {
+    static CACHE: std::sync::Mutex<Vec<((usize, CircuitConfig), CommonCircuitData<F, D>)>> =
+        std::sync::Mutex::new(Vec::new());
+    let mut cache = CACHE.lock().unwrap();
+    if let Some((_, common)) = cache
+        .iter()
+        .find(|((l, c), _)| *l == log_gates && *c == config)
+    {
+        return common.clone();
+    }
+    let common = build_common_data_for_recursion(log_gates, config.clone());
+    cache.push(((log_gates, config), common.clone()));
+    common
+}
+
+fn build_common_data_for_recursion(
+    log_gates: usize,
+    config: CircuitConfig,
+) -> CommonCircuitData<F, D> {
     let builder = Builder::new(config.clone());
     let data = builder.build::<C>();
 

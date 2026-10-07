@@ -1,12 +1,12 @@
 //! Logic for building plonky2 circuits.
 
 #[cfg(not(feature = "std"))]
-use alloc::{collections::BTreeMap, sync::Arc, vec, vec::Vec};
+use alloc::{sync::Arc, vec, vec::Vec};
 use core::cmp::max;
 #[cfg(feature = "std")]
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
-use hashbrown::{HashMap, HashSet};
+use hashbrown::HashMap;
 use itertools::Itertools;
 use log::{debug, info, warn, Level};
 use plonky2_maybe_rayon::*;
@@ -43,8 +43,9 @@ use crate::iop::generator::{
 use crate::iop::target::{BoolTarget, Target};
 use crate::iop::wire::Wire;
 use crate::plonk::circuit_data::{
-    CircuitConfig, CircuitData, CommonCircuitData, MockCircuitData, ProverCircuitData,
-    ProverOnlyCircuitData, VerifierCircuitData, VerifierCircuitTarget, VerifierOnlyCircuitData,
+    CircuitConfig, CircuitData, CommonCircuitData, GeneratorWatchIndex, MockCircuitData,
+    ProverCircuitData, ProverOnlyCircuitData, VerifierCircuitData, VerifierCircuitTarget,
+    VerifierOnlyCircuitData,
 };
 use crate::plonk::config::{AlgebraicHasher, GenericConfig, GenericHashOut, Hasher};
 use crate::plonk::copy_constraint::CopyConstraint;
@@ -54,7 +55,7 @@ use crate::timed;
 use crate::util::context_tree::ContextTree;
 use crate::util::partial_products::num_partial_products;
 use crate::util::timing::TimingTree;
-use crate::util::{log2_ceil, log2_strict, transpose_poly_values};
+use crate::util::{log2_ceil, log2_strict, transpose_poly_values_ref};
 
 /// Number of random coins needed for lookups (for each challenge).
 /// A coin is a randomly sampled extension field element from the verifier,
@@ -149,8 +150,16 @@ pub struct CircuitBuilder<F: RichField + Extendable<D>, const D: usize> {
     /// Defaults to the empty vector.
     domain_separator: Option<Vec<F>>,
 
-    /// The types of gates used in this circuit.
-    gates: HashSet<GateRef<F, D>>,
+    /// The types of gates used in this circuit, keyed by [`Gate::id`].
+    ///
+    /// `GateRef`'s `Hash`/`Eq` are defined as `Gate::id()` equality, and every gate's `id()` is
+    /// `format!("{self:?}")` — a fresh `String` built through the formatting machinery. Keying a
+    /// `HashSet<GateRef>` therefore re-renders the gate's `Debug` output once for the hash and
+    /// again for every equality probe, on every insertion. Keying by the id directly renders it
+    /// once per `add_gate` and compares plain strings after that. The stored `GateRef` is also
+    /// shared by every instance of the gate, so the whole circuit holds one `Arc` per gate type
+    /// rather than one per row.
+    gates: HashMap<String, GateRef<F, D>>,
 
     /// The concrete placement of each gate.
     pub(crate) gate_instances: Vec<GateInstance<F, D>>,
@@ -181,8 +190,11 @@ pub struct CircuitBuilder<F: RichField + Extendable<D>, const D: usize> {
     /// Memoized results of `arithmetic_extension` calls.
     pub(crate) arithmetic_results: HashMap<ExtensionArithmeticOperation<F, D>, ExtensionTarget<D>>,
 
-    /// Map between gate type and the current gate of this type with available slots.
-    current_slots: HashMap<GateRef<F, D>, CurrentSlot<F, D>>,
+    /// Map between gate type and the current gate of this type with available slots, keyed by
+    /// [`Gate::id`] for the same reason as [`CircuitBuilder::gates`]: this map is probed twice
+    /// per packed operation, and a `GateRef` key re-renders the gate's `Debug` output on every
+    /// probe.
+    current_slots: HashMap<String, CurrentSlot<F, D>>,
 
     /// List of constant generators used to fill the constant wires.
     constant_generators: Vec<ConstantGenerator<F>>,
@@ -216,7 +228,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
         let builder = CircuitBuilder {
             config,
             domain_separator: None,
-            gates: HashSet::new(),
+            gates: HashMap::new(),
             gate_instances: Vec::new(),
             public_inputs: Vec::new(),
             virtual_target_index: 0,
@@ -431,7 +443,6 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
     /// Add a virtual verifier data, register it as a public input and set it to `self.verifier_data_public_input`.
     ///
     /// **WARNING**: Do not register any public input after calling this!
-    // TODO: relax this
     pub fn add_verifier_data_public_inputs(&mut self) -> VerifierCircuitTarget {
         assert!(
             self.verifier_data_public_input.is_none(),
@@ -475,9 +486,20 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
         // could be modified later, i.e. in the case of `ConstantGate`. We will add them later in
         // `build` instead.
 
-        // Register this gate type if we haven't seen it before.
-        let gate_ref = GateRef::new(gate_type);
-        self.gates.insert(gate_ref.clone());
+        // Register this gate type if we haven't seen it before, and reuse the registered
+        // `GateRef` for the instance. Rendering `Gate::id()` once and probing the id-keyed map
+        // replaces the `HashSet<GateRef>` insertion, which re-rendered it for the hash and again
+        // for each equality probe; and after the first row of a given gate type, no new `Arc` is
+        // allocated at all — every instance shares the registered one. Both the registered set
+        // and the per-row `gate_ref` hold gates that are `id()`-equal to the ones they replace,
+        // which is exactly the equivalence `GateRef`'s `Eq` defines, so every downstream
+        // consumer (`selector_polynomials`' index lookup, the sorted gate list, the serializer)
+        // sees identical values.
+        let gate_ref = self
+            .gates
+            .entry(gate_type.id())
+            .or_insert_with(|| GateRef::new(gate_type))
+            .clone();
 
         self.gate_instances.push(GateInstance {
             gate_ref,
@@ -507,7 +529,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
     /// Adds a gate type to the set of gates to be used in this circuit. This can be useful
     /// in conditional recursion to uniformize the set of gates of the different circuits.
     pub fn add_gate_to_gate_set(&mut self, gate: GateRef<F, D>) {
-        self.gates.insert(gate);
+        self.gates.insert(gate.0.id(), gate);
     }
 
     /// Adds a generator which will copy `src` to `dst`.
@@ -823,9 +845,20 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
         constants: &[F],
     ) -> (usize, usize) {
         let num_gates = self.num_gates();
-        let num_ops = gate.num_ops();
-        let gate_ref = GateRef::new(gate.clone());
-        let gate_slot = self.current_slots.entry(gate_ref.clone()).or_default();
+        // One `Gate::id()` rendering for the whole call. The previous body allocated a `GateRef`
+        // (an `Arc`) and probed `current_slots` twice with it; because `GateRef`'s `Hash` and
+        // `Eq` are both `Gate::id()` — `format!("{self:?}")` — each probe re-rendered the gate's
+        // `Debug` output once to hash and again for every key it compared against.
+        let id = Gate::<F, D>::id(&gate);
+        let gate_slot = self.current_slots.entry(id.clone()).or_default();
+        // `Gate::num_ops` defaults to `self.generators(..).len()`, i.e. it builds one
+        // `Arc`-backed `WitnessGeneratorRef` per operation, plus the `Vec` holding them, only to
+        // read off the length and drop the lot. Memoize it on the slot entry, which is already
+        // keyed by this exact gate value, so it is evaluated once per distinct gate instead of
+        // once per packed operation. `num_ops` is a pure function of the gate's fields, and two
+        // gates share this entry exactly when their `id()`s — `Debug` renderings of all of those
+        // fields — agree, so the cached value is the one the uncached call would have returned.
+        let num_ops = *gate_slot.num_ops.get_or_insert_with(|| gate.num_ops());
         let slot = gate_slot.current_slot.get(params);
         let (gate_idx, slot_idx) = if let Some(&s) = slot {
             s
@@ -833,7 +866,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
             self.add_gate(gate, constants.to_vec());
             (num_gates, 0)
         };
-        let current_slot = &mut self.current_slots.get_mut(&gate_ref).unwrap().current_slot;
+        let current_slot = &mut self.current_slots.get_mut(&id).unwrap().current_slot;
         if slot_idx == num_ops - 1 {
             // We've filled up the slots at this index.
             current_slot.remove(params);
@@ -976,7 +1009,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
     fn constant_polys(&self) -> Vec<PolynomialValues<F>> {
         let max_constants = self
             .gates
-            .iter()
+            .values()
             .map(|g| g.0.num_constants())
             .max()
             .unwrap();
@@ -1005,7 +1038,14 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
             .collect()
     }
 
-    fn sigma_vecs(&self, k_is: &[F], subgroup: &[F]) -> (Vec<PolynomialValues<F>>, Forest) {
+    /// Returns the sigma polynomial values, the forest whose `parents` become the
+    /// representative map, and the routed-position singleton mask -- the last spliced out of
+    /// the partition pass rather than re-derived from the finished map.
+    fn sigma_vecs(
+        &self,
+        k_is: &[F],
+        subgroup: &[F],
+    ) -> (Vec<PolynomialValues<F>>, Forest, Vec<u8>) {
         let degree = self.gate_instances.len();
         let degree_log = log2_strict(degree);
         let config = &self.config;
@@ -1035,10 +1075,11 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
 
         forest.compress_paths();
 
-        let wire_partition = forest.wire_partition();
+        let (wire_partition, fixed_routed_wires) = forest.wire_partition_with_fixed_mask();
         (
             wire_partition.get_sigma_polys(degree_log, k_is, subgroup),
             forest,
+            fixed_routed_wires,
         )
     }
 
@@ -1050,7 +1091,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
 
         // Print total count of each gate type.
         debug!("Total gate counts:");
-        for gate in self.gates.iter().cloned() {
+        for gate in self.gates.values().cloned() {
             let count = self
                 .gate_instances
                 .iter()
@@ -1096,35 +1137,45 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
             .collect::<HashMap<_, _>>();
 
         let mut row_to_parameters: HashMap<usize, Vec<F>> = Default::default();
-        for (_gate_ref, current_slot) in &self.current_slots {
+        for (_id, current_slot) in &self.current_slots {
             for (parameters, (row, _index)) in current_slot.current_slot.clone() {
                 row_to_parameters.insert(row, parameters);
             }
         }
 
-        let binding = self.gate_instances.clone();
-        let gate_instances_list = binding.iter().enumerate();
+        // This pass touches only the rows named by `incomplete_gates` — one row per gate type
+        // and parameter set that still has free operations, i.e. a few dozen rows in a circuit of
+        // hundreds of thousands. Iterating the incomplete rows directly deletes the deep clone of
+        // the whole `gate_instances` vector (one `Arc` bump and one `Vec<F>` allocation per row of
+        // the circuit) that the enumerate-and-filter form needed only to release the borrow on
+        // `self`. Sorting restores exactly the ascending row order that enumeration provided, so
+        // the `self.constant`/`self.connect` calls — which append rows and copy constraints —
+        // happen in the same sequence and the built circuit is unchanged.
+        let mut incomplete_rows = incomplete_gates
+            .iter()
+            .map(|(&r, &op)| (r, op))
+            .collect::<Vec<_>>();
+        incomplete_rows.sort_unstable();
 
-        for (gate_row, gate) in gate_instances_list {
-            if let Some(&op) = incomplete_gates.get(&gate_row) {
-                let mut any_was_set: bool = false;
-                for j in op..gate.gate_ref.0.num_ops() {
-                    let defaults = gate.gate_ref.0.input_wires_defaults(j);
-                    any_was_set |= !defaults.is_empty();
-                    for (column, value) in defaults {
-                        let const_val = self.constant(value);
-                        self.connect(const_val, Target::wire(gate_row, column));
-                    }
+        for (gate_row, op) in incomplete_rows {
+            let gate_ref = self.gate_instances[gate_row].gate_ref.clone();
+            let mut any_was_set: bool = false;
+            for j in op..gate_ref.0.num_ops() {
+                let defaults = gate_ref.0.input_wires_defaults(j);
+                any_was_set |= !defaults.is_empty();
+                for (column, value) in defaults {
+                    let const_val = self.constant(value);
+                    self.connect(const_val, Target::wire(gate_row, column));
                 }
-                if any_was_set {
-                    let params = row_to_parameters[&gate_row].clone();
-                    let target_slot = &mut self
-                        .current_slots
-                        .get_mut(&gate.gate_ref)
-                        .unwrap()
-                        .current_slot;
-                    target_slot.remove(&params);
-                }
+            }
+            if any_was_set {
+                let params = row_to_parameters[&gate_row].clone();
+                let target_slot = &mut self
+                    .current_slots
+                    .get_mut(&gate_ref.0.id())
+                    .unwrap()
+                    .current_slot;
+                target_slot.remove(&params);
             }
         }
 
@@ -1200,7 +1251,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
         );
 
         let quotient_degree_factor = self.config.max_quotient_degree_factor;
-        let mut gates = self.gates.iter().cloned().collect::<Vec<_>>();
+        let mut gates = self.gates.values().cloned().collect::<Vec<_>>();
         // Gates need to be sorted by their degrees (and ID to make the ordering deterministic) to compute the selector polynomials.
         gates.sort_unstable_by_key(|g| (g.0.degree(), g.0.id()));
         let (mut constant_vecs, selectors_info) =
@@ -1225,7 +1276,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
         let subgroup = F::two_adic_subgroup(degree_bits);
 
         let k_is = get_unique_coset_shifts(degree, self.config.num_routed_wires);
-        let (sigma_vecs, forest) = timed!(
+        let (sigma_vecs, forest, fixed_routed_wires) = timed!(
             timing,
             "generate sigma polynomials",
             self.sigma_vecs(&k_is, &subgroup)
@@ -1235,9 +1286,17 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
         let max_fft_points = 1 << (degree_bits + max(rate_bits, log2_ceil(quotient_degree_factor)));
         let fft_root_table = fft_root_table(max_fft_points);
 
+        // `prover_only.sigmas` is the transpose of the sigma *values*, and the
+        // commitment below consumes those same values. Transposing first reads the
+        // columns in place, so they can then be moved into the commitment instead
+        // of cloned; the clone was one extra full copy of the sigma columns
+        // (`num_routed_wires * degree` field elements) per circuit. Only the order
+        // of two independent reads changes — no quantity is computed differently.
+        let sigmas = transpose_poly_values_ref(&sigma_vecs);
+
         let constants_sigmas_commitment = if commit_to_sigma {
             let mut constants_sigmas_vecs = constant_vecs;
-            constants_sigmas_vecs.extend(sigma_vecs.iter().cloned());
+            constants_sigmas_vecs.extend(sigma_vecs);
             PolynomialBatch::<F, C, D>::from_values(
                 constants_sigmas_vecs,
                 rate_bits,
@@ -1276,31 +1335,31 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
         // Index generator indices by their watched targets.
         //
         // The same pass also records, per generator, how many *distinct* representatives it
-        // watches. Generators are visited in ascending index order, so every list receives its
-        // pushes in nondecreasing generator order and all pushes of a given generator into a
-        // given list are contiguous at that list's tail: a push is a repeat of an already-counted
-        // representative exactly when the list's last entry is already this generator. Deriving
-        // the counts here costs one comparison per watched target and avoids the separate global
-        // traversal of the finished map that the naive variant would need.
+        // watches. Deduplicating each generator's typically short watch list first gives the CSR
+        // builder one flat edge array in ascending generator order. This avoids constructing a
+        // `BTreeMap` node and a separately allocated `Vec` for every watched representative.
         let mut generator_watch_counts = vec![0usize; self.generators.len()];
-        let mut generator_indices_by_watches = BTreeMap::new();
+        let mut generator_watch_representatives = Vec::new();
+        let mut generator_representatives = Vec::new();
         for (i, generator) in self.generators.iter().enumerate() {
-            for watch in generator.0.watch_list() {
+            let watches = generator.0.watch_list();
+            generator_representatives.clear();
+            generator_representatives.extend(watches.into_iter().map(|watch| {
                 let watch_index = forest.target_index(watch);
-                let watch_rep_index = forest.parents[watch_index] as usize;
-                let watchers = generator_indices_by_watches
-                    .entry(watch_rep_index)
-                    .or_insert_with(Vec::new);
-                if watchers.last() != Some(&i) {
-                    generator_watch_counts[i] += 1;
-                }
-                watchers.push(i);
-            }
+                forest.parents[watch_index]
+            }));
+            generator_representatives.sort_unstable();
+            generator_representatives.dedup();
+            generator_watch_counts[i] = generator_representatives.len();
+            generator_watch_representatives.extend_from_slice(&generator_representatives);
         }
-        for indices in generator_indices_by_watches.values_mut() {
-            indices.dedup();
-            indices.shrink_to_fit();
-        }
+        let generator_indices_by_watches =
+            GeneratorWatchIndex::from_sorted_generator_representatives(
+                &generator_watch_representatives,
+                &generator_watch_counts,
+            );
+        drop(generator_watch_representatives);
+        drop(generator_representatives);
 
         let num_gate_constraints = gates
             .iter()
@@ -1321,7 +1380,6 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
         let constants_sigmas_cap = constants_sigmas_commitment.merkle_tree.cap.clone();
         let domain_separator = self.domain_separator.unwrap_or_default();
         let domain_separator_digest = C::Hasher::hash_pad(&domain_separator);
-        // TODO: This should also include an encoding of gate constraints.
         let circuit_digest_parts = [
             constants_sigmas_cap.flatten(),
             domain_separator_digest.to_vec(),
@@ -1357,19 +1415,82 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
             }
         }
 
+        // Quotient-domain constants/sigma column cache: the constants and
+        // sigma polynomials are circuit-fixed, so every proof's strided LDE
+        // gathers read the same values. Extract them once (bounded by 1 GiB so
+        // the final block circuit — which is proven once — stays uncached) and
+        // let the quotient batch loop copy instead of re-walking the LDE.
+        //
+        // Skipped entirely at `step == 1`, where the cache cannot pay for itself:
+        // it exists to turn a strided gather into a contiguous copy, and at stride
+        // one the gather is *already* contiguous. Concretely,
+        // `extract_lde_batch_columns(1, range, domain)` memcpys
+        // `columns.col(c)[..domain]` per column, while the uncached quotient path
+        // reaches `fill_lde_batch` with `BatchLayout::PolyMajor`, `step == 1` and
+        // consecutive indices — which routes to `fill_lde_batch_contiguous` and
+        // copies `columns.col(c)[start..end]`. Same bytes out of the same buffer,
+        // one `copy_from_slice` per column either way. So the cache is a bit-exact
+        // duplicate of storage the commitment already retains, and building it
+        // costs one extra full-LDE allocation plus copy per circuit and holds that
+        // duplicate resident for the rest of the process.
+        let quotient_degree_bits = log2_ceil(common.quotient_degree_factor);
+        let (
+            constants_sigmas_quotient_cache,
+            constants_sigmas_quotient_step,
+            constants_sigmas_quotient_domain,
+        ) = {
+            let step = 1 << (common.config.fri_config.rate_bits - quotient_degree_bits);
+            let domain = 1 << (common.degree_bits() + quotient_degree_bits);
+            let cols = common.constants_range().len() + common.sigmas_range().len();
+            if step != 1 && cols.saturating_mul(domain) * core::mem::size_of::<F>() <= 1 << 30 {
+                match (
+                    constants_sigmas_commitment.extract_lde_batch_columns(
+                        step,
+                        common.constants_range(),
+                        domain,
+                    ),
+                    constants_sigmas_commitment.extract_lde_batch_columns(
+                        step,
+                        common.sigmas_range(),
+                        domain,
+                    ),
+                ) {
+                    (Some(constants), Some(sigmas)) => {
+                        let mut cache = constants;
+                        cache.extend(sigmas);
+                        (Some(cache), step, domain)
+                    }
+                    _ => (None, step, domain),
+                }
+            } else {
+                (None, step, domain)
+            }
+        };
+
+        let generators_defer_until_ready = self
+            .generators
+            .iter()
+            .all(|generator| generator.0.defers_until_ready());
+
         let prover_only = ProverOnlyCircuitData::<F, C, D> {
             generators: self.generators,
             generator_indices_by_watches,
             generator_watch_counts,
+            generators_defer_until_ready,
             constants_sigmas_commitment,
-            sigmas: transpose_poly_values(sigma_vecs),
+            sigmas,
             subgroup,
             public_inputs: self.public_inputs,
             representative_map: forest.parents,
-            fft_root_table: Some(fft_root_table),
+            fixed_routed_wires,
+            fft_root_table: Some(Arc::new(fft_root_table)),
             circuit_digest,
             lookup_rows: self.lookup_rows.clone(),
             lut_to_lookups: self.lut_to_lookups.clone(),
+            constants_sigmas_quotient_cache,
+            constants_sigmas_quotient_step,
+            constants_sigmas_quotient_domain,
+            low_range_selector_filter_cache: Default::default(),
         };
 
         let verifier_only = VerifierOnlyCircuitData::<C, D> {
@@ -1404,14 +1525,12 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
     }
     /// Builds a "prover circuit", with data needed to generate proofs but not verify them.
     pub fn build_prover<C: GenericConfig<D, F = F>>(self) -> ProverCircuitData<F, C, D> {
-        // TODO: Can skip parts of this.
         let circuit_data = self.build::<C>();
         circuit_data.prover_data()
     }
 
     /// Builds a "verifier circuit", with data needed to verify proofs but not generate them.
     pub fn build_verifier<C: GenericConfig<D, F = F>>(self) -> VerifierCircuitData<F, C, D> {
-        // TODO: Can skip parts of this.
         let circuit_data = self.build::<C>();
         circuit_data.verifier_data()
     }
@@ -1437,7 +1556,7 @@ mod tests {
             type F = GoldilocksField;
             let max_constants = builder
                 .gates
-                .iter()
+                .values()
                 .map(|g| g.0.num_constants())
                 .max()
                 .unwrap();
@@ -1488,7 +1607,7 @@ mod tests {
         // so synthesize it directly to pin the equivalence anyway.
         let max_constants = builder
             .gates
-            .iter()
+            .values()
             .map(|g| g.0.num_constants())
             .max()
             .unwrap();
@@ -1498,5 +1617,111 @@ mod tests {
             constants: F::rand_vec(max_constants + 3),
         });
         check(&builder, "over-long constants");
+    }
+
+    /// Differential for the id-keyed gate registration and the memoized `Gate::num_ops`.
+    ///
+    /// Both mechanisms replace a `GateRef`-keyed container, whose `Hash`/`Eq` are
+    /// `Gate::id()` equality, with the id itself as the key. This pins the two properties
+    /// that makes exact:
+    ///
+    /// 1. every memoized `num_ops` equals the value the uncached `Gate::num_ops` — which
+    ///    materializes the gate's generator list and returns its length — would return, and
+    /// 2. the registered gate set is one `GateRef` per distinct `id()`, and every row's
+    ///    `gate_ref` is `id()`-equal to (and now shares the `Arc` with) the registered one,
+    ///    which is exactly the equivalence the previous `HashSet<GateRef>` enforced.
+    ///
+    /// It also builds the same program twice and requires bit-identical `CircuitData`, which
+    /// pins the ascending-row ordering restored by sorting the incomplete-row pass.
+    #[test]
+    fn id_keyed_gate_registration_matches_gateref_semantics() {
+        const D: usize = 2;
+        type F = GoldilocksField;
+        type C = crate::plonk::config::PoseidonGoldilocksConfig;
+
+        /// Exercises `find_slot` (packed arithmetic/multiplication/selection, several of
+        /// which are left with unfilled operations so the incomplete-row pass runs) and
+        /// `add_gate` (`ConstantGate`, `PublicInputGate`, `NoopGate` padding).
+        fn program(builder: &mut CircuitBuilder<F, D>) {
+            let one = builder.one();
+            let zero = builder.zero();
+            let mut acc = builder.constant(F::from_canonical_u64(0x0123_4567_89ab_cdef));
+            for i in 0..97u64 {
+                let c = builder.constant(F::from_canonical_u64(i.wrapping_mul(0x9e37_79b9) | 1));
+                acc = builder.mul_add(acc, c, one);
+                acc = builder.add(acc, c);
+                let b = builder.add_virtual_bool_target_safe();
+                acc = builder.select(b, acc, zero);
+            }
+            let ext = builder.convert_to_ext(acc);
+            let ext2 = builder.mul_extension(ext, ext);
+            builder.connect_extension(ext2, ext2);
+            builder.add_gate(NoopGate, vec![]);
+            builder.register_public_input(acc);
+        }
+
+        let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_config());
+        program(&mut builder);
+
+        // (1) Every memoized `num_ops` is the uncached `Gate::num_ops`.
+        assert!(
+            !builder.current_slots.is_empty(),
+            "no gate went through find_slot"
+        );
+        for (id, slot) in &builder.current_slots {
+            let gate = builder
+                .gates
+                .get(id)
+                .unwrap_or_else(|| panic!("gate {id} has a slot entry but is not registered"));
+            let memoized = slot.num_ops.expect("find_slot always seeds the memo");
+            assert_eq!(
+                memoized,
+                gate.0.num_ops(),
+                "memoized num_ops diverges from Gate::num_ops for {id}"
+            );
+            // `Gate::num_ops`'s own default is `generators(..).len()`; pin that too, so a
+            // gate that overrides `num_ops` cannot silently disagree with its generators.
+            let generated = gate
+                .0
+                .generators(0, &vec![F::ZERO; gate.0.num_constants()])
+                .len();
+            assert!(
+                memoized <= generated,
+                "memoized num_ops {memoized} exceeds the {generated} generators of {id}"
+            );
+        }
+
+        // (2) One registered `GateRef` per distinct id, and every row points at it.
+        for (id, gate) in &builder.gates {
+            assert_eq!(&gate.0.id(), id, "gate registered under a foreign id");
+        }
+        for (row, instance) in builder.gate_instances.iter().enumerate() {
+            let registered = builder
+                .gates
+                .get(&instance.gate_ref.0.id())
+                .unwrap_or_else(|| panic!("row {row}'s gate is not in the registered set"));
+            assert_eq!(
+                registered, &instance.gate_ref,
+                "row {row} gate not GateRef-equal"
+            );
+            assert!(
+                Arc::ptr_eq(&registered.0, &instance.gate_ref.0),
+                "row {row} holds a duplicate Arc instead of the registered gate"
+            );
+        }
+
+        // (3) The same program builds to identical circuit data twice.
+        let mut other = CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_config());
+        program(&mut other);
+        let a = builder.build::<C>();
+        let b = other.build::<C>();
+        assert_eq!(
+            a.common, b.common,
+            "common circuit data is not reproducible"
+        );
+        assert_eq!(
+            a.verifier_only.circuit_digest, b.verifier_only.circuit_digest,
+            "circuit digest is not reproducible"
+        );
     }
 }
