@@ -12,7 +12,8 @@ use alloc::vec::Vec;
 use core::any::TypeId;
 
 use metal::{
-    Buffer, CompileOptions, ComputePipelineState, Device, MTLResourceOptions, MTLSize, NSUInteger,
+    Buffer, CompileOptions, ComputePipelineState, Device, MTLCommandBufferStatus,
+    MTLResourceOptions, MTLSize, NSUInteger,
 };
 use p3_field::{PackedValue, PrimeCharacteristicRing, PrimeField64};
 use p3_goldilocks::{
@@ -217,6 +218,13 @@ where
         let cmd = dispatch_chunk(slot, rows);
         if let Some((prev_cmd, prev_slot, prev_start, prev_rows)) = in_flight.take() {
             prev_cmd.wait_until_completed();
+            if prev_cmd.status() != MTLCommandBufferStatus::Completed {
+                warn!(
+                    "p3 metal: command buffer ended with status {:?} (chunk start {prev_start}); falling back to CPU",
+                    prev_cmd.status()
+                );
+                return None;
+            }
             drain_chunk(&mut digests, prev_slot, prev_start, prev_rows);
         }
         in_flight = Some((cmd, slot, start, rows));
@@ -225,6 +233,13 @@ where
     }
     if let Some((prev_cmd, prev_slot, prev_start, prev_rows)) = in_flight.take() {
         prev_cmd.wait_until_completed();
+        if prev_cmd.status() != MTLCommandBufferStatus::Completed {
+            warn!(
+                "p3 metal: command buffer ended with status {:?} (chunk start {prev_start}); falling back to CPU",
+                prev_cmd.status()
+            );
+            return None;
+        }
         drain_chunk(&mut digests, prev_slot, prev_start, prev_rows);
     }
 

@@ -7,13 +7,13 @@ toolchain go1.24.11
 require (
 	github.com/consensys/gnark v0.14.0
 	github.com/consensys/gnark-crypto v0.19.0
-	github.com/elliottech/gnark-plonky2-verifier v0.0.9
+	github.com/elliottech/gnark-plonky2-verifier v0.1.0
 )
 
 require (
 	github.com/bits-and-blooms/bitset v1.24.0 // indirect
 	github.com/blang/semver/v4 v4.0.0 // indirect
-	github.com/consensys/gnark-ignition-verifier v0.0.0-20230527014722-10693546ab33 // indirect
+	github.com/elliottech/gnark-ignition-verifier v0.0.0-20261008090904-305e23365584 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
 	github.com/google/pprof v0.0.0-20250820193118-f64d9cf942d6 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect

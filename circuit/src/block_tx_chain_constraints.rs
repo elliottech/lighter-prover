@@ -37,6 +37,7 @@ use crate::types::constants::{
     MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX, ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE,
 };
 use crate::types::transfer::{TRANSFER_PUBLIC_INPUTS_LEN, TransferMessageTarget};
+use crate::uint::range_check::RangeCheckGate;
 use crate::uint::u8::{CircuitBuilderU8, U8Target};
 use crate::utils::CircuitBuilderUtils;
 
@@ -839,6 +840,7 @@ fn build_common_data_for_recursion(
     builder.add_gate(EqualityGate::new_from_config(&config), vec![]);
     builder.add_gate(SelectionGate::new_from_config(&config), vec![]);
     builder.add_gate(ByteDecompositionGate::new_from_config(&config, 8), vec![]);
+    builder.add_gate(RangeCheckGate::new_from_config(&config, 8), vec![]);
     builder.add_gate(ConstantGate::new(2), vec![]);
 
     while builder.num_gates() < (1 << log_gates) - PADDING_HEADROOM {

@@ -132,9 +132,9 @@ impl MarginedAssetTarget {
             liquidation_fee: builder.add_virtual_target(),
             index_price: builder.add_virtual_target(),
             index_price_divider: builder.add_virtual_target(),
-            global_supply_cap: builder.add_virtual_biguint_target_safe(BIG_U96_LIMBS),
-            user_supply_cap: builder.add_virtual_biguint_target_safe(BIG_U96_LIMBS),
-            total_supplied_amount: builder.add_virtual_biguint_target_safe(BIG_U96_LIMBS),
+            global_supply_cap: builder.add_virtual_biguint_target_unsafe(BIG_U96_LIMBS), // safe because it is read from the state using merkle proofs
+            user_supply_cap: builder.add_virtual_biguint_target_unsafe(BIG_U96_LIMBS), // safe because it is read from the state using merkle proofs
+            total_supplied_amount: builder.add_virtual_biguint_target_unsafe(BIG_U96_LIMBS), // safe because it is read from the state using merkle proofs
         }
     }
 

@@ -10,7 +10,7 @@ use serde::Deserialize;
 
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::circuit_logger::CircuitBuilderLogging;
-use crate::tx_attributes::is_integrator_fee_disabled;
+use crate::tx_attributes::unpack_order_generic_field_2;
 use crate::types::config::Builder;
 use crate::utils::CircuitBuilderUtils;
 
@@ -567,13 +567,13 @@ impl BaseRegisterInfoTarget {
         Target, // integrator_maker_fee
         Target, // order_flags
     ) {
-        let zero = builder.zero();
-        let is_integrator_fee_disabled = is_integrator_fee_disabled(builder, self.generic_field_1);
+        let (integrator_taker_fee, order_flags) =
+            unpack_order_generic_field_2(builder, self.generic_field_2);
         (
             self.generic_field_1,
-            builder.select(is_integrator_fee_disabled, zero, self.generic_field_2),
-            builder.select(is_integrator_fee_disabled, zero, self.generic_field_3),
-            builder.select(is_integrator_fee_disabled, self.generic_field_2, zero),
+            integrator_taker_fee,
+            self.generic_field_3,
+            order_flags,
         )
     }
 }

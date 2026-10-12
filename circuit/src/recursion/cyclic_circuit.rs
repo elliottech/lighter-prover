@@ -31,6 +31,7 @@ use crate::recursion::batch::{BATCH_TARGET_INDEX, BatchTargetWitness, SEGMENT_IN
 use crate::recursion::block_witness::BlockWitnessTarget;
 use crate::types::config::{Builder, C, CIRCUIT_CONFIG, D, F};
 use crate::types::constants::TIMESTAMP_BITS;
+use crate::uint::range_check::RangeCheckGate;
 use crate::uint::u32::gates::arithmetic_u32::U32ArithmeticGate;
 use crate::uint::u32::gates::interleave_u32::U32InterleaveGate;
 use crate::uint::u32::gates::subtraction_u32::U32SubtractionGate;
@@ -486,6 +487,7 @@ fn common_data_for_recursion() -> CommonCircuitData<F, D> {
     builder.add_gate(U32InterleaveGate::new_from_config(&config), vec![]);
     builder.add_gate(UninterleaveToU32Gate::new_from_config(&config), vec![]);
     builder.add_gate(ByteDecompositionGate::new_from_config(&config, 8), vec![]);
+    builder.add_gate(RangeCheckGate::new_from_config(&config, 8), vec![]);
     builder.add_gate(U32ArithmeticGate::new_from_config(&config), vec![]);
     builder.add_gate(U32SubtractionGate::new_from_config(&config), vec![]);
     builder.add_gate(ExponentiationGate::new_from_config(&config), vec![]);

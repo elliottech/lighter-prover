@@ -32,7 +32,7 @@ use crate::builder::Builder;
 use crate::byte::split::CircuitBuilderByteSplit;
 use crate::utils::ceil_div_usize;
 
-const CUSTOM_GATE_SIZES: &[usize] = &[16, 32, 48];
+const CUSTOM_GATE_SIZES: &[usize] = &[8, 16, 32, 48];
 lazy_static! {
     pub static ref CUSTOM_GATE_SIZES_SET: HashSet<usize> = {
         let mut set = HashSet::new();

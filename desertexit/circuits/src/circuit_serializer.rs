@@ -50,7 +50,9 @@ use plonky2::gates::arithmetic_extension::{ArithmeticExtensionGate, ArithmeticEx
 use plonky2::gates::base_sum::{BaseSplitGenerator, BaseSumGate};
 use plonky2::gates::constant::ConstantGate;
 use plonky2::gates::coset_interpolation::{CosetInterpolationGate, InterpolationGenerator};
-use plonky2::gates::equality_base::{EqualityBaseGenerator, EqualityGate};
+use plonky2::gates::equality_base::{
+    EqualityBaseGenerator, EqualityGate, EqualityRowInverseGenerator,
+};
 use plonky2::gates::exponentiation::{ExponentiationGate, ExponentiationGenerator};
 use plonky2::gates::lookup::{LookupGate, LookupGenerator};
 use plonky2::gates::lookup_table::{LookupTableGate, LookupTableGenerator};
@@ -144,6 +146,7 @@ where
         CopyGenerator,
         EqualityGenerator,
         EqualityBaseGenerator<F, D>,
+        EqualityRowInverseGenerator,
         ExponentiationGenerator<F, D>,
         InterpolationGenerator<F, D>,
         LookupGenerator,

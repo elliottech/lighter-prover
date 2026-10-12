@@ -1087,24 +1087,22 @@ fn get_cross_unrealized_funding(
             &market_details.funding_rate_prefix_sum,
         ); // (-2^17, 2^17)
 
+        // Only cross positions of the given strategy contribute: fold the 0/1 selector into the
+        // quote multiplier so the position's funding is zeroed before it is accumulated.
+        let is_correct_strategy = builder.is_equal(market_details.strategy_index, strategy_index);
+        let is_accumulated = builder.and_not(is_correct_strategy, position.is_isolated_unsafe());
+        let accumulated_quote_multiplier =
+            builder.mul(market_details.quote_multiplier, is_accumulated.target);
         let rhs = builder
-            .mul_bigint_u16_and_target_unsafe(&position.position, market_details.quote_multiplier); // (-2^30, 2^30)
+            .mul_bigint_u16_and_target_unsafe(&position.position, accumulated_quote_multiplier); // (-2^30, 2^30)
 
         // Multiply the two unsafe bigints, where lhs and rhs each has 4 limbs.
         // Limbwise multiplication is in (-2^47, 2^47) range.
-        // Resulting limbs will be at most sum of 4 different limbwise multiplications.
-        // Thus resulting limbs are in the range of (-2^49, 2^49).
-        let unsafe_position_unrealized_funding =
-            builder.mul_unsafe_big(&lhs, &rhs, BIGU16_U112_LIMBS); // (-2^49, 2^49)
-
+        // Each product limb is the sum of at most 4 limbwise multiplications, so a single
+        // position contributes (-2^49, 2^49) to each limb.
         // Accumulate the unrealized funding for at most 255 (2^8 - 1) cross positions
-        let is_correct_strategy = builder.is_equal(market_details.strategy_index, strategy_index);
-        let is_accumulated = builder.and_not(is_correct_strategy, position.is_isolated_unsafe());
-        unsafe_unrealized_funding = builder.mul_add_unsafe_big(
-            &unsafe_position_unrealized_funding,
-            is_accumulated.target,
-            &unsafe_unrealized_funding,
-        ); // (-2^57, 2^57)
+        unsafe_unrealized_funding =
+            builder.mul_acc_unsafe_big(&lhs, &rhs, &unsafe_unrealized_funding); // (-2^57, 2^57)
     }
     let unrealized_funding =
         builder.unsafe_big16_to_bigint(&unsafe_unrealized_funding, BIGU16_U112_LIMBS);

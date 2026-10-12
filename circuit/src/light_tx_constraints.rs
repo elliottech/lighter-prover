@@ -22,17 +22,22 @@ use crate::merkle_helpers::{
 };
 use crate::order_book_tree_helpers::order_indexes_to_merkle_path;
 use crate::tx_attributes::ATTR_SKIP_TX_NONCE;
-use crate::tx_constraints::{TxTarget, compute_validium_and_state_root};
+use crate::tx_constraints::{
+    LightBatchInvariantTargets, TxTarget, compute_public_market_index_tree_hash,
+    compute_validium_and_state_root,
+};
 use crate::types::account::AccountTarget;
 use crate::types::account_margined_asset::AccountMarginedAssetTarget;
 use crate::types::account_position::{
     AccountPositionTarget, random_access_account_position, random_access_positions,
 };
-use crate::types::asset::{AssetTarget, random_access_assets};
+use crate::types::asset::{AssetTarget, all_assets_hash, random_access_assets};
 use crate::types::config::Builder;
 use crate::types::constants::*;
-use crate::types::margined_asset::{MarginedAssetTarget, random_access_margined_assets};
-use crate::types::market_details::MarketRiskDetailsTarget;
+use crate::types::margined_asset::{
+    MarginedAssetTarget, all_margined_assets_hash, random_access_margined_assets,
+};
+use crate::types::market_details::{MarketRiskDetailsTarget, all_market_details_hashes};
 use crate::types::public_pool::PublicPoolShareTarget;
 use crate::types::register::BaseRegisterInfoTarget;
 use crate::types::risk_info::RiskInfoTarget;
@@ -40,6 +45,68 @@ use crate::types::tx_state::TxState;
 use crate::types::tx_type::{TxTypeTargets, TxTypeVerifyTargets};
 use crate::uint::u8::{CircuitBuilderU8, U8Target};
 use crate::utils::CircuitBuilderUtils;
+
+/// Hashes of the state a light tx reads but never changes: system config, assets,
+/// market risk details. Every light
+/// slot of a proof shares the [`LightBatchInvariantTargets`] these are computed from, so
+/// they are hashed once per proof and reused for every slot's old and new state root.
+#[derive(Clone, Copy, Debug)]
+pub struct LightBatchInvariantHashes {
+    pub system_config_hash: HashOutTarget,
+    pub assets_hash: HashOutTarget,
+    pub market_risk_details_hash: HashOutTarget,
+    pub public_market_details_hash: HashOutTarget,
+}
+
+impl LightBatchInvariantHashes {
+    pub fn define(builder: &mut Builder, invariants: &LightBatchInvariantTargets) -> Self {
+        let (market_risk_details_hash, public_market_details_hash, _) =
+            all_market_details_hashes(builder, &invariants.all_market_risk_details_before);
+        Self {
+            system_config_hash: invariants.system_config_before.hash(builder),
+            assets_hash: all_assets_hash(builder, &invariants.all_assets_before),
+            market_risk_details_hash,
+            public_market_details_hash,
+        }
+    }
+}
+
+impl TxTarget {
+    fn verify_light_old_state_root(
+        &self,
+        builder: &mut Builder,
+        batch: &LightBatchInvariantHashes,
+        state_metadata_hash: HashOutTarget,
+    ) -> (HashOutTarget, HashOutTarget) {
+        let register_stack_hash_before = self.register_stack_before.hash(builder);
+        let margined_assets_hash =
+            all_margined_assets_hash(builder, &self.all_margined_assets_before);
+        let public_market_index_tree_hash = compute_public_market_index_tree_hash(
+            builder,
+            self.old_public_market_index_tree_root,
+            self.next_public_market_index_before,
+        );
+        let (old_validium_root, old_state_root) = compute_validium_and_state_root(
+            builder,
+            batch.system_config_hash,
+            batch.assets_hash,
+            margined_assets_hash,
+            batch.market_risk_details_hash,
+            batch.public_market_details_hash,
+            register_stack_hash_before,
+            self.old_account_tree_root,
+            self.old_account_pub_data_tree_root,
+            self.old_market_details_tree_root,
+            self.old_market_tree_root,
+            self.old_market_pub_data_tree_root,
+            public_market_index_tree_hash,
+            state_metadata_hash,
+        );
+        builder.connect_hashes(self.old_validium_root, old_validium_root);
+        builder.connect_hashes(self.old_state_root, old_state_root);
+        (margined_assets_hash, public_market_index_tree_hash)
+    }
+}
 
 impl TxTarget {
     pub fn define_light(
@@ -50,6 +117,7 @@ impl TxTarget {
         block_created_at: Target,
         state_metadata_hash: HashOutTarget,
         margined_asset_list_size: usize,
+        batch: &LightBatchInvariantHashes,
     ) -> (
         [U8Target; MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX],
         BoolTarget,
@@ -274,16 +342,8 @@ impl TxTarget {
 
         self.update_impact_prices(builder, tx_state, &market_risk_details_before);
 
-        let (
-            // These fields won't change for light path. Use for old and new state root.
-            system_config_hash,
-            assets_hash,
-            margined_assets_hash,
-            market_risk_details_hash,
-            public_market_details_hash,
-            public_market_index_tree_hash,
-            _,
-        ) = self.verify_old_state_root(builder, state_metadata_hash);
+        let (margined_assets_hash, public_market_index_tree_hash) =
+            self.verify_light_old_state_root(builder, batch, state_metadata_hash);
 
         self.verify_light_public_market_index_merkle_proof(builder, tx_state);
 
@@ -316,11 +376,11 @@ impl TxTarget {
 
         let (new_validium_root, new_state_root) = compute_validium_and_state_root(
             builder,
-            system_config_hash,
-            assets_hash,
+            batch.system_config_hash,
+            batch.assets_hash,
             margined_assets_hash,
-            market_risk_details_hash,
-            public_market_details_hash,
+            batch.market_risk_details_hash,
+            batch.public_market_details_hash,
             current_register_stack_hash,
             current_account_tree_root,
             self.old_account_pub_data_tree_root,
@@ -344,7 +404,7 @@ impl TxTarget {
             builder._false(),
             [builder.zero_u8(); ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE],
             builder._false(),
-            public_market_details_hash,
+            batch.public_market_details_hash,
             self.old_delta_root,
             account_pk,
             tx_hash,

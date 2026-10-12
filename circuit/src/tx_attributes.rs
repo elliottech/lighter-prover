@@ -10,6 +10,7 @@ use serde::Deserialize;
 use serde_with::serde_as;
 
 use crate::bool_utils::CircuitBuilderBoolUtils;
+use crate::byte::split::CircuitBuilderByteSplit;
 use crate::circuit_logger::CircuitBuilderLogging;
 use crate::comparison::CircuitBuilderSubtractiveComparison;
 use crate::eddsa::gadgets::base_field::{CircuitBuilderGFp5, QuinticExtensionTarget};
@@ -45,8 +46,8 @@ lazy_static! {
             ATTR_INTEGRATOR_FEE_COLLECTOR_INDEX,
             ACCOUNT_INDEX_BITS,
         );
-        m.insert(ATTR_INTEGRATOR_TAKER_FEE, 24);
-        m.insert(ATTR_INTEGRATOR_MAKER_FEE, 24);
+        m.insert(ATTR_INTEGRATOR_TAKER_FEE, INTEGRATOR_FEE_BITS);
+        m.insert(ATTR_INTEGRATOR_MAKER_FEE, INTEGRATOR_FEE_BITS);
         m.insert(ATTR_SKIP_TX_NONCE, 1);
         m.insert(ATTR_CANCEL_ALL_PUBLIC_MARKET_INDEX, PUBLIC_MARKET_INDEX_BITS);
         m.insert(ATTR_SELF_TRADE_BEHAVIOR_MODE, 8);
@@ -275,12 +276,12 @@ impl TxAttributesTarget {
         let should_be_false = builder.and_not(is_integrator_index_nil, is_both_fees_nil);
         builder.assert_false(should_be_false);
 
-        // Disallow self-trade specifications if an integrator is set
+        // Disallow self-trade specifications if any integrator fee is set
         let is_self_trade_modes_nil = builder.and(
             is_self_trade_behavior_mode_nil,
             is_self_trade_equality_mode_nil,
         );
-        let should_be_true = builder.or(is_integrator_index_nil, is_self_trade_modes_nil);
+        let should_be_true = builder.or(is_both_fees_nil, is_self_trade_modes_nil);
         builder.assert_true(should_be_true);
 
         // Disallow Reduce mode with master account index equality mode
@@ -386,8 +387,6 @@ impl TxAttributesTarget {
         Target, // generic_field_2
         Target, // generic_field_3
     ) {
-        let is_integrator_fee_disabled =
-            is_integrator_fee_disabled(builder, self.get(ATTR_INTEGRATOR_FEE_COLLECTOR_INDEX));
         let order_flags = OrderFlags {
             self_trade_behavior_mode: self.get(ATTR_SELF_TRADE_BEHAVIOR_MODE),
             self_trade_equality_mode: self.get(ATTR_SELF_TRADE_EQUALITY_MODE),
@@ -396,11 +395,7 @@ impl TxAttributesTarget {
 
         (
             self.get(ATTR_INTEGRATOR_FEE_COLLECTOR_INDEX),
-            builder.select(
-                is_integrator_fee_disabled,
-                order_flags,
-                self.get(ATTR_INTEGRATOR_TAKER_FEE),
-            ),
+            pack_order_generic_field_2(builder, self.get(ATTR_INTEGRATOR_TAKER_FEE), order_flags),
             self.get(ATTR_INTEGRATOR_MAKER_FEE),
         )
     }
@@ -424,14 +419,33 @@ impl<T: Witness<F>, F: PrimeField64> TxAttributesTargetWitness<F> for T {
     }
 }
 
-pub fn is_integrator_fee_disabled(
+/// Order registers carry the integrator taker fee in the low `INTEGRATOR_FEE_BITS` bits of
+/// generic_field_2 and the order flags (self-trade modes) above them, independent of
+/// whether an integrator index is set. Both inputs must already be range-checked.
+pub fn pack_order_generic_field_2(
     builder: &mut Builder,
-    integrator_fee_collector_index: Target,
-) -> BoolTarget {
-    builder.is_equal_f(
-        integrator_fee_collector_index,
-        ATTR_NIL_VALUES[ATTR_INTEGRATOR_FEE_COLLECTOR_INDEX],
-    )
+    integrator_taker_fee: Target,
+    order_flags: Target,
+) -> Target {
+    let shift = builder.constant_u64(1 << INTEGRATOR_FEE_BITS);
+    builder.mul_add(order_flags, shift, integrator_taker_fee)
+}
+
+/// Inverse of `pack_order_generic_field_2`. The input is always a circuit-packed register value,
+/// so the byte split only serves to separate the fee from the flags byte.
+pub fn unpack_order_generic_field_2(
+    builder: &mut Builder,
+    generic_field_2: Target,
+) -> (
+    Target, // integrator_taker_fee
+    Target, // order_flags
+) {
+    const _: () = assert!(INTEGRATOR_FEE_BITS % 8 == 0);
+    const _: () = assert!(ORDER_FLAGS_BITS <= 8);
+    let bytes = builder.split_bytes(generic_field_2, INTEGRATOR_FEE_BITS / 8 + 1);
+    let integrator_taker_fee = builder.le_sum_bytes(&bytes[..INTEGRATOR_FEE_BITS / 8]);
+    let order_flags = bytes[INTEGRATOR_FEE_BITS / 8].0;
+    (integrator_taker_fee, order_flags)
 }
 
 #[cfg(test)]
@@ -458,6 +472,30 @@ mod tests {
                     ],
                     attribute_values: [1, SELF_TRADE_BEHAVIOR_EXPIRE_TAKER as i64, 0, 0],
                 },
+                true,
+            ),
+            (
+                TxAttributes {
+                    attribute_types: [
+                        ATTR_INTEGRATOR_FEE_COLLECTOR_INDEX as u8,
+                        ATTR_INTEGRATOR_TAKER_FEE as u8,
+                        ATTR_SELF_TRADE_BEHAVIOR_MODE as u8,
+                        ATTR_NIL as u8,
+                    ],
+                    attribute_values: [1, 5, SELF_TRADE_BEHAVIOR_EXPIRE_TAKER as i64, 0],
+                },
+                false,
+            ),
+            (
+                TxAttributes {
+                    attribute_types: [
+                        ATTR_INTEGRATOR_FEE_COLLECTOR_INDEX as u8,
+                        ATTR_INTEGRATOR_MAKER_FEE as u8,
+                        ATTR_SELF_TRADE_EQUALITY_MODE as u8,
+                        ATTR_NIL as u8,
+                    ],
+                    attribute_values: [1, 5, SELF_TRADE_EQUALITY_MASTER_ACCOUNT_INDEX as i64, 0],
+                },
                 false,
             ),
             (
@@ -470,7 +508,7 @@ mod tests {
                     ],
                     attribute_values: [1, SELF_TRADE_EQUALITY_MASTER_ACCOUNT_INDEX as i64, 0, 0],
                 },
-                false,
+                true,
             ),
             (
                 TxAttributes {

@@ -14,7 +14,7 @@ use crate::circuit_logger::CircuitBuilderLogging;
 use crate::eddsa::gadgets::curve::PartialWitnessCurve;
 use crate::hash_utils::CircuitBuilderHashUtils;
 use crate::poseidon2::Poseidon2Hash;
-use crate::tx_attributes::is_integrator_fee_disabled;
+use crate::tx_attributes::pack_order_generic_field_2;
 use crate::types::config::Builder;
 use crate::types::constants::{NIL_ACCOUNT_INDEX, NIL_CLIENT_ORDER_INDEX, NIL_ORDER_INDEX};
 use crate::utils::CircuitBuilderUtils;
@@ -353,15 +353,9 @@ impl AccountOrderTarget {
         Target, // generic_field_2
         Target, // generic_field_3
     ) {
-        let is_integrator_fee_disabled =
-            is_integrator_fee_disabled(builder, self.integrator_fee_collector_index);
         (
             self.integrator_fee_collector_index,
-            builder.select(
-                is_integrator_fee_disabled,
-                self.order_flags,
-                self.integrator_taker_fee,
-            ),
+            pack_order_generic_field_2(builder, self.integrator_taker_fee, self.order_flags),
             self.integrator_maker_fee,
         )
     }

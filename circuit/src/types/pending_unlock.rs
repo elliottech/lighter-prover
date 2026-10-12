@@ -40,7 +40,7 @@ impl PendingUnlockTarget {
         PendingUnlockTarget {
             unlock_timestamp: builder.add_virtual_target(),
             asset_index: builder.add_virtual_target(),
-            amount: builder.add_virtual_biguint_target_safe(BIG_U96_LIMBS),
+            amount: builder.add_virtual_biguint_target_unsafe(BIG_U96_LIMBS), // safe because it is read from the state using merkle proofs
         }
     }
     pub fn print(&self, builder: &mut Builder, tag: &str) {

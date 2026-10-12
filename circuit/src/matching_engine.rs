@@ -24,7 +24,7 @@ use crate::hints::CircuitBuilderHints;
 use crate::liquidation::get_available_usdc_collateral;
 use crate::order_book_tree_helpers::order_indexes_to_merkle_path;
 use crate::signed::signed_target::{CircuitBuilderSigned, SignedTarget};
-use crate::tx_attributes::is_integrator_fee_disabled;
+use crate::tx_attributes::unpack_order_generic_field_2;
 use crate::types::account::AccountTarget;
 use crate::types::account_asset::AccountAssetTarget;
 use crate::types::account_order::{AccountOrderTarget, OrderFlags, select_account_order_target};
@@ -483,33 +483,32 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
 
     // Make a copy of attribute related variables
     let integrator_taker_fee_collector_index = tx_state.register_stack[0].generic_field_1;
-    let is_integrator_taker_fee_disabled =
-        is_integrator_fee_disabled(builder, integrator_taker_fee_collector_index);
-    // generic_field_2 holds order flags only when the pending register is an order
-    // being matched; gate on update_status_flags so other pending registers
-    // (e.g. TRANSFER_ASSET) don't flow into the order-flags bit decomposition.
-    let is_taker_order_flags_set =
-        builder.and(update_status_flags, is_integrator_taker_fee_disabled);
-    let taker_order_flags_value = builder.select(
-        is_taker_order_flags_set,
+    // generic_field_2/3 hold the packed taker fee + order flags and the maker fee only
+    // when the pending register is an order being matched; gate on update_status_flags
+    // so other pending registers (e.g. TRANSFER_ASSET) don't flow into the decomposition.
+    let taker_generic_field_2 = builder.select(
+        update_status_flags,
         tx_state.register_stack[0].generic_field_2,
         zero,
     );
-    let taker_order_flags = OrderFlags::from_target(builder, taker_order_flags_value);
-    let integrator_taker_fee = builder.select(
-        is_integrator_taker_fee_disabled,
+    let taker_generic_field_3 = builder.select(
+        update_status_flags,
+        tx_state.register_stack[0].generic_field_3,
         zero,
-        tx_state.register_stack[0].generic_field_2,
+    );
+    let (integrator_taker_fee, taker_order_flags_value) =
+        unpack_order_generic_field_2(builder, taker_generic_field_2);
+    let taker_order_flags = OrderFlags::from_target(builder, taker_order_flags_value);
+    // Integrator-fee self-trade handling keys on the taker order's fees, not on its collector index
+    let is_integrator_taker_fee_zero = builder.is_zero(integrator_taker_fee);
+    let is_taker_integrator_maker_fee_zero = builder.is_zero(taker_generic_field_3);
+    let is_integrator_taker_fee_disabled = builder.and(
+        is_integrator_taker_fee_zero,
+        is_taker_integrator_maker_fee_zero,
     );
     let integrator_maker_fee_collector_index =
         tx_state.account_order.integrator_fee_collector_index;
-    let is_integrator_maker_fee_disabled =
-        is_integrator_fee_disabled(builder, integrator_maker_fee_collector_index);
-    let integrator_maker_fee = builder.select(
-        is_integrator_maker_fee_disabled,
-        zero,
-        tx_state.account_order.integrator_maker_fee,
-    );
+    let integrator_maker_fee = tx_state.account_order.integrator_maker_fee;
 
     let is_expire_maker_mode = builder.is_equal_constant(
         taker_order_flags.self_trade_behavior_mode,

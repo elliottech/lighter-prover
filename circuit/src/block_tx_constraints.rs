@@ -24,6 +24,7 @@ use crate::eddsa::gadgets::base_field::QuinticExtensionTarget;
 use crate::eddsa::p3_schnorr_digest::{P3_DIGEST_STATE_WIDTH, P3SchnorrDigestState};
 use crate::eddsa::schnorr::SchnorrSigTarget;
 use crate::hash_utils::CircuitBuilderHashUtils;
+use crate::light_tx_constraints::LightBatchInvariantHashes;
 use crate::poseidon2::Poseidon2Hash;
 use crate::tx_constraints::{TxTarget, TxTargetWitness};
 use crate::types::approve_integrator::ApproveIntegratorMessageTarget;
@@ -172,7 +173,7 @@ impl Circuit<C, F, D> for BlockTxCircuit {
         mode: u8,
         margined_asset_list_size: usize,
     ) -> Self {
-        let mut circuit = Self::new(config, tx_limit, margined_asset_list_size);
+        let mut circuit = Self::new(config, tx_limit, mode, margined_asset_list_size);
 
         circuit.register_public_inputs();
 
@@ -297,7 +298,14 @@ impl BlockTxCircuit {
 
 impl BlockTxCircuit {
     /// Initializes a new block virtual targets for the given number of transactions.
-    pub fn new(config: CircuitConfig, tx_limit: usize, margined_asset_list_size: usize) -> Self {
+    /// In the light circuit every tx slot shares the first slot's batch-invariant state
+    /// targets, so that state is hashed once per proof.
+    pub fn new(
+        config: CircuitConfig,
+        tx_limit: usize,
+        mode: u8,
+        margined_asset_list_size: usize,
+    ) -> Self {
         let num_constants = config.num_constants;
         let mut builder = Builder::new(config);
         // Keep the gate set reproducible by `dummy_circuit`, which always instantiates a
@@ -310,9 +318,21 @@ impl BlockTxCircuit {
                 created_at: builder.add_virtual_target(),
                 state_metadata_hash: builder.add_virtual_hash(),
 
-                txs: (0..tx_limit)
-                    .map(|_| TxTarget::new(&mut builder, margined_asset_list_size))
-                    .collect(),
+                txs: {
+                    let mut txs: Vec<TxTarget> = Vec::with_capacity(tx_limit);
+                    for _ in 0..tx_limit {
+                        let tx = match (mode, txs.first()) {
+                            (TX_LIGHT, Some(first)) => TxTarget::new_with_light_batch_invariants(
+                                &mut builder,
+                                first.light_batch_invariants(),
+                                margined_asset_list_size,
+                            ),
+                            _ => TxTarget::new(&mut builder, margined_asset_list_size),
+                        };
+                        txs.push(tx);
+                    }
+                    txs
+                },
 
                 // ..Default::default() //
                 // Comment out the following to avoid "generators weren't run"
@@ -466,6 +486,11 @@ impl BlockTxCircuit {
 
         let mut jump = self.target.old_jump;
 
+        let light_batch_hashes = (mode == TX_LIGHT).then(|| {
+            let invariants = self.target.txs[0].light_batch_invariants();
+            LightBatchInvariantHashes::define(&mut self.builder, &invariants)
+        });
+
         for (index, tx) in self.target.txs.iter_mut().enumerate() {
             let (
                 tx_priority_operations_pub_data,
@@ -494,6 +519,9 @@ impl BlockTxCircuit {
                     self.target.created_at,
                     self.target.state_metadata_hash,
                     margined_asset_list_size,
+                    light_batch_hashes
+                        .as_ref()
+                        .expect("light batch hashes are defined for the light circuit"),
                 ),
                 _ => panic!("unknown tx circuit mode: {mode}"),
             };

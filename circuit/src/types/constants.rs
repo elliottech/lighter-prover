@@ -252,6 +252,11 @@ pub const FUNDING_RATE_TICK: u32 = 1_000_000;
 pub const FUNDING_RATE_MULTIPLIER: u32 = USDC_TO_COLLATERAL_MULTIPLIER / FUNDING_RATE_TICK;
 pub const FEE_TICK: u64 = 1_000_000;
 pub const FEE_BITS: usize = 20;
+pub const INTEGRATOR_FEE_BITS: usize = 24;
+// Self-trade behavior (2 bits) and equality (1 bit) modes
+pub const ORDER_FLAGS_BITS: usize = 3;
+/// The maximum liquidation fee an L2UpdateMarket tx can set on a perps market (1%).
+pub const MAX_LIQUIDATION_FEE: u64 = FEE_TICK / 100;
 pub const MARGIN_TICK: u32 = 10_000;
 pub const MARGIN_FRACTION_MULTIPLIER: u32 = USDC_TO_COLLATERAL_MULTIPLIER / MARGIN_TICK;
 pub const MARGIN_FRACTION_BITS: usize = 16;

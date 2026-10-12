@@ -392,9 +392,50 @@ pub struct TxTarget {
     pub attributes: TxAttributesTarget,
 }
 
+/// Targets of the state a light tx reads but never changes. The light circuit allocates
+/// them once per proof and gives every slot the same targets, so their hashes are
+/// computed once (see `LightBatchInvariantHashes`).
+#[derive(Clone, Debug)]
+pub struct LightBatchInvariantTargets {
+    pub system_config_before: SystemConfigTarget,
+    pub all_assets_before: [AssetTarget; ASSET_LIST_SIZE],
+    pub all_market_risk_details_before: [MarketRiskDetailsTarget; POSITION_LIST_SIZE],
+}
+
+impl LightBatchInvariantTargets {
+    pub fn new(builder: &mut Builder) -> Self {
+        Self {
+            system_config_before: SystemConfigTarget::new(builder),
+            all_assets_before: array::from_fn(|_| AssetTarget::new(builder)),
+            all_market_risk_details_before: array::from_fn(|_| {
+                MarketRiskDetailsTarget::new(builder)
+            }),
+        }
+    }
+}
+
 impl TxTarget {
     /// Initializes the transaction virtual targets
     pub fn new(builder: &mut Builder, margined_asset_list_size: usize) -> Self {
+        let invariants = LightBatchInvariantTargets::new(builder);
+        Self::new_with_light_batch_invariants(builder, invariants, margined_asset_list_size)
+    }
+
+    pub fn light_batch_invariants(&self) -> LightBatchInvariantTargets {
+        LightBatchInvariantTargets {
+            system_config_before: self.system_config_before,
+            all_assets_before: self.all_assets_before.clone(),
+            all_market_risk_details_before: self.all_market_risk_details_before.clone(),
+        }
+    }
+
+    /// Initializes the transaction virtual targets, reusing `invariants` instead of
+    /// allocating fresh targets for the batch-invariant state.
+    pub fn new_with_light_batch_invariants(
+        builder: &mut Builder,
+        invariants: LightBatchInvariantTargets,
+        margined_asset_list_size: usize,
+    ) -> Self {
         Self {
             tx_type: builder.add_virtual_target(),
             tx_index: builder.add_virtual_target(),
@@ -567,7 +608,7 @@ impl TxTarget {
             account_order_before: AccountOrderTarget::new(builder),
             market_before: MarketTarget::new(builder),
             market_details_before: MarketDetailsTarget::new(builder),
-            order_before: OrderTarget::new(builder),
+            order_before: OrderTarget::new(builder), // TODO: add checks to verify validity of index_price|nonce against the txn
             asset_indices: core::array::from_fn(|_| builder.add_virtual_target()),
 
             /*****************************/
@@ -602,15 +643,13 @@ impl TxTarget {
             order_book_tree_path: array::from_fn(|_| OrderBookNodeTarget::new(builder)),
             cancelled_order_book_tree_path: array::from_fn(|_| OrderBookNodeTarget::new(builder)),
 
-            system_config_before: SystemConfigTarget::new(builder),
+            system_config_before: invariants.system_config_before,
             register_stack_before: RegisterStackTarget::new(builder),
-            all_assets_before: array::from_fn(|_| AssetTarget::new(builder)),
+            all_assets_before: invariants.all_assets_before,
             all_margined_assets_before: (0..margined_asset_list_size)
                 .map(|_| MarginedAssetTarget::new(builder))
                 .collect(),
-            all_market_risk_details_before: array::from_fn(|_| {
-                MarketRiskDetailsTarget::new(builder)
-            }),
+            all_market_risk_details_before: invariants.all_market_risk_details_before,
 
             old_account_tree_root: builder.add_virtual_hash(),
             old_account_pub_data_tree_root: builder.add_virtual_hash(),

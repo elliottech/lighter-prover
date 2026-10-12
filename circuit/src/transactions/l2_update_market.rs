@@ -21,8 +21,11 @@ use crate::types::tx_state::TxState;
 use crate::types::tx_type::TxTypeTargets;
 use crate::utils::CircuitBuilderUtils;
 
-/// Updates the mutable parameters of an active binary options market on behalf of its market operator.
+/// Updates the mutable parameters of an active market on behalf of its market operator.
 /// Settlement parameters, extension multipliers and the market identity are immutable.
+/// For perps and spot markets the trading window fields (start_timestamp, end_timestamp)
+/// and is_frozen do not apply and must be zero. liquidation_fee only applies to perps
+/// markets. Spot markets carry no open interest limit.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct L2UpdateMarketTx {
@@ -42,6 +45,8 @@ pub struct L2UpdateMarketTx {
     pub taker_fee: u32,
     #[serde(rename = "mf")]
     pub maker_fee: u32,
+    #[serde(rename = "lf")]
+    pub liquidation_fee: u32,
     #[serde(rename = "mba")]
     pub min_base_amount: i64,
     #[serde(rename = "mqa")]
@@ -64,6 +69,7 @@ pub struct L2UpdateMarketTxTarget {
     pub end_timestamp: Target,
     pub taker_fee: Target,
     pub maker_fee: Target,
+    pub liquidation_fee: Target,
     pub min_base_amount: Target,
     pub min_quote_amount: Target,
     pub order_quote_limit: Target,
@@ -85,6 +91,7 @@ impl L2UpdateMarketTxTarget {
             end_timestamp: builder.add_virtual_target(),
             taker_fee: builder.add_virtual_target(),
             maker_fee: builder.add_virtual_target(),
+            liquidation_fee: builder.add_virtual_target(),
             min_base_amount: builder.add_virtual_target(),
             min_quote_amount: builder.add_virtual_target(),
             order_quote_limit: builder.add_virtual_target(),
@@ -101,6 +108,7 @@ impl L2UpdateMarketTxTarget {
         builder.register_range_check(self.end_timestamp, TIMESTAMP_BITS);
         builder.register_range_check(self.taker_fee, 24);
         builder.register_range_check(self.maker_fee, 24);
+        builder.register_range_check(self.liquidation_fee, 24);
         builder.register_range_check(self.min_base_amount, ORDER_BASE_AMOUNT_BITS);
         builder.register_range_check(self.min_quote_amount, ORDER_QUOTE_SIZE_BITS);
         builder.register_range_check(self.order_quote_limit, ORDER_QUOTE_SIZE_BITS);
@@ -129,6 +137,7 @@ impl TxHash for L2UpdateMarketTxTarget {
             self.end_timestamp,
             self.taker_fee,
             self.maker_fee,
+            self.liquidation_fee,
             self.min_base_amount,
             self.min_quote_amount,
             self.order_quote_limit,
@@ -158,14 +167,10 @@ impl Verify for L2UpdateMarketTxTarget {
             tx_state.api_key.api_key_index,
         );
 
-        // The market is addressed by its binary options slot and its public market index
+        // The market is addressed by its slot index and its public market index
         let nil_market_index = builder.constant_from_u8(NIL_MARKET_INDEX);
         builder.conditional_assert_not_eq(is_enabled, self.market_index, nil_market_index);
-        builder.conditional_assert_eq(
-            is_enabled,
-            self.market_index,
-            tx_state.market.binary_options_market_index,
-        );
+        builder.conditional_assert_eq(is_enabled, self.market_index, tx_state.market.market_index);
         builder.conditional_assert_eq(
             is_enabled,
             self.public_market_index,
@@ -177,11 +182,21 @@ impl Verify for L2UpdateMarketTxTarget {
             self.public_market_index,
             nil_public_market_index,
         );
-        builder.conditional_assert_eq_constant(
-            is_enabled,
-            tx_state.market.market_type,
-            MARKET_TYPE_BINARY_OPTIONS,
-        );
+
+        // The transaction supports perps, spot and binary options markets. The proven leaf is
+        // already bound to the signed market_index, so its market type alone decides which rules
+        // apply.
+        let is_perps = builder.is_equal_constant(tx_state.market.market_type, MARKET_TYPE_PERPS);
+        let is_spot = builder.is_equal_constant(tx_state.market.market_type, MARKET_TYPE_SPOT);
+        let is_binary_options =
+            builder.is_equal_constant(tx_state.market.market_type, MARKET_TYPE_BINARY_OPTIONS);
+        let is_supported_market_type = builder.multi_or(&[is_perps, is_spot, is_binary_options]);
+        builder.conditional_assert_true(is_enabled, is_supported_market_type);
+
+        let update_perps = builder.and(is_enabled, is_perps);
+        let update_spot = builder.and(is_enabled, is_spot);
+        let update_binary_options = builder.and(is_enabled, is_binary_options);
+
         builder.conditional_assert_eq_constant(
             is_enabled,
             tx_state.market.status,
@@ -195,13 +210,13 @@ impl Verify for L2UpdateMarketTxTarget {
             tx_state.market.market_operator_account_index,
         );
 
-        // Once trading has opened the trading window is frozen
+        // Binary options markets: once trading has opened the trading window is frozen
         let is_market_started = builder.is_lte(
             tx_state.market.start_timestamp,
             tx_state.block_timestamp,
             TIMESTAMP_BITS,
         );
-        let started_flag = builder.and(is_enabled, is_market_started);
+        let started_flag = builder.and(update_binary_options, is_market_started);
         builder.conditional_assert_eq(
             started_flag,
             self.start_timestamp,
@@ -213,15 +228,31 @@ impl Verify for L2UpdateMarketTxTarget {
             tx_state.market.end_timestamp,
         );
         builder.conditional_assert_lt(
-            is_enabled,
+            update_binary_options,
             self.start_timestamp,
             self.end_timestamp,
             TIMESTAMP_BITS,
         );
+        builder.conditional_assert_bool(
+            update_binary_options,
+            BoolTarget::new_unsafe(self.is_frozen),
+        );
+
+        // Perps and spot markets do not use the trading window and frozen flag fields
+        let update_without_window = builder.or(update_perps, update_spot);
+        builder.conditional_assert_zero(update_without_window, self.start_timestamp);
+        builder.conditional_assert_zero(update_without_window, self.end_timestamp);
+        builder.conditional_assert_zero(update_without_window, self.is_frozen);
 
         let fee_tick = builder.constant(F::from_canonical_u64(FEE_TICK));
         builder.conditional_assert_lte(is_enabled, self.taker_fee, fee_tick, 24);
         builder.conditional_assert_lte(is_enabled, self.maker_fee, fee_tick, 24);
+        // liquidation_fee only applies to perps markets, where it is capped at 1%; it is
+        // zero for spot and binary options markets
+        let max_liquidation_fee = builder.constant(F::from_canonical_u64(MAX_LIQUIDATION_FEE));
+        builder.conditional_assert_lte(update_perps, self.liquidation_fee, max_liquidation_fee, 16);
+        let update_non_perps = builder.or(update_spot, update_binary_options);
+        builder.conditional_assert_zero(update_non_perps, self.liquidation_fee);
 
         builder.conditional_assert_not_zero(is_enabled, self.min_base_amount);
         builder.conditional_assert_not_zero(is_enabled, self.min_quote_amount);
@@ -231,13 +262,17 @@ impl Verify for L2UpdateMarketTxTarget {
             self.order_quote_limit,
             ORDER_QUOTE_SIZE_BITS,
         );
+        // Spot markets carry no open interest limit; perps and binary options markets do
+        builder.conditional_assert_zero(update_spot, self.open_interest_limit);
+        let update_open_interest_limit = builder.or(update_perps, update_binary_options);
         builder.conditional_assert_lte(
-            is_enabled,
+            update_open_interest_limit,
             self.order_quote_limit,
             self.open_interest_limit,
             MARKET_OPEN_INTEREST_BITS,
         );
-        // The open interest limit scaled to collateral units must fit in an i64
+        // For binary options markets the open interest limit scaled to collateral units must
+        // fit in an i64
         let open_interest_limit_big = builder.target_to_biguint(self.open_interest_limit);
         let quote_extension_multiplier_big =
             builder.target_to_biguint(tx_state.market.quote_extension_multiplier);
@@ -247,24 +282,40 @@ impl Verify for L2UpdateMarketTxTarget {
             &(BigUint::from(i64::MAX as u64) * BigUint::from(USDC_TO_COLLATERAL_MULTIPLIER)),
         );
         builder.conditional_assert_lte_biguint(
-            is_enabled,
+            update_binary_options,
             &scaled_open_interest_limit,
             &max_scaled_open_interest_limit,
         );
-
-        builder.conditional_assert_bool(is_enabled, BoolTarget::new_unsafe(self.is_frozen));
     }
 }
 
 impl Apply for L2UpdateMarketTxTarget {
     fn apply(&mut self, builder: &mut Builder, tx_state: &mut TxState) -> BoolTarget {
+        // The trading window and the frozen flag only apply to binary options markets; for
+        // perps and spot markets they are required to be zero, which is enforced in verify.
+        let is_binary_options =
+            builder.is_equal_constant(tx_state.market.market_type, MARKET_TYPE_BINARY_OPTIONS);
+        let is_perps = builder.is_equal_constant(tx_state.market.market_type, MARKET_TYPE_PERPS);
+        let update_binary_options = builder.and(self.success, is_binary_options);
+        let update_perps = builder.and(self.success, is_perps);
+        let update_open_interest_limit = builder.or(update_binary_options, update_perps);
+
         let market = &mut tx_state.market;
-        market.start_timestamp =
-            builder.select(self.success, self.start_timestamp, market.start_timestamp);
-        market.end_timestamp =
-            builder.select(self.success, self.end_timestamp, market.end_timestamp);
+        market.start_timestamp = builder.select(
+            update_binary_options,
+            self.start_timestamp,
+            market.start_timestamp,
+        );
+        market.end_timestamp = builder.select(
+            update_binary_options,
+            self.end_timestamp,
+            market.end_timestamp,
+        );
+        market.is_frozen = builder.select(update_binary_options, self.is_frozen, market.is_frozen);
         market.taker_fee = builder.select(self.success, self.taker_fee, market.taker_fee);
         market.maker_fee = builder.select(self.success, self.maker_fee, market.maker_fee);
+        market.liquidation_fee =
+            builder.select(update_perps, self.liquidation_fee, market.liquidation_fee);
         market.min_base_amount =
             builder.select(self.success, self.min_base_amount, market.min_base_amount);
         market.min_quote_amount =
@@ -275,11 +326,17 @@ impl Apply for L2UpdateMarketTxTarget {
             market.order_quote_limit,
         );
         market.open_interest_limit = builder.select(
-            self.success,
+            update_open_interest_limit,
             self.open_interest_limit,
             market.open_interest_limit,
         );
-        market.is_frozen = builder.select(self.success, self.is_frozen, market.is_frozen);
+
+        // Perps markets mirror the open interest limit in the market details leaf
+        tx_state.market_details.open_interest_limit = builder.select(
+            update_perps,
+            self.open_interest_limit,
+            tx_state.market_details.open_interest_limit,
+        );
 
         self.success
     }
@@ -310,6 +367,7 @@ impl<T: Witness<F>, F: PrimeField64> L2UpdateMarketTxTargetWitness<F> for T {
         self.set_target(a.end_timestamp, F::from_canonical_i64(b.end_timestamp))?;
         self.set_target(a.taker_fee, F::from_canonical_u32(b.taker_fee))?;
         self.set_target(a.maker_fee, F::from_canonical_u32(b.maker_fee))?;
+        self.set_target(a.liquidation_fee, F::from_canonical_u32(b.liquidation_fee))?;
         self.set_target(a.min_base_amount, F::from_canonical_i64(b.min_base_amount))?;
         self.set_target(
             a.min_quote_amount,

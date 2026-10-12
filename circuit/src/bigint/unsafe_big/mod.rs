@@ -54,6 +54,14 @@ pub trait CircuitBuilderUnsafeBig<F: RichField + Extendable<D>, const D: usize> 
         num_limbs: usize,
     ) -> UnsafeBigTarget<B>;
 
+    /// Returns [a] * [b] + [acc], accumulating the limb products directly into [acc]'s limbs
+    fn mul_acc_unsafe_big<const B: usize>(
+        &mut self,
+        a: &UnsafeBigTarget<B>,
+        b: &UnsafeBigTarget<B>,
+        acc: &UnsafeBigTarget<B>,
+    ) -> UnsafeBigTarget<B>;
+
     fn sub_bigint_u16_unsafe(
         &mut self,
         a: &BigIntU16Target,
@@ -154,6 +162,22 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilderUnsafeBig<F, D>
             limbs: vec![self.zero(); num_limbs],
         };
         assert!(a.limbs.len() + b.limbs.len() - 1 <= num_limbs);
+        for i in 0..a.limbs.len() {
+            for j in 0..b.limbs.len() {
+                result.limbs[i + j] = self.mul_add(a.limbs[i], b.limbs[j], result.limbs[i + j]);
+            }
+        }
+        result
+    }
+
+    fn mul_acc_unsafe_big<const B: usize>(
+        &mut self,
+        a: &UnsafeBigTarget<B>,
+        b: &UnsafeBigTarget<B>,
+        acc: &UnsafeBigTarget<B>,
+    ) -> UnsafeBigTarget<B> {
+        assert!(a.limbs.len() + b.limbs.len() - 1 <= acc.limbs.len());
+        let mut result = acc.clone();
         for i in 0..a.limbs.len() {
             for j in 0..b.limbs.len() {
                 result.limbs[i + j] = self.mul_add(a.limbs[i], b.limbs[j], result.limbs[i + j]);
@@ -465,7 +489,7 @@ mod test {
         // Generate random values
         let rnd_market_frps: [BigInt; POSITION_LIST_SIZE] =
             core::array::from_fn(|_| BigInt::from_i64(rand::random::<i64>()).unwrap());
-        let rnd_market_quote_muls: [u64; POSITION_LIST_SIZE] = core::array::from_fn(|_| 1u64);
+        let rnd_market_quote_muls: [u64; POSITION_LIST_SIZE] = core::array::from_fn(|_| 1u64); // TODO: randomize
         let rnd_position_frps: [BigInt; POSITION_LIST_SIZE] =
             core::array::from_fn(|_| BigInt::from_i64(rand::random::<i64>()).unwrap());
         let rnd_positions: [BigInt; POSITION_LIST_SIZE] = // 56 bit

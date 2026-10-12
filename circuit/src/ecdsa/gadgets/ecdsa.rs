@@ -216,6 +216,7 @@ pub fn verify_ecdsa_sig<F: RichField + Extendable<D>, const D: usize>(
     let point2 = builder.glv_mul(&pk.0, &u2);
     let point = builder.curve_add(&point1, &point2);
 
+    // TODO: @ahmetyalp I think we need to reduction on point.x value to scaler field
     builder.connect_biguint(&r.value, &point.x.value);
 }
 

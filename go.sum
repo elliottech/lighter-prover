@@ -6,13 +6,13 @@ github.com/consensys/gnark v0.14.0 h1:RG+8WxRanFSFBSlmCDRJnYMYYKpH3Ncs5SMzg24B5H
 github.com/consensys/gnark v0.14.0/go.mod h1:1IBpDPB/Rdyh55bQRR4b0z1WvfHQN1e0020jCvKP2Gk=
 github.com/consensys/gnark-crypto v0.19.0 h1:zXCqeY2txSaMl6G5wFpZzMWJU9HPNh8qxPnYJ1BL9vA=
 github.com/consensys/gnark-crypto v0.19.0/go.mod h1:rT23F0XSZqE0mUA0+pRtnL56IbPxs6gp4CeRsBk4XS0=
-github.com/consensys/gnark-ignition-verifier v0.0.0-20230527014722-10693546ab33 h1:z42ewLaLxoTYeQ17arcF4WExZc/eSaN3YVlF7eEaPt4=
-github.com/consensys/gnark-ignition-verifier v0.0.0-20230527014722-10693546ab33/go.mod h1:JdKor28c/KR4BbznP88bz8AAvnCgovzrB3KWsiR7lwk=
 github.com/coreos/go-systemd/v22 v22.5.0/go.mod h1:Y58oyj3AT4RCenI/lSvhwexgC+NSVTIJ3seZv2GcEnc=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
-github.com/elliottech/gnark-plonky2-verifier v0.0.9 h1:pX95I8MEEurJN6xrTeQooWrUpJ61v9y3u2GdoryvurM=
-github.com/elliottech/gnark-plonky2-verifier v0.0.9/go.mod h1:ULG/iYqZC3iUYb7wslCkuqkn48wc8y1iUPfDger1OXA=
+github.com/elliottech/gnark-ignition-verifier v0.0.0-20261008090904-305e23365584 h1:eTkQJ4DsE+iAlnIs/kpVEKehhDENVhLJ2A+o0+mb0Dg=
+github.com/elliottech/gnark-ignition-verifier v0.0.0-20261008090904-305e23365584/go.mod h1:Mc45kdpURPquNLL1N5s/19qWb3z7lTGAmGusBUacI8E=
+github.com/elliottech/gnark-plonky2-verifier v0.1.0 h1:oiuHKdfE1O9q09vPfyO2B7igQT3yd+KMZM1SwMiUeoo=
+github.com/elliottech/gnark-plonky2-verifier v0.1.0/go.mod h1:5XmZgWKiDZuc3FdlI9wNJD2ZqFU7beDnYg3CGaN2jEk=
 github.com/fxamacker/cbor/v2 v2.9.0 h1:NpKPmjDBgUfBms6tr6JZkTHtfFGcMKsw3eGcmD/sapM=
 github.com/fxamacker/cbor/v2 v2.9.0/go.mod h1:vM4b+DJCtHn+zz7h3FFp/hDAI9WNWCsZj23V5ytsSxQ=
 github.com/godbus/dbus/v5 v5.0.4/go.mod h1:xhWf0FNVPg57R7Z0UbKHbJfkEywrmjJnf7w5xrFpKfA=
