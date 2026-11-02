@@ -31,7 +31,7 @@ use crate::types::account_order::{AccountOrderTarget, OrderFlags, select_account
 use crate::types::account_position::AccountPositionTarget;
 use crate::types::asset::is_universal_asset;
 use crate::types::binary_options_position::select_binary_options_position_target;
-use crate::types::config::{BIG_U96_LIMBS, Builder, F};
+use crate::types::config::{BIG_U64_LIMBS, BIG_U96_LIMBS, Builder, F};
 use crate::types::constants::*;
 use crate::types::margined_asset::MarginedAssetTarget;
 use crate::types::market::{MarketTarget, select_market};
@@ -510,6 +510,27 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
         tx_state.account_order.integrator_fee_collector_index;
     let integrator_maker_fee = tx_state.account_order.integrator_maker_fee;
 
+    // Binary options integrator fees follow the same price curve as the market fees.
+    // The signed fee is the rate as P -> 0, the trade pays fee * (cap - price) / cap on the notional,
+    // which is the integer division the committer does in statedb.ScaleBinaryOptionsFee.
+    // Other market types keep the signed fee as is.
+    let [integrator_taker_fee, integrator_maker_fee] = {
+        let cap = tx_state.market.settlement_cap;
+        let divisor = builder.select(is_binary_options, cap, one);
+        let divisor_big = builder.target_to_biguint_single_limb_unsafe(divisor);
+        // Orders on binary options markets are created with price < settlement cap
+        let spread = builder.sub(cap, tx_state.order.price_index);
+        let spread = builder.mul_bool(is_binary_options, spread);
+        let spread_big = builder.target_to_biguint_single_limb_unsafe(spread);
+        [integrator_taker_fee, integrator_maker_fee].map(|fee| {
+            let fee_big = builder.target_to_biguint_single_limb_unsafe(fee);
+            let scaled_fee = builder.mul_biguint_non_carry(&fee_big, &spread_big, BIG_U64_LIMBS);
+            let (scaled_fee, _) = builder.div_rem_biguint(&scaled_fee, &divisor_big);
+            let scaled_fee = builder.biguint_to_target_safe(&scaled_fee);
+            builder.select(is_binary_options, scaled_fee, fee)
+        })
+    };
+
     let is_expire_maker_mode = builder.is_equal_constant(
         taker_order_flags.self_trade_behavior_mode,
         SELF_TRADE_BEHAVIOR_EXPIRE_MAKER,
@@ -843,7 +864,8 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
         builder.select_bool(flag, is_too_much_slippage, _false)
     };
 
-    // Both insurance fund and treasury can be the fee collector
+    // Perps fees go to the insurance fund or the treasury;
+    // every other market pays its fees to the slot's fee collector (0 = treasury)
     {
         let is_fee_collector_insurance_fund = builder.is_equal_constant(
             tx_state.accounts[FEE_ACCOUNT_ID].account_type,
@@ -855,9 +877,14 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
         );
         let is_fee_collector_insurance_fund_or_treasury =
             builder.or(is_fee_collector_insurance_fund, is_fee_collector_treasury);
-        builder.conditional_assert_true(
-            update_status_flags,
-            is_fee_collector_insurance_fund_or_treasury,
+        let perps_flag = builder.and(update_status_flags, is_perps);
+        builder.conditional_assert_true(perps_flag, is_fee_collector_insurance_fund_or_treasury);
+
+        let non_perps_flag = builder.and_not(update_status_flags, is_perps);
+        builder.conditional_assert_eq(
+            non_perps_flag,
+            tx_state.accounts[FEE_ACCOUNT_ID].account_index,
+            tx_state.market.market_fee_collector_account_index,
         );
     }
 
@@ -1891,8 +1918,7 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
         }
 
         // Binary options
-        // Both sides pay USDC fees on their own cash outlay: the buyer on the quote,
-        // the seller on payout minus quote
+        // Both sides pay USDC fees on the notional (quote), the fee ticks already follow the price curve
         {
             let flag = builder.and(flag, is_binary_options);
 
@@ -1908,51 +1934,27 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
             );
             let quote_fee_multiplier_big = builder.target_to_biguint(quote_fee_multiplier);
 
-            // Gate the trade amounts so the payout >= quote invariant, which only holds for
-            // binary options markets, is not asserted for other market types
             let gated_trade_quote = builder.mul_bool(flag, trade_quote);
             let trade_quote_big = builder.target_to_biguint(gated_trade_quote);
-            let buyer_fee_base = builder.mul_biguint_non_carry(
+            let fee_base = builder.mul_biguint_non_carry(
                 &trade_quote_big,
                 &quote_fee_multiplier_big,
                 BIG_U96_LIMBS,
             );
 
-            let settlement_cap_big = builder.target_to_biguint(tx_state.market.settlement_cap);
-            let cap_fee_multiplier = builder.mul_biguint_non_carry(
-                &settlement_cap_big,
-                &quote_fee_multiplier_big,
-                BIG_U96_LIMBS,
-            );
-            let gated_trade_base = builder.mul_bool(flag, trade_base);
-            let trade_base_big = builder.target_to_biguint(gated_trade_base);
-            let payout_fee_base =
-                builder.mul_biguint_non_carry(&trade_base_big, &cap_fee_multiplier, BIG_U96_LIMBS);
-            let seller_fee_base = builder.sub_biguint(&payout_fee_base, &buyer_fee_base);
-
             let usdc_extension_multiplier =
                 &tx_state.assets[USDC_BASE_ASSET_ID].extension_multiplier;
 
-            let taker_fee_base =
-                builder.select_biguint(is_taker_ask, &seller_fee_base, &buyer_fee_base);
-            let extended_taker_fee = builder.mul_biguint_non_carry(
-                &taker_fee_base,
-                &integrator_taker_fee_big,
-                BIG_U96_LIMBS,
-            );
+            let extended_taker_fee =
+                builder.mul_biguint_non_carry(&fee_base, &integrator_taker_fee_big, BIG_U96_LIMBS);
             let (bo_taker_fee_amount, _) =
                 builder.div_rem_biguint(&extended_taker_fee, usdc_extension_multiplier);
             taker_fee_amount =
                 builder.select_biguint(flag, &bo_taker_fee_amount, &taker_fee_amount);
             taker_asset_index = builder.select(flag, usdc_asset_index, taker_asset_index);
 
-            let maker_fee_base =
-                builder.select_biguint(is_taker_ask, &buyer_fee_base, &seller_fee_base);
-            let extended_maker_fee = builder.mul_biguint_non_carry(
-                &maker_fee_base,
-                &integrator_maker_fee_big,
-                BIG_U96_LIMBS,
-            );
+            let extended_maker_fee =
+                builder.mul_biguint_non_carry(&fee_base, &integrator_maker_fee_big, BIG_U96_LIMBS);
             let (bo_maker_fee_amount, _) =
                 builder.div_rem_biguint(&extended_maker_fee, usdc_extension_multiplier);
             maker_fee_amount =
@@ -2270,6 +2272,13 @@ fn is_valid_non_perps_trade(
         is_universal_asset(builder, tx_state.asset_indices[BASE_ASSET_ID]);
     let is_quote_asset_universal =
         is_universal_asset(builder, tx_state.asset_indices[QUOTE_ASSET_ID]);
+    let is_binary_options =
+        builder.is_equal_constant(tx_state.market.market_type, MARKET_TYPE_BINARY_OPTIONS);
+    let is_quote_asset_universal = builder.select_bool(
+        is_binary_options,
+        is_base_asset_universal,
+        is_quote_asset_universal,
+    );
 
     let is_taker_bid = builder.not(is_taker_ask);
 

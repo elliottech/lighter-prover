@@ -416,6 +416,7 @@ impl Apply for L1CreateMarketTxTarget {
             outcome: builder.zero(),
             market_operator_account_index: builder
                 .constant_u64(INSURANCE_FUND_OPERATOR_ACCOUNT_INDEX as u64),
+            market_fee_collector_account_index: builder.zero(),
             settlement_cap: builder.zero(),
             settlement_type: builder.zero(),
             settlement_price: builder.zero(),

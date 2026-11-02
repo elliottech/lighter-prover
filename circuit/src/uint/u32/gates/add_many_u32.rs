@@ -32,7 +32,7 @@ use plonky2::util::serialization::{Buffer, IoResult, Read, Write};
 use crate::utils::ceil_div_usize;
 
 const LOG2_MAX_NUM_ADDENDS: usize = 4;
-pub const MAX_NUM_ADDENDS: usize = 16;
+pub const MAX_NUM_ADDENDS: usize = 15;
 
 /// A gate to perform addition on `num_addends` different 32-bit values, plus a small carry
 #[derive(Copy, Clone, Debug, Default)]
@@ -584,7 +584,7 @@ mod batch_tests {
 
     #[test]
     fn base_batch_matches_eval_unfiltered_across_batch() {
-        for num_addends in [2, 5, 16] {
+        for num_addends in [2, 5, MAX_NUM_ADDENDS] {
             let gate = U32AddManyGate::<GoldilocksField, 2>::new_from_config(
                 &CircuitConfig::standard_recursion_config(),
                 num_addends,
@@ -599,7 +599,7 @@ mod batch_tests {
     fn direct_filtered_accumulation_matches_materialized_batch() {
         use crate::gate_batch_testing::assert_direct_accumulation_matches_materialized_batch;
 
-        for num_addends in [2, 5, 16] {
+        for num_addends in [2, 5, MAX_NUM_ADDENDS] {
             let gate = U32AddManyGate::<GoldilocksField, 2>::new_from_config(
                 &CircuitConfig::standard_recursion_config(),
                 num_addends,

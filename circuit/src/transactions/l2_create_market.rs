@@ -378,6 +378,7 @@ impl Apply for L2CreateMarketTxTarget {
             open_interest_limit: self.open_interest_limit,
             outcome: builder.zero(),
             market_operator_account_index: tx_state.market.market_operator_account_index,
+            market_fee_collector_account_index: tx_state.market.market_fee_collector_account_index,
             settlement_cap: self.settlement_cap,
             settlement_type: self.settlement_type,
             settlement_price: builder.zero(),

@@ -179,6 +179,12 @@ impl Verify for L1BurnSharesTxTarget {
 
         let is_valid_burn_share_amount = builder.is_lte(self.share_amount, self.account_shares, 64);
         self.success = builder.and(self.success, is_valid_burn_share_amount);
+        // L1 requests are not validated against state before they reach the circuit, so a failed
+        // request can carry a share amount far above what the account owns. Zero it for the rest of
+        // the computation so that none of the intermediate values (e.g. principal * share_amount /
+        // account_shares) exceeds a field element. The original value is still used for the priority
+        // operation pubdata.
+        let share_amount = builder.select(self.success, self.share_amount, zero);
 
         let is_pool_tav_positive = builder.is_sign_positive(
             tx_state.risk_infos[POOL_CROSS_RISK_ID]
@@ -202,15 +208,14 @@ impl Verify for L1BurnSharesTxTarget {
             &tx_state.risk_infos[POOL_CROSS_RISK_ID].cross_risk_parameters,
             &tx_state.accounts[SUB_ACCOUNT_ID],
         );
-        let has_enough_shares_to_burn =
-            builder.is_lte(self.share_amount, available_shares_to_burn, 64);
+        let has_enough_shares_to_burn = builder.is_lte(share_amount, available_shares_to_burn, 64);
         self.success = builder.and(self.success, has_enough_shares_to_burn);
 
         let shares_to_burn_usdc_value = get_shares_usdc_value_for_public_pool(
             builder,
             &tx_state.risk_infos[POOL_CROSS_RISK_ID].cross_risk_parameters,
             &tx_state.accounts[SUB_ACCOUNT_ID],
-            self.share_amount,
+            share_amount,
         );
 
         let max_pool_shares_to_burn =
@@ -236,7 +241,7 @@ impl Verify for L1BurnSharesTxTarget {
                 tx_state.accounts[SUB_ACCOUNT_ID]
                     .public_pool_info
                     .total_shares,
-                self.share_amount,
+                share_amount,
             );
             let big_new_total_shares = builder.target_to_biguint(new_total_shares);
             let big_min_operator_share_rate = builder.target_to_biguint(
@@ -244,7 +249,7 @@ impl Verify for L1BurnSharesTxTarget {
                     .public_pool_info
                     .min_operator_share_rate,
             );
-            let new_operator_shares = builder.sub(self.account_shares, self.share_amount);
+            let new_operator_shares = builder.sub(self.account_shares, share_amount);
             let big_new_operator_shares = builder.target_to_biguint(new_operator_shares);
             let big_share_tick = builder.constant_biguint(&BigUint::from(SHARE_TICK));
             let lhs = builder.mul_biguint(&big_new_total_shares, &big_min_operator_share_rate);
@@ -263,7 +268,7 @@ impl Verify for L1BurnSharesTxTarget {
         // Not operator
         {
             let big_entry_usdc = builder.target_to_biguint(self.old_entry_quote);
-            let big_share_amount = builder.target_to_biguint(self.share_amount);
+            let big_share_amount = builder.target_to_biguint(share_amount);
             let big_owned_share_amount = builder.target_to_biguint(self.account_shares);
             let entry_usdc_mul_share_amount =
                 builder.mul_biguint(&big_entry_usdc, &big_share_amount);
@@ -274,6 +279,8 @@ impl Verify for L1BurnSharesTxTarget {
             let has_profit =
                 builder.is_lt(usd_paid_for_burnt_shares, shares_to_burn_usdc_value, 64);
             let has_profit_and_not_operator = builder.and_not(has_profit, self.is_operator);
+            let has_profit_and_not_operator =
+                builder.and(has_profit_and_not_operator, self.success);
 
             let usdc_profit = builder.sub(shares_to_burn_usdc_value, usd_paid_for_burnt_shares);
             let big_usdc_profit = builder.target_to_biguint(usdc_profit);
@@ -314,7 +321,7 @@ impl Verify for L1BurnSharesTxTarget {
                 builder.select(has_profit_and_not_operator, operator_fee_share_amount, zero);
         }
 
-        self.shares_to_burn = builder.sub(self.share_amount, self.operator_fee_share);
+        self.shares_to_burn = builder.sub(share_amount, self.operator_fee_share);
         let big_shares_usdc_value = get_shares_usdc_value_for_public_pool(
             builder,
             &tx_state.risk_infos[POOL_CROSS_RISK_ID].cross_risk_parameters,

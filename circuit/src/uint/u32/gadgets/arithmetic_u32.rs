@@ -357,6 +357,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilderU32<F, D> for B
         }
     }
 
+    /// Do not pass "carry" values over 15
     fn add_u32s_with_carry(
         &mut self,
         to_add: &[U32Target],

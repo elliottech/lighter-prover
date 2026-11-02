@@ -17,9 +17,11 @@ use crate::types::tx_state::TxState;
 use crate::types::tx_type::TxTypeTargets;
 use crate::utils::CircuitBuilderUtils;
 
-/// Lets the insurance fund operator assign the market operator of a binary options market slot. The slot
-/// may host an active market, a settled market or no market at all; the operator is a property of the
-/// slot and survives settlement. It authorizes L2CreateMarket and L2UpdateMarket on the slot.
+/// Lets the insurance fund operator assign the market operator and the fee collector of a binary
+/// options market slot. The slot may host an active market, a settled market or no market at all;
+/// both are properties of the slot and survive settlement. The operator authorizes L2CreateMarket
+/// and L2UpdateMarket on the slot; the fee collector is credited with the trade fees of the slot's
+/// markets.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct L2UpdateMarketSlotTx {
@@ -31,6 +33,8 @@ pub struct L2UpdateMarketSlotTx {
     pub market_index: i16,
     #[serde(rename = "ma")]
     pub market_operator_account_index: i64,
+    #[serde(rename = "fc")]
+    pub market_fee_collector_account_index: i64,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -39,6 +43,7 @@ pub struct L2UpdateMarketSlotTxTarget {
     pub api_key_index: Target,
     pub market_index: Target,
     pub market_operator_account_index: Target,
+    pub market_fee_collector_account_index: Target,
 
     // Output
     success: BoolTarget,
@@ -51,6 +56,7 @@ impl L2UpdateMarketSlotTxTarget {
             api_key_index: builder.add_virtual_target(),
             market_index: builder.add_virtual_target(),
             market_operator_account_index: builder.add_virtual_target(),
+            market_fee_collector_account_index: builder.add_virtual_target(),
 
             // Output
             success: BoolTarget::default(),
@@ -75,6 +81,7 @@ impl TxHash for L2UpdateMarketSlotTxTarget {
             self.api_key_index,
             self.market_index,
             self.market_operator_account_index,
+            self.market_fee_collector_account_index,
         ];
 
         hash_to_quintic_extension_circuit(builder, &elements)
@@ -86,7 +93,7 @@ impl Verify for L2UpdateMarketSlotTxTarget {
         let is_enabled = tx_type.is_l2_update_market_slot;
         self.success = is_enabled;
 
-        // Only the insurance fund operator can assign slot operators
+        // Only the insurance fund operator can assign slot operators and fee collectors
         builder.conditional_assert_eq_constant(
             is_enabled,
             self.account_index,
@@ -104,34 +111,32 @@ impl Verify for L2UpdateMarketSlotTxTarget {
         );
 
         // The new operator must be an existing master or sub account
-        builder.conditional_assert_eq(
-            is_enabled,
-            self.market_operator_account_index,
-            tx_state.accounts[MARKET_OPERATOR_ACCOUNT_ID].account_index,
-        );
-        builder.conditional_assert_false(
-            is_enabled,
-            tx_state.is_new_account[MARKET_OPERATOR_ACCOUNT_ID],
-        );
         let nil_account_index = builder.constant_i64(NIL_ACCOUNT_INDEX);
         builder.conditional_assert_not_eq(
             is_enabled,
             self.market_operator_account_index,
             nil_account_index,
         );
-        let is_master = builder.is_equal_constant(
-            tx_state.accounts[MARKET_OPERATOR_ACCOUNT_ID].account_type,
-            MASTER_ACCOUNT_TYPE as u64,
+        assert_existing_master_or_sub_account(
+            builder,
+            is_enabled,
+            tx_state,
+            self.market_operator_account_index,
+            MARKET_OPERATOR_ACCOUNT_ID,
         );
-        let is_sub = builder.is_equal_constant(
-            tx_state.accounts[MARKET_OPERATOR_ACCOUNT_ID].account_type,
-            SUB_ACCOUNT_TYPE as u64,
-        );
-        let is_master_or_sub = builder.or(is_master, is_sub);
-        builder.conditional_assert_true(is_enabled, is_master_or_sub);
 
-        // Whatever the binary options slot holds (an active market, a settled one or nothing) it may
-        // be assigned an operator
+        // The new fee collector must be an existing master or sub account;
+        // the treasury (index 0) is a master account, so it passes the same check
+        assert_existing_master_or_sub_account(
+            builder,
+            is_enabled,
+            tx_state,
+            self.market_fee_collector_account_index,
+            MARKET_FEE_COLLECTOR_ACCOUNT_ID,
+        );
+
+        // Whatever the binary options slot holds (an active market, a settled one or nothing)
+        // it maybe assigned an operator and a fee collector
         let nil_market_index = builder.constant_from_u8(NIL_MARKET_INDEX);
         builder.conditional_assert_not_eq(is_enabled, self.market_index, nil_market_index);
         builder.conditional_assert_eq(
@@ -142,12 +147,45 @@ impl Verify for L2UpdateMarketSlotTxTarget {
     }
 }
 
+/// Asserts that:
+/// - `account_index` is the account loaded in slot `account_id`
+/// - it exists and is a master or sub account
+fn assert_existing_master_or_sub_account(
+    builder: &mut Builder,
+    is_enabled: BoolTarget,
+    tx_state: &TxState,
+    account_index: Target,
+    account_id: usize,
+) {
+    builder.conditional_assert_eq(
+        is_enabled,
+        account_index,
+        tx_state.accounts[account_id].account_index,
+    );
+    builder.conditional_assert_false(is_enabled, tx_state.is_new_account[account_id]);
+    let is_master = builder.is_equal_constant(
+        tx_state.accounts[account_id].account_type,
+        MASTER_ACCOUNT_TYPE as u64,
+    );
+    let is_sub = builder.is_equal_constant(
+        tx_state.accounts[account_id].account_type,
+        SUB_ACCOUNT_TYPE as u64,
+    );
+    let is_master_or_sub = builder.or(is_master, is_sub);
+    builder.conditional_assert_true(is_enabled, is_master_or_sub);
+}
+
 impl Apply for L2UpdateMarketSlotTxTarget {
     fn apply(&mut self, builder: &mut Builder, tx_state: &mut TxState) -> BoolTarget {
         tx_state.market.market_operator_account_index = builder.select(
             self.success,
             self.market_operator_account_index,
             tx_state.market.market_operator_account_index,
+        );
+        tx_state.market.market_fee_collector_account_index = builder.select(
+            self.success,
+            self.market_fee_collector_account_index,
+            tx_state.market.market_fee_collector_account_index,
         );
 
         self.success
@@ -174,6 +212,10 @@ impl<T: Witness<F>, F: PrimeField64> L2UpdateMarketSlotTxTargetWitness<F> for T 
         self.set_target(
             a.market_operator_account_index,
             F::from_canonical_i64(b.market_operator_account_index),
+        )?;
+        self.set_target(
+            a.market_fee_collector_account_index,
+            F::from_canonical_i64(b.market_fee_collector_account_index),
         )?;
 
         Ok(())

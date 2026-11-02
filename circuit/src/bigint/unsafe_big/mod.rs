@@ -489,7 +489,7 @@ mod test {
         // Generate random values
         let rnd_market_frps: [BigInt; POSITION_LIST_SIZE] =
             core::array::from_fn(|_| BigInt::from_i64(rand::random::<i64>()).unwrap());
-        let rnd_market_quote_muls: [u64; POSITION_LIST_SIZE] = core::array::from_fn(|_| 1u64); // TODO: randomize
+        let rnd_market_quote_muls: [u64; POSITION_LIST_SIZE] = core::array::from_fn(|_| 1u64);
         let rnd_position_frps: [BigInt; POSITION_LIST_SIZE] =
             core::array::from_fn(|_| BigInt::from_i64(rand::random::<i64>()).unwrap());
         let rnd_positions: [BigInt; POSITION_LIST_SIZE] = // 56 bit

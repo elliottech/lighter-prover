@@ -624,18 +624,15 @@ macro_rules! impl_circuit_builder_for_extension_degree {
                 self.add_simple_generator(QuinticQuotientGenerator::new(a, b, quotient));
 
                 let quotient_times_denominator = self.mul_quintic_ext(quotient, b);
-                let zero_if_prod_is_a = self.sub_quintic_ext(quotient_times_denominator, a);
+                let diff = self.sub_quintic_ext(quotient_times_denominator, a);
 
-                // check zero
-                // we can do the multiplication limb-wise here, as their product is zero
-                // iff one of them is all zeros
-                let QuinticExtensionTarget([b0, b1, b2, b3, b4]) = b;
-                let QuinticExtensionTarget([p0, p1, p2, p3, p4]) = zero_if_prod_is_a;
-                let z0 = self.mul(b0, p0);
-                let z1 = self.mul(b1, p1);
-                let z2 = self.mul(b2, p2);
-                let z3 = self.mul(b3, p3);
-                let z4 = self.mul(b4, p4);
+                // Enforce (b == 0) OR (quotient * b == a) by asserting b * diff == 0 in GF(p^5).
+                // GF(p^5) is an integral domain: b * diff == 0 iff b == 0 or diff == 0.
+                // Coordinate-wise products b_i * diff_i == 0 are NOT sufficient because
+                // GF(p^5) multiplication has cross-terms; a denominator with some zero
+                // coordinates could satisfy the coordinate-wise check while diff != 0.
+                let b_times_diff = self.mul_quintic_ext(b, diff);
+                let QuinticExtensionTarget([z0, z1, z2, z3, z4]) = b_times_diff;
                 self.assert_zero(z0);
                 self.assert_zero(z1);
                 self.assert_zero(z2);

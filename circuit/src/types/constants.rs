@@ -562,6 +562,7 @@ pub const SENDER_ACCOUNT_ID: usize = 0;
 pub const RECEIVER_ACCOUNT_ID: usize = 1;
 pub const INTEGRATOR_ACCOUNT_ID: usize = 1;
 pub const MARKET_OPERATOR_ACCOUNT_ID: usize = 1;
+pub const MARKET_FEE_COLLECTOR_ACCOUNT_ID: usize = 2;
 
 pub const BANKRUPT_ACCOUNT_ID: usize = 0;
 pub const DELEVERAGER_ACCOUNT_ID: usize = 1;

@@ -1230,10 +1230,10 @@ pub fn apply_binary_options_trade(
 
     let trade_quote_is_negative = builder.is_negative(input.trade_quote);
     builder.conditional_assert_false(is_enabled, trade_quote_is_negative);
+    // Takers never get rebates; a negative maker fee is a rebate paid out of the taker fee, the
+    // matching engine bounds it by the taker fee and the market maker fee
     let is_taker_fee_negative = builder.is_negative(input.taker_fee);
-    let is_maker_fee_negative = builder.is_negative(input.maker_fee);
-    let is_fee_negative = builder.or(is_taker_fee_negative, is_maker_fee_negative);
-    builder.conditional_assert_false(is_enabled, is_fee_negative);
+    builder.conditional_assert_false(is_enabled, is_taker_fee_negative);
 
     let trade_base = builder.select(is_enabled, input.trade_base, zero);
     let trade_quote = builder.select(is_enabled, input.trade_quote.target, zero);
@@ -1243,9 +1243,6 @@ pub fn apply_binary_options_trade(
     let settlement_cap_big = builder.target_to_biguint(input.market.settlement_cap);
     let trade_quote_big = builder.target_to_biguint(trade_quote);
     let trade_quote_int = builder.biguint_to_bigint(&trade_quote_big);
-    let trade_base_big = builder.target_to_biguint(trade_base);
-    let trade_payout =
-        builder.mul_biguint_non_carry(&trade_base_big, &settlement_cap_big, BIG_U128_LIMBS);
 
     let is_taker_ask = input.is_taker_ask;
     let is_maker_ask = builder.not(is_taker_ask);
@@ -1297,34 +1294,32 @@ pub fn apply_binary_options_trade(
     let maker_quote_delta =
         builder.select_bigint(is_taker_ask, &buyer_quote_delta, &seller_quote_delta);
 
-    // Each side pays fees on its own cash outlay: the buyer on the quote it pays for its
-    // YES exposure, the seller on the payout minus quote it escrows for its NO exposure.
+    // Both sides pay fees on the notional (quote), the fee ticks already follow the price curve.
     // quote extension multiplier % FEE_TICK == 0, so fee * (multiplier / FEE_TICK) is exact.
     let taker_fee_non_zero = builder.is_not_zero(input.taker_fee.target);
     let maker_fee_non_zero = builder.is_not_zero(input.maker_fee.target);
     let fees_enabled = builder.or(taker_fee_non_zero, maker_fee_non_zero);
-    let trade_payout_int = builder.biguint_to_bigint(&trade_payout);
-    let seller_fee_base =
-        builder.sub_bigint_non_carry(&trade_payout_int, &trade_quote_int, BIG_U128_LIMBS);
-    let taker_fee_base = builder.select_bigint(is_taker_ask, &seller_fee_base, &trade_quote_int);
-    let maker_fee_base = builder.select_bigint(is_taker_ask, &trade_quote_int, &seller_fee_base);
 
     let fee_tick = builder.constant_u64(FEE_TICK);
     let (quote_fee_multiplier, _) =
         builder.div_rem(input.market.quote_extension_multiplier, fee_tick, FEE_BITS);
-    let [taker_fee_delta, maker_fee_delta] = [
-        (&taker_fee_base, input.taker_fee),
-        (&maker_fee_base, input.maker_fee),
-    ]
-    .map(|(fee_base, fee)| {
-        let fee = builder.mul_bool(fees_enabled, fee.target);
-        let extended_fee_multiplier = builder.mul(fee, quote_fee_multiplier);
+    // The maker fee may be negative (a rebate), so the deltas are computed on the absolute fees and
+    // carry the fee's sign; the trade quote is non-negative
+    let [taker_fee_delta, maker_fee_delta] = [input.taker_fee, input.maker_fee].map(|fee| {
+        let fee_base = &trade_quote_int;
+        let (abs_fee, fee_sign) = builder.abs(fee);
+        let abs_fee = builder.mul_bool(fees_enabled, abs_fee);
+        let extended_fee_multiplier = builder.mul(abs_fee, quote_fee_multiplier);
         let extended_fee_multiplier_big = builder.target_to_biguint(extended_fee_multiplier);
-        builder.mul_bigint_with_biguint_non_carry(
+        let abs_fee_delta = builder.mul_bigint_with_biguint_non_carry(
             fee_base,
             &extended_fee_multiplier_big,
             BIG_U128_LIMBS,
-        )
+        );
+        BigIntTarget {
+            abs: abs_fee_delta.abs,
+            sign: SignTarget::new_unsafe(builder.mul(abs_fee_delta.sign.target, fee_sign.target)),
+        }
     });
 
     let quote_multiplier_big = builder.target_to_biguint(input.market.quote_extension_multiplier);

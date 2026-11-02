@@ -94,6 +94,9 @@ where
     #[serde(rename = "moai", default)]
     pub market_operator_account_index: i64,
 
+    #[serde(rename = "mfcai", default)]
+    pub market_fee_collector_account_index: i64,
+
     #[serde(rename = "sc", default)]
     pub settlement_cap: u32,
 
@@ -139,6 +142,7 @@ impl<F: RichField + Default> Default for Market<F> {
             open_interest_limit: 0,
             outcome: 0,
             market_operator_account_index: NIL_ACCOUNT_INDEX,
+            market_fee_collector_account_index: TREASURY_ACCOUNT_INDEX as i64,
             settlement_cap: 0,
             settlement_type: 0,
             settlement_price: 0,
@@ -172,17 +176,18 @@ pub struct MarketTarget {
     pub min_quote_amount: Target,           // 48 bits
     pub order_quote_limit: Target,          // 48 bits
 
-    pub start_timestamp: Target,               // 48 bits
-    pub end_timestamp: Target,                 // 48 bits
-    pub open_interest: Target,                 // 56 bits
-    pub open_interest_limit: Target,           // 56 bits
-    pub outcome: Target,                       // 8 bits
-    pub market_operator_account_index: Target, // 48 bits
-    pub settlement_cap: Target,                // 32 bits
-    pub settlement_type: Target,               // 8 bits
-    pub settlement_price: Target,              // 32 bits
-    pub default_price: Target,                 // 32 bits
-    pub is_frozen: Target,                     // 1 bit
+    pub start_timestamp: Target,                    // 48 bits
+    pub end_timestamp: Target,                      // 48 bits
+    pub open_interest: Target,                      // 56 bits
+    pub open_interest_limit: Target,                // 56 bits
+    pub outcome: Target,                            // 8 bits
+    pub market_operator_account_index: Target,      // 48 bits
+    pub market_fee_collector_account_index: Target, // 48 bits
+    pub settlement_cap: Target,                     // 32 bits
+    pub settlement_type: Target,                    // 8 bits
+    pub settlement_price: Target,                   // 32 bits
+    pub default_price: Target,                      // 32 bits
+    pub is_frozen: Target,                          // 1 bit
 
     pub order_book_root: HashOutTarget,
 
@@ -217,6 +222,7 @@ impl Default for MarketTarget {
             open_interest_limit: Target::default(),
             outcome: Target::default(),
             market_operator_account_index: Target::default(),
+            market_fee_collector_account_index: Target::default(),
             settlement_cap: Target::default(),
             settlement_type: Target::default(),
             settlement_price: Target::default(),
@@ -266,6 +272,7 @@ impl MarketTarget {
             open_interest_limit: builder.add_virtual_target(),
             outcome: builder.add_virtual_target(),
             market_operator_account_index: builder.add_virtual_target(),
+            market_fee_collector_account_index: builder.add_virtual_target(),
             settlement_cap: builder.add_virtual_target(),
             settlement_type: builder.add_virtual_target(),
             settlement_price: builder.add_virtual_target(),
@@ -335,6 +342,10 @@ impl MarketTarget {
             self.market_operator_account_index,
             &format!("{} market_operator_account_index", tag),
         );
+        builder.println(
+            self.market_fee_collector_account_index,
+            &format!("{} market_fee_collector_account_index", tag),
+        );
         builder.println(self.settlement_cap, &format!("{} settlement_cap", tag));
         builder.println(self.settlement_type, &format!("{} settlement_type", tag));
         builder.println(self.settlement_price, &format!("{} settlement_price", tag));
@@ -375,6 +386,7 @@ impl MarketTarget {
             open_interest_limit: builder.zero(),
             outcome: builder.zero(),
             market_operator_account_index: builder.constant_i64(NIL_ACCOUNT_INDEX),
+            market_fee_collector_account_index: builder.zero(),
             settlement_cap: builder.zero(),
             settlement_type: builder.zero(),
             settlement_price: builder.zero(),
@@ -389,7 +401,8 @@ impl MarketTarget {
 
     /// The market a settled market leaves behind in its slot: empty except for the ask/bid
     /// nonces, which the next market created on the slot resumes so order indexes never repeat,
-    /// and the slot's market operator, who can create the next market on the slot.
+    /// and the slot's market operator and fee collector, which carry over to the next market
+    /// created on the slot.
     pub fn settled(
         builder: &mut Builder,
         market: &MarketTarget,
@@ -399,6 +412,7 @@ impl MarketTarget {
             ask_nonce: market.ask_nonce,
             bid_nonce: market.bid_nonce,
             market_operator_account_index: market.market_operator_account_index,
+            market_fee_collector_account_index: market.market_fee_collector_account_index,
             ..Self::empty(
                 builder,
                 market.market_index,
@@ -450,6 +464,7 @@ impl MarketTarget {
             builder.is_zero(self.open_interest_limit),
             builder.is_zero(self.outcome),
             builder.is_equal(self.market_operator_account_index, nil_market_operator),
+            builder.is_zero(self.market_fee_collector_account_index),
             builder.is_zero(self.settlement_cap),
             builder.is_zero(self.settlement_type),
             builder.is_zero(self.settlement_price),
@@ -529,6 +544,7 @@ impl MarketTarget {
             self.settlement_price,
             self.default_price,
             self.is_frozen,
+            self.market_fee_collector_account_index,
             self.order_book_root.elements[0],
             self.order_book_root.elements[1],
             self.order_book_root.elements[2],
@@ -600,6 +616,10 @@ impl<T: Witness<F>, F: PrimeField64 + RichField> MarketTargetWitness<F> for T {
             a.market_operator_account_index,
             F::from_canonical_i64(b.market_operator_account_index),
         )?;
+        self.set_target(
+            a.market_fee_collector_account_index,
+            F::from_canonical_i64(b.market_fee_collector_account_index),
+        )?;
         self.set_target(a.settlement_cap, F::from_canonical_u32(b.settlement_cap))?;
         self.set_target(a.settlement_type, F::from_canonical_u8(b.settlement_type))?;
         self.set_target(
@@ -663,6 +683,11 @@ pub fn select_market(
             a.market_operator_account_index,
             b.market_operator_account_index,
         ),
+        market_fee_collector_account_index: builder.select(
+            flag,
+            a.market_fee_collector_account_index,
+            b.market_fee_collector_account_index,
+        ),
         settlement_cap: builder.select(flag, a.settlement_cap, b.settlement_cap),
         settlement_type: builder.select(flag, a.settlement_type, b.settlement_type),
         settlement_price: builder.select(flag, a.settlement_price, b.settlement_price),
@@ -706,6 +731,7 @@ mod tests {
         ask_nonce: i64,
         bid_nonce: i64,
         market_operator_account_index: i64,
+        market_fee_collector_account_index: i64,
         expect_empty: bool,
     ) -> Result<()> {
         let mut builder = Builder::new(CIRCUIT_CONFIG);
@@ -714,12 +740,17 @@ mod tests {
         let empty_order_book_root = builder.constant_hash(EMPTY_ORDER_BOOK_TREE_ROOT);
         let settled = MarketTarget::settled(&mut builder, &market, empty_order_book_root);
 
-        // Settled market keeps only the nonces and the market operator; everything else is cleared.
+        // Settled market keeps only the nonces, the market operator and the fee collector;
+        // everything else is cleared.
         builder.connect(settled.ask_nonce, market.ask_nonce);
         builder.connect(settled.bid_nonce, market.bid_nonce);
         builder.connect(
             settled.market_operator_account_index,
             market.market_operator_account_index,
+        );
+        builder.connect(
+            settled.market_fee_collector_account_index,
+            market.market_fee_collector_account_index,
         );
         builder.assert_zero(settled.status);
         builder.assert_zero(settled.total_order_count);
@@ -769,6 +800,7 @@ mod tests {
                 ask_nonce,
                 bid_nonce,
                 market_operator_account_index,
+                market_fee_collector_account_index,
                 taker_fee: 100,
                 maker_fee: 50,
                 order_book_root: EMPTY_ORDER_BOOK_TREE_ROOT,
@@ -781,16 +813,21 @@ mod tests {
 
     #[test]
     fn settled_market_keeps_nonces_and_is_not_empty() -> Result<()> {
-        settled_market_circuit(FIRST_ASK_NONCE + 41, FIRST_BID_NONCE - 17, 12, false)
+        settled_market_circuit(FIRST_ASK_NONCE + 41, FIRST_BID_NONCE - 17, 12, 0, false)
     }
 
     #[test]
     fn settled_market_with_operator_is_not_empty() -> Result<()> {
-        settled_market_circuit(0, 0, 12, false)
+        settled_market_circuit(0, 0, 12, 0, false)
+    }
+
+    #[test]
+    fn settled_market_with_fee_collector_is_not_empty() -> Result<()> {
+        settled_market_circuit(0, 0, NIL_ACCOUNT_INDEX, 12, false)
     }
 
     #[test]
     fn settled_market_with_untouched_nonces_and_no_operator_is_empty() -> Result<()> {
-        settled_market_circuit(0, 0, NIL_ACCOUNT_INDEX, true)
+        settled_market_circuit(0, 0, NIL_ACCOUNT_INDEX, 0, true)
     }
 }

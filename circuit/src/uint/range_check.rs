@@ -229,7 +229,7 @@ impl<F: RichField + Extendable<D>, const D: usize> RangeCheckGate<F, D> {
         let routed_wires_per_op = 1;
         let unrouted_wires_per_op = ceil_div_usize(bit_size, Self::AUX_LIMB_BITS);
         let wires_per_op = routed_wires_per_op + unrouted_wires_per_op;
-        config.num_wires / wires_per_op.min(config.num_routed_wires / routed_wires_per_op)
+        (config.num_wires / wires_per_op).min(config.num_routed_wires / routed_wires_per_op)
     }
 
     fn aux_limbs_per_input(&self) -> usize {
@@ -645,7 +645,7 @@ mod tests {
 
     use super::*;
     #[cfg(all(feature = "std", target_arch = "aarch64", target_os = "macos"))]
-    use crate::uint::u32::gates::add_many_u32::U32AddManyGate;
+    use crate::uint::u32::gates::add_many_u32::{MAX_NUM_ADDENDS, U32AddManyGate};
     #[cfg(all(feature = "std", target_arch = "aarch64", target_os = "macos"))]
     use crate::uint::u32::gates::arithmetic_u32::U32ArithmeticGate;
     #[cfg(all(feature = "std", target_arch = "aarch64", target_os = "macos"))]
@@ -738,9 +738,10 @@ mod tests {
             u32_inputs.push((input, value));
         }
 
-        let add_many = U32AddManyGate::<F, D>::new_from_config(&config, 16);
-        let (row, op) = builder.find_slot(add_many, &[F::from_canonical_usize(16)], &[]);
-        for j in 0..16 {
+        let add_many = U32AddManyGate::<F, D>::new_from_config(&config, MAX_NUM_ADDENDS);
+        let (row, op) =
+            builder.find_slot(add_many, &[F::from_canonical_usize(MAX_NUM_ADDENDS)], &[]);
+        for j in 0..MAX_NUM_ADDENDS {
             let input = builder.add_virtual_target();
             builder.connect(
                 input,

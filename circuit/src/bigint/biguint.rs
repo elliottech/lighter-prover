@@ -526,16 +526,13 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilderBiguint<F, D> f
                 let mut carry = self.zero_u32();
                 for i in 0..num_limbs {
                     // If given limb exists in the element of the target slice, use it, otherwise use zero limb
-                    let mut partial_limbs: [U32Target; 16] = array::from_fn(|j| {
+                    let partial_limbs: [U32Target; 15] = array::from_fn(|j| {
                         target
                             .get(j)
                             .map(|t| t.limbs.get(i).copied().unwrap_or_else(|| self.zero_u32()))
                             .unwrap_or_else(|| self.zero_u32())
                     });
-                    // prepend the carry to the beginning of the partial limbs array and call add_many_u32
-                    partial_limbs[partial_limbs.len() - 1] = carry;
-
-                    let (new_limb, new_carry) = self.add_many_u32(&partial_limbs);
+                    let (new_limb, new_carry) = self.add_u32s_with_carry(&partial_limbs, carry);
                     carry = new_carry;
                     combined_limbs.push(new_limb);
                 }

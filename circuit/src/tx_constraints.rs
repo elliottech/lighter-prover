@@ -608,7 +608,7 @@ impl TxTarget {
             account_order_before: AccountOrderTarget::new(builder),
             market_before: MarketTarget::new(builder),
             market_details_before: MarketDetailsTarget::new(builder),
-            order_before: OrderTarget::new(builder), // TODO: add checks to verify validity of index_price|nonce against the txn
+            order_before: OrderTarget::new(builder),
             asset_indices: core::array::from_fn(|_| builder.add_virtual_target()),
 
             /*****************************/
