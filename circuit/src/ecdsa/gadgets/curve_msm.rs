@@ -7,7 +7,6 @@ use plonky2::field::extension::Extendable;
 use plonky2::field::types::Field;
 use plonky2::hash::hash_types::RichField;
 use plonky2::hash::keccak::KeccakHash;
-use plonky2::iop::target::BoolTarget;
 use plonky2::plonk::config::{GenericHashOut, Hasher};
 
 use crate::builder::Builder;
@@ -77,68 +76,6 @@ pub fn curve_msm_circuit<C: Curve, F: RichField + Extendable<D>, const D: usize>
     let starting_point_multiplied = (0..2 * num_limbs).fold(rando, |acc, _| acc.double());
     let to_add = builder.constant_affine_point(-starting_point_multiplied);
     result = builder.curve_add(&result, &to_add);
-
-    result
-}
-
-pub fn conditional_curve_msm_circuit<C: Curve, F: RichField + Extendable<D>, const D: usize>(
-    builder: &mut Builder<F, D>,
-    cond: BoolTarget,
-    p: &AffinePointTarget<C>,
-    q: &AffinePointTarget<C>,
-    n: &NonNativeTarget<C::ScalarField>,
-    m: &NonNativeTarget<C::ScalarField>,
-) -> AffinePointTarget<C> {
-    let limbs_n = builder.split_nonnative_to_2_bit_limbs(n);
-    let limbs_m = builder.split_nonnative_to_2_bit_limbs(m);
-    assert_eq!(limbs_n.len(), limbs_m.len());
-    let num_limbs = limbs_n.len();
-
-    let hash_0 = KeccakHash::<32>::hash_no_pad(&[F::ZERO]);
-    let hash_0_scalar = C::ScalarField::from_noncanonical_biguint(BigUint::from_bytes_le(
-        &GenericHashOut::<F>::to_bytes(&hash_0),
-    ));
-    let rando = (CurveScalar(hash_0_scalar) * C::GENERATOR_PROJECTIVE).to_affine();
-    let rando_t = builder.constant_affine_point(rando);
-    let neg_rando = builder.constant_affine_point(-rando);
-
-    // Precomputes `precomputation[i + 4*j] = i*p + j*q` for `i,j=0..4`.
-    let mut precomputation = vec![p.clone(); 16];
-    let mut cur_p = rando_t.clone();
-    let mut cur_q = rando_t.clone();
-    for i in 0..4 {
-        precomputation[i] = cur_p.clone();
-        precomputation[4 * i] = cur_q.clone();
-        cur_p = builder.conditional_curve_add(cond, &cur_p, p);
-        cur_q = builder.conditional_curve_add(cond, &cur_q, q);
-    }
-    for i in 1..4 {
-        precomputation[i] = builder.conditional_curve_add(cond, &precomputation[i], &neg_rando);
-        precomputation[4 * i] =
-            builder.conditional_curve_add(cond, &precomputation[4 * i], &neg_rando);
-    }
-    for i in 1..4 {
-        for j in 1..4 {
-            precomputation[i + 4 * j] =
-                builder.conditional_curve_add(cond, &precomputation[i], &precomputation[4 * j]);
-        }
-    }
-
-    let four = builder.constant(F::from_canonical_usize(4));
-
-    let zero = builder.zero();
-    let mut result = rando_t;
-    for (limb_n, limb_m) in limbs_n.into_iter().zip(limbs_m).rev() {
-        result = builder.curve_repeated_double(&result, 2);
-        let index = builder.mul_add(four, limb_m, limb_n);
-        let r = builder.random_access_curve_points(index, precomputation.clone());
-        let is_zero = builder.is_equal(index, zero);
-        let should_add = builder.not(is_zero);
-        result = builder.curve_mul_bool_add(&result, &r, should_add);
-    }
-    let starting_point_multiplied = (0..2 * num_limbs).fold(rando, |acc, _| acc.double());
-    let to_add = builder.constant_affine_point(-starting_point_multiplied);
-    result = builder.conditional_curve_add(cond, &result, &to_add);
 
     result
 }

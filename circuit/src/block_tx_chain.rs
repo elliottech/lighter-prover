@@ -56,6 +56,11 @@ where
     pub signature_digest_seed: [F; P3_DIGEST_STATE_WIDTH], // Initial seed
     pub signed_so_far: F,   // Running total
     pub signature_digest_state: [F; P3_DIGEST_STATE_WIDTH], // Running Poseidon2 sponge state for p3-schnorr
+
+    pub ecdsa_signature_count: F, // Initial count given
+    pub ecdsa_signature_digest_seed: [F; P3_DIGEST_STATE_WIDTH], // Initial seed
+    pub ecdsa_signed_so_far: F,   // Running total
+    pub ecdsa_signature_digest_state: [F; P3_DIGEST_STATE_WIDTH], // Running Poseidon2 sponge state for p3-schnorr
 }
 
 impl<F> fmt::Debug for BlockTxChainWitness<F>
@@ -120,6 +125,8 @@ where
         let initial_state_root_index = jump_end_index;
         let initial_delta_root_index = initial_state_root_index + 4;
         let signature_digest_state_index = initial_delta_root_index + 4;
+        let ecdsa_signature_digest_state_index =
+            signature_digest_state_index + 2 * P3_DIGEST_STATE_WIDTH + 2;
 
         Self {
             block_number: public_inputs[0].to_canonical_u64(),
@@ -195,11 +202,22 @@ where
             signature_digest_state: core::array::from_fn(|index| {
                 public_inputs[signature_digest_state_index + index]
             }),
-
             signature_count: public_inputs[signature_digest_state_index + P3_DIGEST_STATE_WIDTH],
             signed_so_far: public_inputs[signature_digest_state_index + P3_DIGEST_STATE_WIDTH + 1],
             signature_digest_seed: core::array::from_fn(|index| {
                 public_inputs[signature_digest_state_index + P3_DIGEST_STATE_WIDTH + 2 + index]
+            }),
+
+            ecdsa_signature_digest_state: core::array::from_fn(|index| {
+                public_inputs[ecdsa_signature_digest_state_index + index]
+            }),
+            ecdsa_signature_count: public_inputs
+                [ecdsa_signature_digest_state_index + P3_DIGEST_STATE_WIDTH],
+            ecdsa_signed_so_far: public_inputs
+                [ecdsa_signature_digest_state_index + P3_DIGEST_STATE_WIDTH + 1],
+            ecdsa_signature_digest_seed: core::array::from_fn(|index| {
+                public_inputs
+                    [ecdsa_signature_digest_state_index + P3_DIGEST_STATE_WIDTH + 2 + index]
             }),
         }
     }
@@ -241,6 +259,11 @@ pub struct BlockTxChainWitnessTarget {
     pub signature_count: Target,
     pub signed_so_far: Target,
     pub signature_digest_seed: [Target; P3_DIGEST_STATE_WIDTH],
+
+    pub ecdsa_signature_digest_state: [Target; P3_DIGEST_STATE_WIDTH],
+    pub ecdsa_signature_count: Target,
+    pub ecdsa_signed_so_far: Target,
+    pub ecdsa_signature_digest_seed: [Target; P3_DIGEST_STATE_WIDTH],
 }
 
 impl BlockTxChainWitnessTarget {
@@ -274,10 +297,20 @@ impl BlockTxChainWitnessTarget {
             jump: JumpStateTarget::new_public(builder),
             initial_state_root: builder.add_virtual_hash_public_input(),
             initial_delta_root: builder.add_virtual_hash_public_input(),
+
             signature_digest_state: core::array::from_fn(|_| builder.add_virtual_public_input()),
             signature_count: builder.add_virtual_public_input(),
             signed_so_far: builder.add_virtual_public_input(),
             signature_digest_seed: core::array::from_fn(|_| builder.add_virtual_public_input()),
+
+            ecdsa_signature_digest_state: core::array::from_fn(|_| {
+                builder.add_virtual_public_input()
+            }),
+            ecdsa_signature_count: builder.add_virtual_public_input(),
+            ecdsa_signed_so_far: builder.add_virtual_public_input(),
+            ecdsa_signature_digest_seed: core::array::from_fn(|_| {
+                builder.add_virtual_public_input()
+            }),
         }
     }
 
@@ -308,12 +341,20 @@ impl BlockTxChainWitnessTarget {
         let jump_end_index = jump_index + JUMP_STATE_SIZE;
         let initial_state_root_index = jump_end_index;
         let initial_delta_root_index = initial_state_root_index + 4;
-        let signature_digest_state_index = initial_delta_root_index + 4;
 
+        let signature_digest_state_index = initial_delta_root_index + 4;
         let signature_count_index = signature_digest_state_index + P3_DIGEST_STATE_WIDTH;
         let signed_so_far_index = signature_count_index + 1;
         let signature_digest_seed_index = signed_so_far_index + 1;
-        let total_pis_size = signature_digest_seed_index + P3_DIGEST_STATE_WIDTH;
+
+        let ecdsa_signature_digest_state_index =
+            signature_digest_seed_index + P3_DIGEST_STATE_WIDTH;
+        let ecdsa_signature_count_index =
+            ecdsa_signature_digest_state_index + P3_DIGEST_STATE_WIDTH;
+        let ecdsa_signed_so_far_index = ecdsa_signature_count_index + 1;
+        let ecdsa_signature_digest_seed_index = ecdsa_signed_so_far_index + 1;
+
+        let total_pis_size = ecdsa_signature_digest_seed_index + P3_DIGEST_STATE_WIDTH;
 
         assert!(
             pis.len() >= total_pis_size,
@@ -394,6 +435,15 @@ impl BlockTxChainWitnessTarget {
                 signature_digest_seed: core::array::from_fn(|i| {
                     pis[signature_digest_seed_index + i]
                 }),
+
+                ecdsa_signature_digest_state: core::array::from_fn(|i| {
+                    pis[ecdsa_signature_digest_state_index + i]
+                }),
+                ecdsa_signature_count: pis[ecdsa_signature_count_index],
+                ecdsa_signed_so_far: pis[ecdsa_signed_so_far_index],
+                ecdsa_signature_digest_seed: core::array::from_fn(|i| {
+                    pis[ecdsa_signature_digest_seed_index + i]
+                }),
             },
             total_pis_size,
         )
@@ -462,6 +512,25 @@ impl BlockTxChainWitnessTarget {
             .signature_digest_seed
             .iter()
             .zip(other.signature_digest_seed.iter())
+        {
+            builder.connect(*a, *b);
+        }
+
+        for (a, b) in self
+            .ecdsa_signature_digest_state
+            .iter()
+            .zip(other.ecdsa_signature_digest_state.iter())
+        {
+            builder.connect(*a, *b);
+        }
+
+        builder.connect(self.ecdsa_signature_count, other.ecdsa_signature_count);
+        builder.connect(self.ecdsa_signed_so_far, other.ecdsa_signed_so_far);
+
+        for (a, b) in self
+            .ecdsa_signature_digest_seed
+            .iter()
+            .zip(other.ecdsa_signature_digest_seed.iter())
         {
             builder.connect(*a, *b);
         }

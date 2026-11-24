@@ -12,7 +12,7 @@ use circuit::block_tx_constraints::{BlockTxCircuit, Circuit as _};
 use circuit::circuit_serializer::{BlockGateSerializer, BlockGeneratorSerializer};
 use circuit::ecdsa::curve::secp256k1::Secp256K1;
 use circuit::types::config::{
-    BLOCK_CIRCUIT_CONFIG, BLOCK_TX_CHAIN_CIRCUIT_CONFIG, C, CIRCUIT_CONFIG, D,
+    BLOCK_CIRCUIT_CONFIG, BLOCK_TX_CHAIN_CIRCUIT_CONFIG, C, CIRCUIT_CONFIG, D, SignatureSchemes,
 };
 use circuit::types::constants::{MAX_REAL_SIGNATURES, TX_HEAVY, TX_LIGHT};
 use clap::Parser;
@@ -43,6 +43,9 @@ struct Args {
     #[arg(long)]
     margined_asset_list_size: usize,
 
+    #[arg(long, value_enum, default_value = "both")]
+    signature_schemes: SignatureSchemes,
+
     #[arg(long)]
     path: Option<std::path::PathBuf>,
 }
@@ -66,6 +69,7 @@ fn main() -> Result<()> {
         "margined_asset_list_size: {}",
         args.margined_asset_list_size
     );
+    info!("signature_schemes: {:?}", args.signature_schemes);
 
     assert_eq!(
         args.on_chain_operations_limit, 1,
@@ -83,6 +87,7 @@ fn main() -> Result<()> {
         args.chain_id,
         TX_HEAVY,
         args.margined_asset_list_size,
+        args.signature_schemes,
     );
     let heavy_data = heavy_tx_circuit.builder.build::<C>();
     let light_tx_circuit = BlockTxCircuit::define(
@@ -91,6 +96,7 @@ fn main() -> Result<()> {
         args.chain_id,
         TX_LIGHT,
         args.margined_asset_list_size,
+        args.signature_schemes,
     );
     let light_data = light_tx_circuit.builder.build::<C>();
     info!("BlockTxCircuit defined!");
@@ -114,19 +120,35 @@ fn main() -> Result<()> {
     let light_chain_circuit_data = light_chain_circuit.builder.build::<C>();
     info!("BlockTxChainCircuit defined!");
 
-    let signature_batch_circuit =
-        p3_schnorr_recursion::build_transcript_verifier_circuit(MAX_REAL_SIGNATURES)
+    let signature_batch_circuit = args.signature_schemes.schnorr_signature_enabled().then(|| {
+        let circuit = p3_schnorr_recursion::build_transcript_verifier_circuit(MAX_REAL_SIGNATURES)
             .expect("failed to build p3-schnorr-recursion TranscriptVerifierCircuit");
-    info!("p3-schnorr TranscriptVerifierCircuit defined!");
+        info!("p3-schnorr TranscriptVerifierCircuit defined!");
+        circuit
+    });
+
+    let ecdsa_signature_batch_circuit =
+        args.signature_schemes.ecdsa_signature_enabled().then(|| {
+            let circuit = p3_ecdsa_recursion::build_batch_verifier_circuit(MAX_REAL_SIGNATURES)
+                .expect("failed to build p3-ecdsa-recursion BatchVerifierCircuit");
+            info!("ecdsa BatchVerifierCircuit defined!");
+            circuit
+        });
 
     let circuit = BlockCircuit::define(
         BLOCK_CIRCUIT_CONFIG,
         &pre_exec_data,
         &light_chain_circuit_data,
         &heavy_chain_circuit_data,
-        &signature_batch_circuit.data,
+        signature_batch_circuit
+            .as_ref()
+            .map(|circuit| &circuit.data),
+        ecdsa_signature_batch_circuit
+            .as_ref()
+            .map(|circuit| &circuit.data),
         args.on_chain_operations_limit,
         args.margined_asset_list_size,
+        args.signature_schemes,
     );
     let data = circuit.builder.build::<C>();
     info!("BlockCircuit defined!");

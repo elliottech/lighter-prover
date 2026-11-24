@@ -1380,6 +1380,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
         let constants_sigmas_cap = constants_sigmas_commitment.merkle_tree.cap.clone();
         let domain_separator = self.domain_separator.unwrap_or_default();
         let domain_separator_digest = C::Hasher::hash_pad(&domain_separator);
+        // TODO: This should also include an encoding of gate constraints.
         let circuit_digest_parts = [
             constants_sigmas_cap.flatten(),
             domain_separator_digest.to_vec(),
@@ -1525,12 +1526,14 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
     }
     /// Builds a "prover circuit", with data needed to generate proofs but not verify them.
     pub fn build_prover<C: GenericConfig<D, F = F>>(self) -> ProverCircuitData<F, C, D> {
+        // TODO: Can skip parts of this.
         let circuit_data = self.build::<C>();
         circuit_data.prover_data()
     }
 
     /// Builds a "verifier circuit", with data needed to verify proofs but not generate them.
     pub fn build_verifier<C: GenericConfig<D, F = F>>(self) -> VerifierCircuitData<F, C, D> {
+        // TODO: Can skip parts of this.
         let circuit_data = self.build::<C>();
         circuit_data.verifier_data()
     }

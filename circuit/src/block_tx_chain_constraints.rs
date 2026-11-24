@@ -84,6 +84,8 @@ pub trait Circuit<C: GenericConfig<D, F = F>, F: RichField + Extendable<D>, cons
         new_delta_root: HashOut<F>,
         signature_count: u64,
         signature_digest_seed: [F; P3_DIGEST_STATE_WIDTH],
+        ecdsa_signature_count: u64,
+        ecdsa_signature_digest_seed: [F; P3_DIGEST_STATE_WIDTH],
     ) -> ProofWithPublicInputs<F, C, D>;
 }
 
@@ -499,13 +501,14 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
             prev_counter_plus_one,
         );
 
-        // Treasury can't change pubkey via L2 transaction, so if account index is zero, then change_pub_key_message is empty
-        let is_change_pub_key_message_exists = circuit
-            .builder
-            .is_not_zero(current_tx.change_pub_key_message.account_index);
+        // At most one change_pub_key_message per chain
+        let is_change_pub_key_message_exists = current_tx.change_pub_key_message.is_enabled;
+        current_tx
+            .change_pub_key_message
+            .conditional_assert_signer_not_empty(&mut circuit.builder);
         circuit.builder.conditional_assert_zero(
             is_change_pub_key_message_exists,
-            block.change_pub_key_message.account_index,
+            block.change_pub_key_message.is_enabled.target,
         );
         let change_pub_key_message = ChangePubKeyMessageTarget::select(
             &mut circuit.builder,
@@ -514,13 +517,14 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
             &block.change_pub_key_message,
         );
 
-        // Treasury can call L2 transfer, but it can only transfer between its own (sub)accounts. So transfer_message is empty in that case
-        let is_transfer_message_exists = circuit
-            .builder
-            .is_not_zero(current_tx.transfer_message.from_account_index);
+        // At most one transfer_message per chain
+        let is_transfer_message_exists = current_tx.transfer_message.is_enabled;
+        current_tx
+            .transfer_message
+            .conditional_assert_signer_not_empty(&mut circuit.builder);
         circuit.builder.conditional_assert_zero(
             is_transfer_message_exists,
-            block.transfer_message.from_account_index,
+            block.transfer_message.is_enabled.target,
         );
         let transfer_message = TransferMessageTarget::select(
             &mut circuit.builder,
@@ -529,13 +533,14 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
             &block.transfer_message,
         );
 
-        // Treasury can't call L2 approve_integrator, so if account index is zero, then approve_integrator_message is empty
-        let is_approve_integrator_message_exists = circuit
-            .builder
-            .is_not_zero(current_tx.approve_integrator_message.account_index);
+        // At most one approve_integrator_message per chain
+        let is_approve_integrator_message_exists = current_tx.approve_integrator_message.is_enabled;
+        current_tx
+            .approve_integrator_message
+            .conditional_assert_signer_not_empty(&mut circuit.builder);
         circuit.builder.conditional_assert_zero(
             is_approve_integrator_message_exists,
-            block.approve_integrator_message.account_index,
+            block.approve_integrator_message.is_enabled.target,
         );
         let approve_integrator_message = ApproveIntegratorMessageTarget::select(
             &mut circuit.builder,
@@ -611,6 +616,32 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
         circuit
             .builder
             .connect(block.signed_so_far, current_tx.signed_count_before);
+        circuit
+            .builder
+            .connect(block.created_at, current_tx.created_at);
+
+        // Same for the p3-ecdsa chain (ECDSA-signed api keys).
+        let ecdsa_running_digest_state: [Target; P3_DIGEST_STATE_WIDTH] =
+            core::array::from_fn(|i| {
+                circuit.builder.select(
+                    is_first_recursion,
+                    block.ecdsa_signature_digest_seed[i],
+                    block.ecdsa_signature_digest_state[i],
+                )
+            });
+        for i in 0..P3_DIGEST_STATE_WIDTH {
+            circuit.builder.connect(
+                ecdsa_running_digest_state[i],
+                current_tx.ecdsa_signature_digest_state_before[i],
+            );
+        }
+        circuit
+            .builder
+            .conditional_assert_zero(is_first_recursion, block.ecdsa_signed_so_far);
+        circuit.builder.connect(
+            block.ecdsa_signed_so_far,
+            current_tx.ecdsa_signed_count_before,
+        );
 
         let calculated_new_block = BlockTxChainWitnessTarget {
             block_number: block.block_number,
@@ -647,6 +678,11 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
             signature_count: block.signature_count,
             signed_so_far: current_tx.signed_count_after,
             signature_digest_seed: block.signature_digest_seed,
+
+            ecdsa_signature_digest_state: current_tx.ecdsa_signature_digest_state_after,
+            ecdsa_signature_count: block.ecdsa_signature_count,
+            ecdsa_signed_so_far: current_tx.ecdsa_signed_count_after,
+            ecdsa_signature_digest_seed: block.ecdsa_signature_digest_seed,
         };
 
         circuit
@@ -739,6 +775,8 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
         old_delta_root: HashOut<F>,
         signature_count: u64,
         signature_digest_seed: [F; P3_DIGEST_STATE_WIDTH],
+        ecdsa_signature_count: u64,
+        ecdsa_signature_digest_seed: [F; P3_DIGEST_STATE_WIDTH],
     ) -> ProofWithPublicInputs<F, C, D> {
         let (mut nonzero_public_inputs, initial_state_root_index) = cyclic_base_public_inputs(
             block_number,
@@ -759,6 +797,17 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
         let signature_digest_seed_index = signature_count_index + 2;
         for (i, elem) in signature_digest_seed.iter().enumerate() {
             nonzero_public_inputs.insert(signature_digest_seed_index + i, *elem);
+        }
+
+        // Same layout for the p3-ecdsa chain, right after the schnorr seed.
+        let ecdsa_signature_count_index = signature_digest_seed_index + 2 * P3_DIGEST_STATE_WIDTH;
+        nonzero_public_inputs.insert(
+            ecdsa_signature_count_index,
+            F::from_canonical_u64(ecdsa_signature_count),
+        );
+        let ecdsa_signature_digest_seed_index = ecdsa_signature_count_index + 2;
+        for (i, elem) in ecdsa_signature_digest_seed.iter().enumerate() {
+            nonzero_public_inputs.insert(ecdsa_signature_digest_seed_index + i, *elem);
         }
 
         cyclic_base_proof(

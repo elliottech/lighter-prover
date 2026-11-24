@@ -8,12 +8,15 @@ use plonky2::field::types::Field;
 use plonky2::hash::hash_types::RichField;
 use plonky2::iop::target::{BoolTarget, Target};
 
+use crate::bigint::biguint::CircuitBuilderBiguint;
+use crate::bigint::div_rem::CircuitBuilderBiguintDivRem;
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::builder::Builder;
 use crate::hints::CircuitBuilderHints;
 use crate::types::config::{BIG_U64_LIMBS, D, F};
 use crate::types::constants::{HOUR_IN_MS, MINUTE_IN_MS, SECOND_IN_MS};
 use crate::uint::u8::U8Target;
+use crate::uint::u32::gadgets::arithmetic_u32::CircuitBuilderU32;
 
 /// Whether intermediate proofs should be eagerly verified right after proving.
 /// Always on in debug builds; enabled in release builds with
@@ -53,14 +56,20 @@ pub fn round_unix_timestamp_to_previous_hour(
 ) -> Target {
     // Remove the remainder of the timestamp when divided by 3 600 000
     let hour_in_ms = builder.constant(F::from_canonical_usize(HOUR_IN_MS));
-    let (_, remainder) = builder.div_rem(timestamp, hour_in_ms, 22);
+    let hour_in_ms_big = builder.target_to_biguint_single_limb_unsafe(hour_in_ms);
+    let timestamp_big = builder.target_to_biguint(timestamp);
+    let remainder_big = builder.rem_biguint(&timestamp_big, &hour_in_ms_big);
+    let remainder = builder.biguint_to_target_safe(&remainder_big);
     builder.sub(timestamp, remainder)
 }
 
 pub fn round_unix_timestamp_to_next_hour(builder: &mut Builder<F, D>, timestamp: Target) -> Target {
     // Add the remainder of the timestamp when divided by 3 600 000
     let hour_in_ms = builder.constant(F::from_canonical_usize(HOUR_IN_MS));
-    let (_, remainder) = builder.div_rem(timestamp, hour_in_ms, 22);
+    let hour_in_ms_big = builder.target_to_biguint_single_limb_unsafe(hour_in_ms);
+    let timestamp_big = builder.target_to_biguint(timestamp);
+    let remainder_big = builder.rem_biguint(&timestamp_big, &hour_in_ms_big);
+    let remainder = builder.biguint_to_target_safe(&remainder_big);
     let addend = builder.sub(hour_in_ms, remainder);
     builder.add(timestamp, addend)
 }
@@ -225,6 +234,16 @@ pub fn split_le_base16<F: RichField + Extendable<D>, const D: usize>(
     target: Target,
     num_limbs: usize,
 ) -> Vec<Target> {
+    if num_limbs == 32 {
+        let [low, high] = builder.split_u64_to_u32s_le_unsafe(target);
+        let max = builder.constant_u64((1u64 << 32) - 1);
+        let is_high_max = builder.is_equal(high.0, max);
+        builder.conditional_assert_zero_u32(is_high_max, low);
+        return [low, high]
+            .into_iter()
+            .flat_map(|x| builder.split_u32_to_4_bit_limbs_le(x))
+            .collect();
+    }
     let four = builder.constant_u64(4);
     builder
         .split_le_base::<4>(target, num_limbs)

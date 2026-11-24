@@ -970,7 +970,9 @@ impl AccountTarget {
             builder.add_bigint_non_carry(&total_supplied_amount_big, &supply_delta, limb_count);
         let new_total_supplied_amount_is_negative =
             builder.is_sign_negative(total_supplied_amount_big.sign);
-        builder.conditional_assert_false(is_enabled, new_total_supplied_amount_is_negative);
+        if !allow_overflow {
+            builder.conditional_assert_false(is_enabled, new_total_supplied_amount_is_negative);
+        }
         margined_asset.total_supplied_amount = total_supplied_amount_big.abs;
 
         is_spot_balance_valid

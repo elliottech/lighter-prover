@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 use anyhow::{Ok, Result};
-use hashbrown::HashMap;
 use log::Level;
 use plonky2::field::extension::Extendable;
 use plonky2::gates::constant::ConstantGate;
@@ -17,7 +16,7 @@ use plonky2::plonk::circuit_data::{
 };
 use plonky2::plonk::config::GenericConfig;
 use plonky2::plonk::proof::{ProofWithPublicInputs, ProofWithPublicInputsTarget};
-use plonky2::recursion::dummy_circuit::cyclic_base_proof;
+use plonky2::recursion::dummy_circuit::dummy_circuit;
 use plonky2::timed;
 use plonky2::util::timing::TimingTree;
 
@@ -97,6 +96,23 @@ pub struct CyclicRecursionTarget {
 }
 
 impl CyclicRecursionCircuit {
+    pub fn cyclic_base_proof_with_dummy(
+        circuit_data: &CircuitData<F, C, D>,
+        dummy: &CircuitData<F, C, D>,
+        segment_info: &SegmentInfo,
+    ) -> Result<ProofWithPublicInputs<F, C, D>> {
+        let public_inputs = segment_info.to_public_inputs();
+        let nonzero_public_inputs = (BATCH_TARGET_INDEX..SEGMENT_INFO_INDEX)
+            .map(|i| (i, public_inputs[i - BATCH_TARGET_INDEX]))
+            .collect();
+        crate::builder::custom::cyclic_base_proof(
+            &circuit_data.common,
+            &circuit_data.verifier_only,
+            dummy,
+            nonzero_public_inputs,
+        )
+    }
+
     pub fn new(
         config: CircuitConfig,
         block_common_circuit: &CommonCircuitData<F, D>,
@@ -449,17 +465,12 @@ impl Circuit<C, F, D> for CyclicRecursionCircuit {
         circuit_data: &CircuitData<F, C, D>,
         segment_info: &SegmentInfo,
     ) -> ProofWithPublicInputs<F, C, D> {
-        let mut nonzero_public_inputs = HashMap::new();
-        let public_inputs = segment_info.to_public_inputs();
-        (BATCH_TARGET_INDEX..SEGMENT_INFO_INDEX).for_each(|i| {
-            nonzero_public_inputs.insert(i, public_inputs[i - BATCH_TARGET_INDEX]);
-        });
-
-        cyclic_base_proof(
-            &circuit_data.common,
-            &circuit_data.verifier_only,
-            nonzero_public_inputs,
+        Self::cyclic_base_proof_with_dummy(
+            circuit_data,
+            &dummy_circuit(&circuit_data.common),
+            segment_info,
         )
+        .expect("cyclic base proof generation failed")
     }
 }
 

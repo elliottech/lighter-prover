@@ -21,7 +21,7 @@ use crate::types::account_margined_asset::AccountMarginedAssetTarget;
 use crate::types::account_position::AccountPositionTarget;
 use crate::types::asset::AssetTarget;
 use crate::types::binary_options_position::BinaryOptionsPositionTarget;
-use crate::types::config::BIG_U96_LIMBS;
+use crate::types::config::{BIG_U96_LIMBS, SignatureSchemes};
 use crate::types::constants::{
     MARKET_TYPE_BINARY_OPTIONS, NB_ACCOUNTS_PER_TX, NB_ASSETS_PER_TX,
     NB_CLOID_UNIQUENESS_CHECK_PER_TX, NEW_INSTRUCTIONS_MAX_SIZE, ORDER_BASE_AMOUNT_BITS,
@@ -68,6 +68,7 @@ pub struct TxState {
     pub next_margin_asset_index: Target,
     /// Size of the margined asset list. Equal to `next_margin_asset_index` when there is no free margin slot.
     pub margined_asset_list_size: usize,
+    pub signature_schemes: SignatureSchemes,
     pub first_asset_margin_index: Target,
     pub is_new_account: [BoolTarget; NB_ACCOUNTS_PER_TX],
     pub positions: [AccountPositionTarget; NB_ACCOUNTS_PER_TX - 1],
@@ -96,6 +97,7 @@ pub struct TxState {
     /**************/
     /* Attributes */
     /**************/
+    pub is_integrator_valid: BoolTarget,
     pub attributes: TxAttributesTarget,
 }
 
@@ -152,8 +154,10 @@ impl Default for TxState {
             next_margin_asset_index: Target::default(),
             // Default has no margined assets; set from the circuit's `margined_asset_list_size`.
             margined_asset_list_size: 0,
+            signature_schemes: SignatureSchemes::Both,
             first_asset_margin_index: Target::default(),
 
+            is_integrator_valid: BoolTarget::default(),
             attributes: TxAttributesTarget::default(),
         }
     }

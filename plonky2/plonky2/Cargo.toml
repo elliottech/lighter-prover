@@ -3,7 +3,6 @@ name = "plonky2"
 description = "Recursive SNARKs based on PLONK and FRI"
 version = "1.1.0"
 authors = ["Daniel Lubarov <daniel@lubarov.com>", "William Borgeaud <williamborgeaud@gmail.com>", "Nicholas Ward <npward@berkeley.edu>"]
-readme = "README.md"
 edition.workspace = true
 license.workspace = true
 homepage.workspace = true
@@ -40,12 +39,6 @@ plonky2_field = { version = "1.0.0", path = "../field", default-features = false
 plonky2_maybe_rayon = { version = "1.0.0", path = "../maybe_rayon", default-features = false }
 plonky2_util = { version = "1.0.0", path = "../util", default-features = false }
 
-# Plonky3 dependencies for Poseidon2
-p3-poseidon2 = { git = "https://github.com/Plonky3/Plonky3.git", rev = "eeb4e37b20127c4daa871b2bad0df30a7c7380db" }
-p3-goldilocks = { git = "https://github.com/Plonky3/Plonky3.git", rev = "eeb4e37b20127c4daa871b2bad0df30a7c7380db" }
-p3-field = { git = "https://github.com/Plonky3/Plonky3.git", rev = "eeb4e37b20127c4daa871b2bad0df30a7c7380db" }
-p3-symmetric = { git = "https://github.com/Plonky3/Plonky3.git", rev = "eeb4e37b20127c4daa871b2bad0df30a7c7380db" }
-
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 getrandom = { version = "0.2", default-features = false, features = ["js"] }
 
@@ -58,7 +51,7 @@ block = { version = "0.1.6", optional = true }
 criterion = { version = "0.5.1", default-features = false }
 env_logger = { version = "0.9.0", default-features = false }
 num_cpus = { version = "1.14.0", default-features = false }
-rand = { workspace = true, features = ["getrandom"] }
+rand = { workspace = true, features = ["getrandom", "std_rng"] }
 rand_chacha = { version = "0.3.1", default-features = false }
 serde_cbor = { version = "0.11.2" }
 serde_json = { version = "1.0" }

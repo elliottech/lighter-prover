@@ -173,12 +173,20 @@ impl Verify for L2StakeAssetsTxTarget {
         builder.range_check_biguint(&self.lit_amount, MAX_POOL_SHARES_TO_MINT_OR_BURN_LIT_BITS);
         (_, self.lit_amount) = builder.try_trim_biguint(&self.lit_amount, BIG_U64_LIMBS);
 
-        // Check if the entry asset amount fits in the pool share entry asset limit
+        self.is_operator = builder.is_equal(
+            tx_state.accounts[OWNER_ACCOUNT_ID].account_index,
+            tx_state.accounts[SUB_ACCOUNT_ID].master_account_index,
+        );
+        let not_operator_and_enabled = builder.and_not(is_enabled, self.is_operator);
+
+        // Check if the entry asset amount fits in the pool share entry asset limit, only for non-operator
         let lit_amount_target = builder.biguint_to_target_safe(&self.lit_amount);
-        self.new_principal_amount = builder.add(
+        let new_principal_amount = builder.add(
             tx_state.public_pool_share.principal_amount,
             lit_amount_target,
         );
+        self.new_principal_amount =
+            builder.select_or_zero(not_operator_and_enabled, new_principal_amount);
         builder.register_range_check(self.new_principal_amount, MAX_POOL_PRINCIPAL_AMOUNT_BITS);
 
         self.balance_to_mint_shares = builder.mul_biguint_non_carry(
@@ -206,11 +214,6 @@ impl Verify for L2StakeAssetsTxTarget {
             &asset_balance,
         );
 
-        self.is_operator = builder.is_equal(
-            tx_state.accounts[OWNER_ACCOUNT_ID].account_index,
-            tx_state.accounts[SUB_ACCOUNT_ID].master_account_index,
-        );
-
         // If staker is not the operator, then check if the minimum share rate is still
         // going to be satisfied for the pool operator
         {
@@ -228,7 +231,6 @@ impl Verify for L2StakeAssetsTxTarget {
             let big_share_tick = builder.constant_biguint(&BigUint::from(SHARE_TICK));
             let lhs = builder.mul_biguint(&big_new_total_shares, &big_min_operator_share_rate);
             let rhs = builder.mul_biguint(&big_operator_shares, &big_share_tick);
-            let not_operator_and_enabled = builder.and_not(is_enabled, self.is_operator);
             builder.conditional_assert_lte_biguint(not_operator_and_enabled, &lhs, &rhs);
         }
     }

@@ -261,6 +261,7 @@ impl TxHash for L2CreateOrderTxTarget {
 impl Verify for L2CreateOrderTxTarget {
     fn verify(&mut self, builder: &mut Builder, tx_type: &TxTypeTargets, tx_state: &TxState) {
         let is_enabled = tx_type.is_l2_create_order;
+        builder.conditional_assert_true(is_enabled, tx_state.is_integrator_valid);
         self.success = is_enabled;
 
         self.register_range_checks(builder);
@@ -581,6 +582,8 @@ impl Verify for L2CreateOrderTxTarget {
         self.calculated_base_amount = self.base_amount;
 
         let base_amount_is_zero = builder.is_zero(self.base_amount);
+        let zero_base_amount_flag = builder.and(is_enabled, base_amount_is_zero);
+        builder.conditional_assert_one(zero_base_amount_flag, self.reduce_only);
         let not_conditional = builder.not(order_type_target.is_conditional_order);
         let update_calculated_base_amount = builder.and(not_conditional, base_amount_is_zero);
         let position_tied_order_base_amount = tx_state.positions[TAKER_ACCOUNT_ID]

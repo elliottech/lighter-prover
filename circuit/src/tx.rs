@@ -1,6 +1,8 @@
 // Copyright (c) Elliot Technologies, Inc.
 // SPDX-License-Identifier: BUSL-1.1
 
+use p3_field::PrimeCharacteristicRing;
+use p3_goldilocks::Goldilocks;
 use plonky2::field::extension::Extendable;
 use plonky2::field::extension::quintic::QuinticExtension;
 use plonky2::field::types::Field;
@@ -25,6 +27,7 @@ use crate::transactions::internal_settle_binary_options_position::InternalSettle
 use crate::transactions::internal_transfer::InternalTransferTx;
 use crate::transactions::l1_burn_shares::L1BurnSharesTx;
 use crate::transactions::l1_cancel_all_orders::L1CancelAllOrdersTx;
+use crate::transactions::l1_change_ecdsa_pubkey::L1ChangeECDSAPubKeyTx;
 use crate::transactions::l1_change_pubkey::L1ChangePubKeyTx;
 use crate::transactions::l1_create_market::L1CreateMarketTx;
 use crate::transactions::l1_create_order::L1CreateOrderTx;
@@ -38,6 +41,7 @@ use crate::transactions::l2_approve_integrator::L2ApproveIntegratorTx;
 use crate::transactions::l2_burn_shares::L2BurnSharesTx;
 use crate::transactions::l2_cancel_all_orders::L2CancelAllOrdersTx;
 use crate::transactions::l2_cancel_order::L2CancelOrderTx;
+use crate::transactions::l2_change_ecdsa_pubkey::L2ChangeECDSAPubKeyTx;
 use crate::transactions::l2_change_pubkey::L2ChangePubKeyTx;
 use crate::transactions::l2_create_grouped_orders::L2CreateGroupedOrdersTx;
 use crate::transactions::l2_create_market::L2CreateMarketTx;
@@ -62,7 +66,7 @@ use crate::transactions::l2_update_market_config::L2UpdateMarketConfigTx;
 use crate::transactions::l2_update_market_slot::L2UpdateMarketSlotTx;
 use crate::transactions::l2_update_public_pool::L2UpdatePublicPoolTx;
 use crate::transactions::l2_withdraw::L2WithdrawTx;
-use crate::tx_attributes::TxAttributes;
+use crate::tx_attributes::{ATTR_REVOKE_PUB_KEY_WITHOUT_L1_SIGNATURE, TxAttributes};
 use crate::types::account::Account;
 use crate::types::account_asset::AccountAsset;
 use crate::types::account_delta::AccountDelta;
@@ -78,6 +82,7 @@ use crate::types::market_details::{MarketDetails, MarketRiskDetails};
 use crate::types::order::Order;
 use crate::types::order_book_node::OrderBookNode;
 use crate::types::register::RegisterStack;
+use crate::types::signature_slot::EcdsaSignature;
 use crate::types::system_config::SystemConfig;
 
 #[serde_as]
@@ -123,7 +128,11 @@ where
 
     #[serde(rename = "1cp")]
     #[serde(default)]
-    pub l1_change_pub_key_tx: L1ChangePubKeyTx<F>,
+    pub l1_change_pub_key_tx: L1ChangePubKeyTx,
+
+    #[serde(rename = "1cepk")]
+    #[serde(default)]
+    pub l1_change_ecdsa_pub_key_tx: L1ChangeECDSAPubKeyTx,
 
     #[serde(rename = "1b")]
     #[serde(default)]
@@ -144,6 +153,10 @@ where
     #[serde(rename = "2cpk")]
     #[serde(default)]
     pub l2_change_pub_key_tx: L2ChangePubKeyTx<F>,
+
+    #[serde(rename = "2cepk")]
+    #[serde(default)]
+    pub l2_change_ecdsa_pub_key_tx: L2ChangeECDSAPubKeyTx,
 
     #[serde(rename = "2cs")]
     #[serde(default)]
@@ -308,6 +321,13 @@ where
     #[serde(deserialize_with = "deserializers::signature")]
     #[serde(default)]
     pub signature: SchnorrSig,
+
+    /// secp256k1 signature `r || s` (64 bytes) over the personal-sign hash of `tx_hash`,
+    /// set for transactions signed by an ECDSA api key.
+    #[serde(rename = "esig")]
+    #[serde(deserialize_with = "deserializers::deserialize_ecdsa_signature")]
+    #[serde(default)]
+    pub ecdsa_signature: EcdsaSignature,
 
     #[serde(rename = "txh", default)]
     pub tx_hash: Option<[u64; 5]>,
@@ -540,11 +560,41 @@ impl Tx<F> {
         self.tx_type == TX_TYPE_EMPTY
     }
 
+    /// An L2 change pubkey tx (of either scheme) that revokes the slot with the signature of the
+    /// key currently in it. Mirrors `TxTarget::is_revoke_with_old_key`.
+    fn is_revoke_with_old_key(&self) -> bool {
+        let is_revoke = match self.tx_type {
+            TX_TYPE_L2_CHANGE_PUB_KEY => self.l2_change_pub_key_tx.pub_key.is_zero(),
+            TX_TYPE_L2_CHANGE_ECDSA_PUB_KEY => self.l2_change_ecdsa_pub_key_tx.pub_key.is_zero(),
+            _ => false,
+        };
+        let without_l1_signature = self
+            .attributes
+            .attribute_types
+            .iter()
+            .zip(self.attributes.attribute_values.iter())
+            .any(|(t, v)| *t as usize == ATTR_REVOKE_PUB_KEY_WITHOUT_L1_SIGNATURE && *v == 1);
+        is_revoke && without_l1_signature
+    }
+
+    /// Which signature scheme authenticates this slot: the key installed by a change pubkey tx,
+    /// otherwise the api key's own scheme. Mirrors `TxTarget::select_account_ecdsa_pk`.
+    fn slot_is_ecdsa(&self) -> bool {
+        match self.tx_type {
+            TX_TYPE_L2_CHANGE_PUB_KEY => false,
+            TX_TYPE_L2_CHANGE_ECDSA_PUB_KEY => true,
+            _ => self.api_key_before.is_ecdsa(),
+        }
+    }
+
+    /// Schnorr-signed slot: `(account_pk, tx_hash, signature)`; absorbed into the p3-schnorr chain.
     pub fn signature_instance(
         &self,
     ) -> Option<(QuinticExtension<F>, QuinticExtension<F>, SchnorrSig)> {
-        let is_change_pub_key = self.tx_type == TX_TYPE_L2_CHANGE_PUB_KEY;
+        let is_change_pub_key =
+            self.tx_type == TX_TYPE_L2_CHANGE_PUB_KEY && !self.is_revoke_with_old_key();
         let signed = self.tx_hash.is_some()
+            && !self.slot_is_ecdsa()
             && !(is_change_pub_key && self.l2_change_pub_key_tx.pub_key.is_zero());
         if !signed {
             return None;
@@ -557,6 +607,32 @@ impl Tx<F> {
             },
             QuinticExtension(self.tx_hash.unwrap().map(F::from_canonical_u64)),
             self.signature.clone(),
+        ))
+    }
+
+    /// ECDSA-signed slot; absorbed into the p3-ecdsa chain. The signed message is still the
+    /// Poseidon `tx_hash`: p3-ecdsa derives the ECDSA scalar as
+    /// `keccak256(personal_sign_prefix || tx_hash as 5 little-endian u64s)`.
+    pub fn ecdsa_signature_instance(&self) -> Option<p3_ecdsa::EcdsaInstance> {
+        let is_change_pub_key =
+            self.tx_type == TX_TYPE_L2_CHANGE_ECDSA_PUB_KEY && !self.is_revoke_with_old_key();
+        let pub_key = if is_change_pub_key {
+            &self.l2_change_ecdsa_pub_key_tx.pub_key
+        } else {
+            &self.api_key_before.ecdsa_public_key
+        };
+        let signed = self.tx_hash.is_some() && self.slot_is_ecdsa() && !pub_key.is_zero();
+        if !signed {
+            return None;
+        }
+        let point = pub_key
+            .to_point()
+            .expect("ecdsa api key is a valid compressed secp256k1 point");
+        Some(p3_ecdsa::EcdsaInstance::from_parts(
+            self.tx_hash.unwrap().map(Goldilocks::from_u64),
+            &self.ecdsa_signature.r,
+            &self.ecdsa_signature.s,
+            &point,
         ))
     }
 }

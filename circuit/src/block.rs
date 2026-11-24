@@ -6,6 +6,7 @@ use std::fmt;
 use std::sync::{Arc, OnceLock};
 
 use num::BigInt;
+use p3_ecdsa::EcdsaInstance;
 use plonky2::field::extension::Extendable;
 use plonky2::field::extension::quintic::QuinticExtension;
 use plonky2::field::types::Field;
@@ -398,6 +399,11 @@ impl Block<F> {
     ) {
         chunk_signature_batches(&self.tx_chunks)
     }
+
+    /// ECDSA-signed slots of the block, split into (heavy, light) chains.
+    pub fn ecdsa_signature_batches(&self) -> (Vec<EcdsaInstance>, Vec<EcdsaInstance>) {
+        chunk_ecdsa_signature_batches(&self.tx_chunks)
+    }
 }
 
 #[allow(clippy::type_complexity)]
@@ -412,6 +418,26 @@ pub fn chunk_signature_batches(
     for chunk in tx_chunks {
         for tx in chunk {
             let Some(instance) = tx.signature_instance() else {
+                continue;
+            };
+            if tx.tx_circuit_type == TX_LIGHT {
+                light.push(instance);
+            } else {
+                heavy.push(instance);
+            }
+        }
+    }
+    (heavy, light)
+}
+
+pub fn chunk_ecdsa_signature_batches(
+    tx_chunks: &[Vec<Arc<Tx<F>>>],
+) -> (Vec<EcdsaInstance>, Vec<EcdsaInstance>) {
+    let mut heavy = Vec::new();
+    let mut light = Vec::new();
+    for chunk in tx_chunks {
+        for tx in chunk {
+            let Some(instance) = tx.ecdsa_signature_instance() else {
                 continue;
             };
             if tx.tx_circuit_type == TX_LIGHT {

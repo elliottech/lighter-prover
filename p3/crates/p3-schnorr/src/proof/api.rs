@@ -33,16 +33,22 @@ fn preprocessed_for_height(
 }
 
 pub fn schnorr_stark_config() -> SignatureBatchStarkConfig {
+    stark_config_with_fri(PLONKY2_FRI_RATE_BITS, PLONKY2_FRI_NUM_QUERY_ROUNDS)
+}
+
+/// [`schnorr_stark_config`] with its own FRI blowup and query count, for AIRs
+/// whose constraint degree fits a smaller blowup.
+pub fn stark_config_with_fri(log_blowup: usize, num_queries: usize) -> SignatureBatchStarkConfig {
     let perm = default_goldilocks_poseidon2_16();
     let hash = Hash::new(perm.clone());
     let compress = Compress::new(perm.clone());
     let val_mmcs = ValMmcs::new(hash, compress, PLONKY2_FRI_CAP_HEIGHT);
     let challenge_mmcs = ChallengeMmcs::new(val_mmcs.clone());
     let fri_params = FriParameters {
-        log_blowup: PLONKY2_FRI_RATE_BITS,
+        log_blowup,
         log_final_poly_len: PLONKY2_FRI_FINAL_POLY_BITS,
         max_log_arity: PLONKY2_FRI_REDUCTION_ARITY_BITS,
-        num_queries: PLONKY2_FRI_NUM_QUERY_ROUNDS,
+        num_queries,
         commit_proof_of_work_bits: 0,
         query_proof_of_work_bits: PLONKY2_FRI_PROOF_OF_WORK_BITS,
         mmcs: challenge_mmcs,

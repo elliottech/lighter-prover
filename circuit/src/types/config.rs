@@ -15,6 +15,34 @@ pub type F = GoldilocksField;
 pub type Builder = CircuitBuilder<F, D>;
 pub type PoseidonHash = <C as GenericConfig<D>>::InnerHasher;
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum SignatureSchemes {
+    Schnorr,                // Only Schnorr signatures are allowed
+    Ecdsa,                  // Only ECDSA signatures are allowed
+    SchnorrWithEcdsaVerify, // Accept both signature schemes, but don't allow new ECDSA keys
+    EcdsaWithSchnorrVerify, // Accept both signature schemes, but don't allow new Schnorr keys
+    #[default]
+    Both,
+}
+
+impl SignatureSchemes {
+    pub fn schnorr_signature_enabled(self) -> bool {
+        self != Self::Ecdsa
+    }
+
+    pub fn ecdsa_signature_enabled(self) -> bool {
+        self != Self::Schnorr
+    }
+
+    pub fn can_create_schnorr_keys(self) -> bool {
+        self == Self::Schnorr || self == Self::SchnorrWithEcdsaVerify || self == Self::Both
+    }
+
+    pub fn can_create_ecdsa_keys(self) -> bool {
+        self == Self::Ecdsa || self == Self::EcdsaWithSchnorrVerify || self == Self::Both
+    }
+}
+
 // To be used by const fields
 #[inline]
 pub const fn const_f(val: u64) -> F {

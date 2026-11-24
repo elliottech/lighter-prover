@@ -116,6 +116,7 @@ impl Verify for L2CancelOrderTxTarget {
             builder.is_equal(tx_state.account_order.index_1, self.index);
         let is_valid_index = builder.or(is_valid_order_index, is_valid_client_order_index);
         builder.conditional_assert_true(is_enabled, is_valid_index);
+        builder.conditional_assert_not_zero(is_enabled, self.index);
 
         // If the order is empty, sequencer can give random order index(any order index that belongs to an empty order). But because order is empty,
         // "self.success" will still be false because "is_account_order_present" is false.

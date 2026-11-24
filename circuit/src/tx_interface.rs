@@ -25,8 +25,8 @@ where
         Self { inner: tx }
     }
 
-    pub fn apply(&mut self, builder: &mut Builder, tx_state: &mut TxState) -> BoolTarget {
-        self.inner.apply(builder, tx_state)
+    pub fn apply(&mut self, builder: &mut Builder, tx_state: &mut TxState) {
+        let _ = self.inner.apply(builder, tx_state); // ignore returned value
     }
 
     pub fn verify(&mut self, builder: &mut Builder, tx_type: &TxTypeTargets, tx_state: &TxState) {

@@ -16,6 +16,7 @@ use crate::bigint::big_u16::{
 use crate::bigint::bigint::{BigIntTarget, CircuitBuilderBigInt, SignTarget, WitnessBigInt};
 use crate::bigint::biguint::CircuitBuilderBiguint;
 use crate::bigint::comparison::CircuitBuilderBiguintSubtractiveComparison;
+use crate::bigint::div_rem::CircuitBuilderBiguintDivRem;
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::circuit_logger::CircuitBuilderLogging;
 use crate::comparison::CircuitBuilderSubtractiveComparison;
@@ -26,9 +27,8 @@ use crate::signed::signed_target::{CircuitBuilderSigned, SignedTarget};
 use crate::types::config::{BIG_U96_LIMBS, BIGU16_U64_LIMBS, Builder, F};
 use crate::types::constants::{
     CROSS_MARGIN, ENTRY_QUOTE_BITS, INSURANCE_FUND_ACCOUNT_TYPE, MARGIN_FRACTION_BITS, MARGIN_SET,
-    MAX_ORDER_BASE_AMOUNT, NIL_PUBLIC_MARKET_INDEX, ORDER_PRICE_BITS, POSITION_LIST_SIZE_BITS,
-    POSITION_SIZE_BITS, PUBLIC_POOL_ACCOUNT_TYPE, QUOTE_MULTIPLIER_BITS,
-    USDC_TO_COLLATERAL_MULTIPLIER,
+    MAX_ORDER_BASE_AMOUNT, NIL_PUBLIC_MARKET_INDEX, POSITION_LIST_SIZE_BITS, POSITION_SIZE_BITS,
+    PUBLIC_POOL_ACCOUNT_TYPE, QUOTE_MULTIPLIER_BITS, USDC_TO_COLLATERAL_MULTIPLIER,
 };
 use crate::types::market_details::MarketRiskDetailsTarget;
 use crate::utils::CircuitBuilderUtils;
@@ -288,11 +288,13 @@ impl AccountPositionTarget {
 
         let (max_order_quote_amount_div_quote_multiplier, _) =
             builder.div_rem(order_quote_limit, quote_multiplier, QUOTE_MULTIPLIER_BITS);
-        let (max_base_amount_for_quote, _) = builder.div_rem(
-            max_order_quote_amount_div_quote_multiplier,
-            price,
-            ORDER_PRICE_BITS,
-        );
+        let max_order_quote_amount_div_quote_multiplier_big =
+            builder.target_to_biguint(max_order_quote_amount_div_quote_multiplier);
+        let price_big = builder.target_to_biguint(price);
+        let max_base_amount_for_quote_big =
+            builder.div_biguint(&max_order_quote_amount_div_quote_multiplier_big, &price_big);
+        let max_base_amount_for_quote =
+            builder.biguint_to_target_unsafe(&max_base_amount_for_quote_big);
 
         builder.min(
             &[
@@ -312,11 +314,19 @@ impl AccountPositionTarget {
             &usdc_to_collateral_multiplier,
             BIG_U96_LIMBS,
         );
+        let is_entry_quote_nonzero = builder.is_not_zero(self.entry_quote);
+        let negated_position_sign = builder.negate_sign(self.position.sign);
         let aggregated_entry_quote = BigIntTarget {
             abs: builder.target_to_biguint(self.entry_quote),
-            sign: builder.negate_sign(self.position.sign),
+            sign: SignTarget::new_unsafe(
+                builder.mul(is_entry_quote_nonzero.target, negated_position_sign.target),
+            ),
         };
-        builder.add_bigint_non_carry(&aggregated_usdc, &aggregated_entry_quote, BIG_U96_LIMBS)
+        let aggregated_usdc =
+            builder.add_bigint_non_carry(&aggregated_usdc, &aggregated_entry_quote, BIG_U96_LIMBS);
+        let is_position_zero = builder.is_zero_bigint_u16(&self.position);
+        let is_position_nonzero = builder.not(is_position_zero);
+        builder.mul_bigint_by_bool(&aggregated_usdc, is_position_nonzero)
     }
 
     pub fn is_valid(&self, builder: &mut Builder) -> BoolTarget {

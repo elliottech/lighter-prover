@@ -232,6 +232,9 @@ where
 
     pub signature_digest_state_before: [F; P3_DIGEST_STATE_WIDTH],
     pub signed_count_before: F,
+
+    pub ecdsa_signature_digest_state_before: [F; P3_DIGEST_STATE_WIDTH],
+    pub ecdsa_signed_count_before: F,
 }
 
 #[derive(Debug, Clone)]
@@ -263,6 +266,12 @@ where
     pub signature_digest_state_after: [F; P3_DIGEST_STATE_WIDTH],
     pub signed_count_before: F,
     pub signed_count_after: F,
+    pub created_at: F,
+
+    pub ecdsa_signature_digest_state_before: [F; P3_DIGEST_STATE_WIDTH],
+    pub ecdsa_signature_digest_state_after: [F; P3_DIGEST_STATE_WIDTH],
+    pub ecdsa_signed_count_before: F,
+    pub ecdsa_signed_count_after: F,
 }
 
 impl<F> BlockTxWitness<F>
@@ -302,7 +311,14 @@ where
         let digest_state_after_start = digest_state_before_start + P3_DIGEST_STATE_WIDTH;
         let signed_count_before_index = digest_state_after_start + P3_DIGEST_STATE_WIDTH;
         let signed_count_after_index = signed_count_before_index + 1;
-        let total_pis_size = signed_count_after_index + 1;
+        let created_at_index = signed_count_after_index + 1;
+        let ecdsa_digest_state_before_start = created_at_index + 1;
+        let ecdsa_digest_state_after_start =
+            ecdsa_digest_state_before_start + P3_DIGEST_STATE_WIDTH;
+        let ecdsa_signed_count_before_index =
+            ecdsa_digest_state_after_start + P3_DIGEST_STATE_WIDTH;
+        let ecdsa_signed_count_after_index = ecdsa_signed_count_before_index + 1;
+        let total_pis_size = ecdsa_signed_count_after_index + 1;
 
         assert_eq!(
             public_inputs.len(),
@@ -354,6 +370,16 @@ where
             }),
             signed_count_before: public_inputs[signed_count_before_index],
             signed_count_after: public_inputs[signed_count_after_index],
+            created_at: public_inputs[created_at_index],
+
+            ecdsa_signature_digest_state_before: core::array::from_fn(|i| {
+                public_inputs[ecdsa_digest_state_before_start + i]
+            }),
+            ecdsa_signature_digest_state_after: core::array::from_fn(|i| {
+                public_inputs[ecdsa_digest_state_after_start + i]
+            }),
+            ecdsa_signed_count_before: public_inputs[ecdsa_signed_count_before_index],
+            ecdsa_signed_count_after: public_inputs[ecdsa_signed_count_after_index],
         }
     }
 }
@@ -384,6 +410,12 @@ pub struct BlockTxWitnessTarget {
     pub signature_digest_state_after: [Target; P3_DIGEST_STATE_WIDTH],
     pub signed_count_before: Target,
     pub signed_count_after: Target,
+    pub created_at: Target,
+
+    pub ecdsa_signature_digest_state_before: [Target; P3_DIGEST_STATE_WIDTH],
+    pub ecdsa_signature_digest_state_after: [Target; P3_DIGEST_STATE_WIDTH],
+    pub ecdsa_signed_count_before: Target,
+    pub ecdsa_signed_count_after: Target,
 }
 
 impl BlockTxWitnessTarget {
@@ -419,7 +451,16 @@ impl BlockTxWitnessTarget {
         let digest_state_after_start = digest_state_before_start + P3_DIGEST_STATE_WIDTH;
         let signed_count_before_index = digest_state_after_start + P3_DIGEST_STATE_WIDTH;
         let signed_count_after_index = signed_count_before_index + 1;
-        let total_pis_size = signed_count_after_index + 1;
+        let created_at_index = signed_count_after_index + 1;
+
+        let ecdsa_signature_digest_state_before_start = created_at_index + 1;
+        let ecdsa_signature_digest_state_after_start =
+            ecdsa_signature_digest_state_before_start + P3_DIGEST_STATE_WIDTH;
+        let ecdsa_signed_count_before_index =
+            ecdsa_signature_digest_state_after_start + P3_DIGEST_STATE_WIDTH;
+        let ecdsa_signed_count_after_index = ecdsa_signed_count_before_index + 1;
+
+        let total_pis_size = ecdsa_signed_count_after_index + 1;
 
         assert_eq!(
             pis.len(),
@@ -475,6 +516,16 @@ impl BlockTxWitnessTarget {
             }),
             signed_count_before: pis[signed_count_before_index],
             signed_count_after: pis[signed_count_after_index],
+            created_at: pis[created_at_index],
+
+            ecdsa_signature_digest_state_before: core::array::from_fn(|i| {
+                pis[ecdsa_signature_digest_state_before_start + i]
+            }),
+            ecdsa_signature_digest_state_after: core::array::from_fn(|i| {
+                pis[ecdsa_signature_digest_state_after_start + i]
+            }),
+            ecdsa_signed_count_before: pis[ecdsa_signed_count_before_index],
+            ecdsa_signed_count_after: pis[ecdsa_signed_count_after_index],
         }
     }
 }

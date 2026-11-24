@@ -45,6 +45,3 @@ pub fn prewarm_streamed_buffers(_leaf_count: usize) {}
 /// archive directory unconditionally on platforms without the Metal backend.
 #[cfg(not(all(feature = "std", target_arch = "aarch64", target_os = "macos")))]
 pub fn set_pipeline_archive_dir(_dir: &std::path::Path) {}
-
-#[cfg(test)]
-pub mod p3;

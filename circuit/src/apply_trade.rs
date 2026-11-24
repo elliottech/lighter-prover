@@ -12,7 +12,6 @@ use crate::bigint::comparison::CircuitBuilderBiguintSubtractiveComparison;
 use crate::bigint::div_rem::CircuitBuilderBiguintDivRem;
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::comparison::CircuitBuilderSubtractiveComparison;
-use crate::hints::CircuitBuilderHints;
 use crate::liquidation::get_funding_delta_for_position_and_market;
 use crate::signed::signed_target::{CircuitBuilderSigned, SignedTarget};
 use crate::types::account_position::{AccountPositionTarget, get_position_unrealized_pnl};
@@ -76,12 +75,13 @@ pub fn apply_spot_trade(
     builder.conditional_assert_false(is_enabled, is_fee_negative);
 
     let fee_tick = builder.constant_u64(FEE_TICK);
-    let (base_fee_multiplier, _) =
-        builder.div_rem(input.market.size_extension_multiplier, fee_tick, FEE_BITS);
-    let base_fee_multiplier = builder.target_to_biguint(base_fee_multiplier);
-    let (quote_fee_multiplier, _) =
-        builder.div_rem(input.market.quote_extension_multiplier, fee_tick, FEE_BITS);
-    let quote_fee_multiplier = builder.target_to_biguint(quote_fee_multiplier);
+    let fee_tick_big = builder.target_to_biguint_single_limb_unsafe(fee_tick);
+    let size_extension_multiplier_big =
+        builder.target_to_biguint(input.market.size_extension_multiplier);
+    let base_fee_multiplier = builder.div_biguint(&size_extension_multiplier_big, &fee_tick_big);
+    let quote_extension_multiplier_big =
+        builder.target_to_biguint(input.market.quote_extension_multiplier);
+    let quote_fee_multiplier = builder.div_biguint(&quote_extension_multiplier_big, &fee_tick_big);
 
     let trade_base = builder.select(is_enabled, input.trade_base, zero);
     let base_delta = builder.target_to_biguint(trade_base);
@@ -422,7 +422,7 @@ pub fn apply_perps_trade(
         sign: sign_taker_fee,
     };
     let new_taker_fee = BigIntTarget {
-        abs: builder.mul_biguint_non_carry(&trade_quote_big.abs, &taker_fee_big.abs, BIG_U64_LIMBS),
+        abs: builder.mul_biguint_non_carry(&trade_quote_big.abs, &taker_fee_big.abs, BIG_U96_LIMBS),
         sign: SignTarget::new_unsafe(
             builder.mul(trade_quote_big.sign.target, taker_fee_big.sign.target),
         ),
@@ -434,7 +434,7 @@ pub fn apply_perps_trade(
         sign: sign_maker_fee,
     };
     let new_maker_fee = BigIntTarget {
-        abs: builder.mul_biguint_non_carry(&trade_quote_big.abs, &maker_fee_big.abs, BIG_U64_LIMBS),
+        abs: builder.mul_biguint_non_carry(&trade_quote_big.abs, &maker_fee_big.abs, BIG_U96_LIMBS),
         sign: SignTarget::new_unsafe(
             builder.mul(trade_quote_big.sign.target, maker_fee_big.sign.target),
         ),
@@ -445,7 +445,7 @@ pub fn apply_perps_trade(
     maker_collateral_delta =
         builder.sub_bigint_non_carry(&maker_collateral_delta, &new_maker_fee, BIG_U96_LIMBS);
     let fee_collateral_delta =
-        builder.add_bigint_non_carry(&new_taker_fee, &new_maker_fee, BIG_U64_LIMBS);
+        builder.add_bigint_non_carry(&new_taker_fee, &new_maker_fee, BIG_U96_LIMBS);
     // Assert that fee collateral delta is non-negative
     builder.assert_bool(BoolTarget::new_unsafe(fee_collateral_delta.sign.target));
 
@@ -722,8 +722,10 @@ pub fn calculate_position_change(
     let (abs_trade_quote, trade_quote_sign) = builder.abs(trade_quote);
     let trade_quote_is_positive = builder.is_sign_positive(trade_quote_sign);
 
-    let (trade_quote_div_trade_base, _) =
-        builder.div_rem(abs_trade_quote, trade_base, ORDER_BASE_AMOUNT_BITS);
+    let abs_trade_quote_big = builder.target_to_biguint(abs_trade_quote);
+    let trade_base_big = builder.target_to_biguint(trade_base);
+    let trade_quote_div_trade_base = builder.div_biguint(&abs_trade_quote_big, &trade_base_big);
+    let trade_quote_div_trade_base = builder.biguint_to_target_unsafe(&trade_quote_div_trade_base);
     let new_entry_quote_0 = builder.mul(trade_quote_div_trade_base, abs_new_position);
     let new_entry_quote_0 = builder.select(trade_quote_is_positive, new_entry_quote_0, zero);
 
@@ -739,6 +741,13 @@ pub fn calculate_position_change(
     let entry_quote_times_new_position =
         builder.mul_biguint_non_carry(&entry_quote_big, &abs_new_position_big, BIG_U128_LIMBS);
     let abs_old_position_big = builder.target_to_biguint(abs_old_position);
+    let is_position_reduced = builder.and_not(is_position_sign_same, is_delta_sign_same);
+    let zero_biguint = builder.zero_biguint();
+    let entry_quote_times_new_position = builder.select_biguint(
+        is_position_reduced,
+        &entry_quote_times_new_position,
+        &zero_biguint,
+    );
     // The quotient must fit a single target; constrain it to two limbs directly.
     let new_entry_quote_2 = builder.div_biguint_trimmed(
         &entry_quote_times_new_position,
@@ -982,10 +991,16 @@ pub fn calculate_isolated_margin_change(
             sign: old_total_market_value.sign, // Ignore the case where position is zero, because if it is zero, it will be discarded
         };
 
+        let old_total_market_value_times_position_abs = builder.select_biguint(
+            is_open_interest_decreased,
+            &old_total_market_value_times_position.abs,
+            &zero_biguint,
+        );
+
         // Ceil divs won't work as expected for negative target_position_value but because we will select position_requirement in that case, it is fine
         let target_position_value = BigIntTarget {
             abs: builder.ceil_div_biguint(
-                &old_total_market_value_times_position.abs,
+                &old_total_market_value_times_position_abs,
                 &old_position_abs_big,
             ),
             sign: old_total_market_value_times_position.sign,
@@ -1301,8 +1316,10 @@ pub fn apply_binary_options_trade(
     let fees_enabled = builder.or(taker_fee_non_zero, maker_fee_non_zero);
 
     let fee_tick = builder.constant_u64(FEE_TICK);
-    let (quote_fee_multiplier, _) =
-        builder.div_rem(input.market.quote_extension_multiplier, fee_tick, FEE_BITS);
+    let fee_tick_big = builder.target_to_biguint_single_limb_unsafe(fee_tick);
+    let quote_multiplier_big = builder.target_to_biguint(input.market.quote_extension_multiplier);
+    let quote_fee_multiplier_big = builder.div_biguint(&quote_multiplier_big, &fee_tick_big);
+    let quote_fee_multiplier = builder.biguint_to_target_unsafe(&quote_fee_multiplier_big);
     // The maker fee may be negative (a rebate), so the deltas are computed on the absolute fees and
     // carry the fee's sign; the trade quote is non-negative
     let [taker_fee_delta, maker_fee_delta] = [input.taker_fee, input.maker_fee].map(|fee| {
@@ -1322,7 +1339,6 @@ pub fn apply_binary_options_trade(
         }
     });
 
-    let quote_multiplier_big = builder.target_to_biguint(input.market.quote_extension_multiplier);
     let [mut taker_usdc_delta, mut maker_usdc_delta] = [
         (&taker_quote_delta, &taker_fee_delta),
         (&maker_quote_delta, &maker_fee_delta),

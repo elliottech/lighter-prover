@@ -132,12 +132,20 @@ pub const EMPTY_ORDER_BOOK_TREE_ROOT: HashOut<F> = const_hash_out([
     18095351966852921172,
 ]);
 
+pub const EMPTY_ACCOUNT_PARTIAL_PUB_DATA_HASH: HashOut<F> = const_hash_out([
+    1813844735687334908,
+    10926190588188310074,
+    17566780746107660321,
+    5260784227071759168,
+]);
+
 /// Tx Types
 pub const TX_TYPE_EMPTY: u8 = 0;
 
 // L1
 pub const TX_TYPE_L1_DEPOSIT: u8 = 1;
 pub const TX_TYPE_L1_CHANGE_PUB_KEY: u8 = 2;
+pub const TX_TYPE_L1_CHANGE_ECDSA_PUB_KEY: u8 = 55;
 pub const TX_TYPE_L1_CREATE_MARKET: u8 = 3;
 pub const TX_TYPE_L1_UPDATE_MARKET: u8 = 4;
 pub const TX_TYPE_L1_CANCEL_ALL_ORDERS: u8 = 5;
@@ -180,6 +188,7 @@ pub const TX_TYPE_L2_CREATE_MARKET: u8 = 49;
 pub const TX_TYPE_L2_SETTLE_OUTCOME: u8 = 50;
 pub const TX_TYPE_L2_UPDATE_MARKET: u8 = 52;
 pub const TX_TYPE_L2_UPDATE_MARKET_SLOT: u8 = 53;
+pub const TX_TYPE_L2_CHANGE_ECDSA_PUB_KEY: u8 = 54;
 
 // Internal
 pub const TX_TYPE_INTERNAL_CLAIM_ORDER: u8 = 21;
@@ -207,6 +216,7 @@ pub const PRIORITY_PUB_DATA_TYPE_L1_REGISTER_ASSET: u8 = 69;
 pub const PRIORITY_PUB_DATA_TYPE_L1_UPDATE_ASSET: u8 = 70;
 pub const PRIORITY_PUB_DATA_TYPE_L1_UNSTAKE_ASSETS: u8 = 71;
 pub const PRIORITY_PUB_DATA_TYPE_L1_SET_SYSTEM_CONFIG: u8 = 72;
+pub const PRIORITY_PUB_DATA_TYPE_L1_CHANGE_ECDSA_PUB_KEY: u8 = 73;
 
 // On Chain Log Pubdata
 pub const ON_CHAIN_PUB_DATA_TYPE_WITHDRAW: u8 = 2;
@@ -278,6 +288,7 @@ pub const NB_STRATEGIES: usize = 1 << STRATEGY_INDEX_BITS;
 
 pub const TREASURY_ACCOUNT_INDEX: usize = 0;
 pub const INSURANCE_FUND_OPERATOR_ACCOUNT_INDEX: usize = 1;
+pub const RESERVED_SYSTEM_ACCOUNT_INDEX: usize = 2; // Reserved, not registered yet
 
 pub const MAX_INDEX_PRICE_DIVIDER: u64 = (1 << 56) - 1;
 pub const MAX_ASSET_PRICE_BITS: usize = 56;

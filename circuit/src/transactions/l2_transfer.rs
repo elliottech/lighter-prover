@@ -213,20 +213,62 @@ impl Verify for L2TransferTxTarget {
             builder.multi_and(&[is_same_account, is_account_unified, is_asset_universal]);
         builder.conditional_assert_false(is_enabled, should_be_false);
 
-        // Treasury account cannot transfer to non-treasury accounts
-        let is_sender_treasury_account = builder.is_equal_constant(
-            tx_state.accounts[SENDER_ACCOUNT_ID].master_account_index,
-            TREASURY_ACCOUNT_INDEX as u64,
+        let is_receiver_public_pool = builder.is_equal_constant(
+            tx_state.accounts[RECEIVER_ACCOUNT_ID].account_type,
+            PUBLIC_POOL_ACCOUNT_TYPE as u64,
         );
+        let is_receiver_insurance_fund = builder.is_equal_constant(
+            tx_state.accounts[RECEIVER_ACCOUNT_ID].account_type,
+            INSURANCE_FUND_ACCOUNT_TYPE as u64,
+        );
+        let is_receiver_pool_account =
+            builder.or(is_receiver_public_pool, is_receiver_insurance_fund);
+        let is_receiver_staking_pool = builder.is_equal_constant(
+            tx_state.accounts[RECEIVER_ACCOUNT_ID].account_type,
+            LIGHTER_STAKING_POOL_ACCOUNT_TYPE as u64,
+        );
+
         let is_sender_and_receiver_same_master_account = builder.is_equal(
             tx_state.accounts[SENDER_ACCOUNT_ID].master_account_index,
             tx_state.accounts[RECEIVER_ACCOUNT_ID].master_account_index,
         );
-        let is_sender_treasury_account_and_enabled =
-            builder.and(is_enabled, is_sender_treasury_account);
-        builder.conditional_assert_true(
-            is_sender_treasury_account_and_enabled,
+        let is_receiver_any_pool = builder.or(is_receiver_pool_account, is_receiver_staking_pool);
+        let is_same_master_to_non_pool_account = builder.and_not(
             is_sender_and_receiver_same_master_account,
+            is_receiver_any_pool,
+        );
+
+        // System owned accounts can only send to their owner's master or sub accounts
+        let is_sender_treasury_owned = builder.is_equal_constant(
+            tx_state.accounts[SENDER_ACCOUNT_ID].master_account_index,
+            TREASURY_ACCOUNT_INDEX as u64,
+        );
+        let is_sender_insurance_fund_operator_owned = builder.is_equal_constant(
+            tx_state.accounts[SENDER_ACCOUNT_ID].master_account_index,
+            INSURANCE_FUND_OPERATOR_ACCOUNT_INDEX as u64,
+        );
+        let is_sender_system_owned = builder.or(
+            is_sender_treasury_owned,
+            is_sender_insurance_fund_operator_owned,
+        );
+        let is_sender_system_owned_and_enabled = builder.and(is_enabled, is_sender_system_owned);
+        builder.conditional_assert_true(
+            is_sender_system_owned_and_enabled,
+            is_same_master_to_non_pool_account,
+        );
+
+        // Treasury sub accounts can only send to the treasury master account itself
+        let is_sender_treasury_sub_account = builder.is_equal_constant(
+            tx_state.accounts[SENDER_ACCOUNT_ID].account_type,
+            TREASURY_SUB_ACCOUNT_TYPE as u64,
+        );
+        let is_sender_treasury_sub_account_and_enabled =
+            builder.and(is_enabled, is_sender_treasury_sub_account);
+        let treasury_account_index = builder.constant_u64(TREASURY_ACCOUNT_INDEX as u64);
+        builder.conditional_assert_eq(
+            is_sender_treasury_sub_account_and_enabled,
+            self.to_account_index,
+            treasury_account_index,
         );
 
         // Transfer amount checks - not zero, 60 bits max, gte min transfer amount (except for sub account transfer)
@@ -265,17 +307,6 @@ impl Verify for L2TransferTxTarget {
 
         // Only allow usdc perps transfers to pools, and lit spot transfers to staking pools
         {
-            let is_receiver_public_pool = builder.is_equal_constant(
-                tx_state.accounts[RECEIVER_ACCOUNT_ID].account_type,
-                PUBLIC_POOL_ACCOUNT_TYPE as u64,
-            );
-            let is_receiver_insurance_fund = builder.is_equal_constant(
-                tx_state.accounts[RECEIVER_ACCOUNT_ID].account_type,
-                INSURANCE_FUND_ACCOUNT_TYPE as u64,
-            );
-            let is_receiver_pool_account =
-                builder.or(is_receiver_public_pool, is_receiver_insurance_fund);
-
             // Pool can receive transfers only when it's active with 0 shares only in Perps USDC
             let is_receiver_active_pool = builder.is_equal_constant(
                 tx_state.accounts[RECEIVER_ACCOUNT_ID]
@@ -288,11 +319,8 @@ impl Verify for L2TransferTxTarget {
             let is_invalid_pool_transfer =
                 builder.and_not(is_receiver_pool_account, is_valid_receiver_pool);
             builder.conditional_assert_false(is_enabled, is_invalid_pool_transfer);
+            builder.conditional_assert_false(is_enabled, is_receiver_public_pool);
 
-            let is_receiver_staking_pool = builder.is_equal_constant(
-                tx_state.accounts[RECEIVER_ACCOUNT_ID].account_type,
-                LIGHTER_STAKING_POOL_ACCOUNT_TYPE as u64,
-            );
             let is_valid_receiver_staking_pool =
                 builder.multi_and(&[is_receiver_active_pool, is_to_spot, is_lit_asset]);
             let is_invalid_staking_pool_transfer =
@@ -317,7 +345,7 @@ impl Verify for L2TransferTxTarget {
                 LIGHTER_STAKING_POOL_ACCOUNT_TYPE as u64,
             );
 
-            // Pool can transfer outside only when it's frozen with 0 shares only in Perps USDC
+            // Pool can transfer only to its owner's master or sub accounts, when it's frozen with 0 shares only in Perps USDC
             let is_frozen_sender = builder.is_equal_constant(
                 tx_state.accounts[SENDER_ACCOUNT_ID].public_pool_info.status,
                 FROZEN_PUBLIC_POOL as u64,
@@ -328,6 +356,7 @@ impl Verify for L2TransferTxTarget {
                     .total_shares,
             );
             let is_valid_sender_pool = builder.multi_and(&[
+                is_same_master_to_non_pool_account,
                 is_frozen_sender,
                 zero_shares_pool,
                 is_from_perps,
@@ -337,8 +366,9 @@ impl Verify for L2TransferTxTarget {
                 builder.and_not(is_sender_pool_account, is_valid_sender_pool);
             builder.conditional_assert_false(is_enabled, is_invalid_pool_transfer);
 
-            // Staking pool can transfer outside only when it's frozen with 0 shares only in Lit Spot
+            // Staking pool can transfer only to its owner's master or sub accounts, when it's frozen with 0 shares only in Lit Spot
             let is_valid_sender_staking_pool = builder.multi_and(&[
+                is_same_master_to_non_pool_account,
                 is_frozen_sender,
                 zero_shares_pool,
                 is_from_spot,

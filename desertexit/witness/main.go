@@ -5,14 +5,15 @@ package main
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math/big"
 	"os"
 	"sort"
+	"strings"
 
 	p2 "github.com/elliottech/poseidon_crypto/hash/poseidon2_goldilocks_plonky2"
-	eth "github.com/ethereum/go-ethereum/common"
 )
 
 func main() {
@@ -26,8 +27,8 @@ func main() {
 		panic(fmt.Sprintf("failed to unmarshal desertinput.json: %v", err))
 	}
 	accountIndex := input.AccountIndex
-	if accountIndex < 0 || accountIndex >= MaxAccountIndex {
-		panic(fmt.Sprintf("invalid account index %d, must be between 0 and %d", accountIndex, MaxAccountIndex-1))
+	if accountIndex < 0 || accountIndex > MaxAccountIndex {
+		panic(fmt.Sprintf("invalid account index %d, must be between 0 and %d", accountIndex, MaxAccountIndex))
 	}
 	assetIndex := input.AssetIndex
 	if assetIndex < MinAssetIndex || assetIndex > MaxAssetIndex {
@@ -194,7 +195,14 @@ func main() {
 	}
 
 	accountPubDataTreeRoot, _ := p2.HashOutFromLittleEndianBytes(accountPubDataTree.Root())
-	lastValidiumRoot, _ := p2.HashOutFromLittleEndianBytes(eth.Hex2Bytes(input.LastValidiumRoot))
+	validiumRootBytes, err := hex.DecodeString(strings.TrimPrefix(input.LastValidiumRoot, "0x"))
+	if err != nil {
+		panic(fmt.Sprintf("failed to decode last validium root, err: %v", err))
+	}
+	lastValidiumRoot, err := p2.HashOutFromLittleEndianBytes(validiumRootBytes)
+	if err != nil {
+		panic(fmt.Sprintf("failed to convert last validium root to field elements, err: %v", err))
+	}
 	allPublicMarketDetailsHash := allPublicMarketDetailsHash(allPublicMarketDetails)
 
 	marketPubDataTree := newMarketPubDataTree(marketPubDatas)

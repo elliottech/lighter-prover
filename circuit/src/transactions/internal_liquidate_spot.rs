@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 use anyhow::Result;
+use num::{BigUint, FromPrimitive};
 use plonky2::field::types::{Field, PrimeField64};
 use plonky2::iop::target::{BoolTarget, Target};
 use plonky2::iop::witness::Witness;
@@ -43,6 +44,8 @@ pub struct InternalLiquidateSpotTxTarget {
     pub base_amount: Target,
 
     // helper
+    zero_price: Target,
+
     // outputs
     success: BoolTarget,
 }
@@ -56,6 +59,8 @@ impl InternalLiquidateSpotTxTarget {
             base_amount: builder.add_virtual_target(),
 
             // helper
+            zero_price: Target::default(),
+
             // outputs
             success: BoolTarget::default(),
         }
@@ -80,11 +85,7 @@ impl InternalLiquidateSpotTxTarget {
             ),
             pending_client_order_index: builder.constant_i64(NIL_CLIENT_ORDER_INDEX),
             pending_initial_size: self.base_amount,
-            pending_price: get_asset_zero_price(
-                builder,
-                &tx_state.market,
-                &tx_state.margined_asset[TX_ASSET_ID],
-            ),
+            pending_price: self.zero_price,
             pending_nonce: tx_state.market.ask_nonce,
             pending_is_ask: builder._true(),
             pending_type: builder.constant_from_u8(LIQUIDATION_ORDER),
@@ -158,6 +159,10 @@ impl Verify for InternalLiquidateSpotTxTarget {
         let is_base_asset_universal =
             is_universal_asset(builder, tx_state.asset_indices[BASE_ASSET_ID]);
         builder.conditional_assert_false(is_enabled, is_base_asset_universal);
+        builder.conditional_assert_true(
+            is_enabled,
+            tx_state.is_asset_used_as_margin[TAKER_ACCOUNT_ID][BASE_ASSET_ID],
+        );
 
         let is_quote_asset_empty = tx_state.assets[QUOTE_ASSET_ID].is_empty(builder);
         builder.conditional_assert_false(is_enabled, is_quote_asset_empty);
@@ -189,6 +194,7 @@ impl Verify for InternalLiquidateSpotTxTarget {
         builder.conditional_assert_false(is_enabled, is_margin_balance_negative);
         let base_amount = builder.target_to_biguint(self.base_amount);
         builder.range_check_biguint(&base_amount, ORDER_BASE_AMOUNT_BITS);
+        builder.conditional_assert_not_zero(is_enabled, self.base_amount);
         let multiplier = builder.target_to_biguint(tx_state.market.size_extension_multiplier);
         let base_amount_extended =
             builder.mul_biguint_non_carry(&base_amount, &multiplier, BIG_U96_LIMBS);
@@ -205,6 +211,17 @@ impl Verify for InternalLiquidateSpotTxTarget {
             .cross_risk_parameters
             .is_in_liquidation(builder);
         builder.conditional_assert_true(is_enabled, is_in_liquidation);
+
+        self.zero_price = get_asset_zero_price(
+            builder,
+            &tx_state.market,
+            &tx_state.margined_asset[TX_ASSET_ID],
+        );
+        let zero_price_big = builder.target_to_biguint_single_limb_unsafe(self.zero_price);
+        let quote_big = builder.mul_biguint(&base_amount, &zero_price_big);
+        let max_quote_amount_big =
+            builder.constant_biguint(&BigUint::from_u64(MAX_ORDER_QUOTE_AMOUNT).unwrap());
+        builder.conditional_assert_lte_biguint(is_enabled, &quote_big, &max_quote_amount_big);
     }
 }
 

@@ -3,7 +3,6 @@ name = "starky"
 description = "Implementation of STARKs"
 version = "1.1.0"
 authors = ["Daniel Lubarov <daniel@lubarov.com>", "William Borgeaud <williamborgeaud@gmail.com>"]
-readme = "README.md"
 edition.workspace = true
 license.workspace = true
 homepage.workspace = true

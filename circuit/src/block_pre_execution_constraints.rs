@@ -19,6 +19,8 @@ use plonky2::util::timing::TimingTree;
 
 use crate::bigint::big_u16::{BigIntU16Target, CircuitBuilderBigIntU16, CircuitBuilderBiguint16};
 use crate::bigint::bigint::SignTarget;
+use crate::bigint::biguint::CircuitBuilderBiguint;
+use crate::bigint::div_rem::CircuitBuilderBiguintDivRem;
 use crate::block_pre_execution::BlockPreExec;
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::comparison::CircuitBuilderSubtractiveComparison;
@@ -528,18 +530,23 @@ impl BlockPreExecutionCircuit {
             let max_premium_sample_count = builder.constant_usize(MAX_PREMIUM_SAMPLE_COUNT);
             let (abs_premium_sum, sign_premium_sum) =
                 builder.abs(market_details.aggregate_premium_sum);
+            // At most 60 samples, each below 2^52, are summed between two funding rounds, so
+            // (abs_premium_sum + 1) * 59 < p and the native division cannot wrap.
             let (abs_avarage_premium, _) =
                 builder.div_rem(abs_premium_sum, max_premium_sample_count, 6);
+            let abs_avarage_premium_big = builder.target_to_biguint(abs_avarage_premium);
             // Scale the premium by the market funding premium multiplier, in (0, 100] where 100 = 1x
-            let scaled_avarage_premium_abs = builder.mul(
-                abs_avarage_premium,
-                market_details.funding_premium_multiplier,
+            let funding_premium_multiplier_big =
+                builder.target_to_biguint(market_details.funding_premium_multiplier);
+            let scaled_avarage_premium_abs_big =
+                builder.mul_biguint(&abs_avarage_premium_big, &funding_premium_multiplier_big);
+            let funding_premium_multiplier_tick_big =
+                builder.target_to_biguint_single_limb_unsafe(funding_premium_multiplier_tick);
+            let abs_avarage_premium_big = builder.div_biguint(
+                &scaled_avarage_premium_abs_big,
+                &funding_premium_multiplier_tick_big,
             );
-            let (abs_avarage_premium, _) = builder.div_rem(
-                scaled_avarage_premium_abs,
-                funding_premium_multiplier_tick,
-                FUNDING_PREMIUM_MULTIPLIER_BITS,
-            );
+            let abs_avarage_premium = builder.biguint_to_target_safe(&abs_avarage_premium_big);
             let avarage_premium =
                 SignedTarget::new_unsafe(builder.mul(abs_avarage_premium, sign_premium_sum.target));
 
@@ -588,12 +595,12 @@ impl BlockPreExecutionCircuit {
             // Get hourly rate
             let (hourly_funding_rate_abs, _) = // 5_000 at max -> 13 bits
                 builder.div_rem(funding_with_big_clamp_abs, eight, 4);
-            let hourly_funding_value_abs = // 13 bits * 32 bits = 45 bits = 3 u16 limbs
+            let hourly_funding_value_abs = // 17 bits * 32 bits = 49 bits = 4 u16 limbs
                 builder.mul(hourly_funding_rate_abs, market_details.index_price);
 
             let is_abs_funding_value_zero = builder.is_zero(hourly_funding_value_abs);
             let funding_value = BigIntU16Target {
-                abs: builder.target_to_biguint_u16(hourly_funding_value_abs, 3),
+                abs: builder.target_to_biguint_u16(hourly_funding_value_abs, BIGU16_U64_LIMBS),
                 sign: SignTarget::new_unsafe(builder.select(
                     is_abs_funding_value_zero,
                     zero,
@@ -642,16 +649,17 @@ impl BlockPreExecutionCircuit {
             let max_mark_price = builder.constant_u64(MAX_ORDER_PRICE);
             let max_market_open_interest_notional =
                 builder.constant_u64(MARKET_OPEN_INTEREST_NOTIONAL);
-            let (max_open_interest_mark_price, _) = builder.div_rem(
-                max_market_open_interest_notional,
-                market_details.open_interest,
-                MARKET_OPEN_INTEREST_BITS,
-            );
-            let (max_open_interest_mark_price, _) = builder.div_rem(
-                max_open_interest_mark_price,
-                market_risk_details.quote_multiplier,
-                QUOTE_MULTIPLIER_BITS,
-            );
+            let max_market_open_interest_notional_big =
+                builder.target_to_biguint(max_market_open_interest_notional);
+            let open_interest_big = builder.target_to_biguint(market_details.open_interest);
+            let max_open_interest_mark_price_big =
+                builder.div_biguint(&max_market_open_interest_notional_big, &open_interest_big);
+            let quote_multiplier_big =
+                builder.target_to_biguint(market_risk_details.quote_multiplier);
+            let max_open_interest_mark_price_big =
+                builder.div_biguint(&max_open_interest_mark_price_big, &quote_multiplier_big);
+            let max_open_interest_mark_price =
+                builder.biguint_to_target_unsafe(&max_open_interest_mark_price_big);
 
             let is_open_interest_non_zero = builder.is_not_zero(market_details.open_interest);
             let max_open_interest_mark_price = builder.min(
@@ -671,13 +679,16 @@ impl BlockPreExecutionCircuit {
                 ORDER_PRICE_BITS,
             );
 
+            let is_market_priced = builder.is_not_zero(market_details.index_price);
+            let should_assert_non_zero_price =
+                builder.and(should_update_oracle_price, is_market_priced);
             builder.conditional_assert_not_eq(
-                should_update_oracle_price,
+                should_assert_non_zero_price,
                 self.target.price_updates.index_price[market_index],
                 zero,
             );
             builder.conditional_assert_not_eq(
-                should_update_oracle_price,
+                should_assert_non_zero_price,
                 self.target.price_updates.mark_price[market_index],
                 zero,
             );
@@ -744,11 +755,12 @@ impl BlockPreExecutionCircuit {
             let (abs_bid_ask_diff, sign_bid_ask_diff) = builder.abs(bid_ask_diff);
             let funding_tick = builder.constant_u64(FUNDING_RATE_TICK as u64);
             let normalized_abs_bid_ask_diff = builder.mul(abs_bid_ask_diff, funding_tick);
-            let (abs_premium, _) = builder.div_rem(
-                normalized_abs_bid_ask_diff,
-                market_details.index_price,
-                ORDER_PRICE_BITS,
-            );
+            let normalized_abs_bid_ask_diff_big =
+                builder.target_to_biguint(normalized_abs_bid_ask_diff);
+            let index_price_big = builder.target_to_biguint(market_details.index_price);
+            let abs_premium_big =
+                builder.div_biguint(&normalized_abs_bid_ask_diff_big, &index_price_big);
+            let abs_premium = builder.biguint_to_target_unsafe(&abs_premium_big);
             let premium =
                 SignedTarget::new_unsafe(builder.mul(abs_premium, sign_bid_ask_diff.target));
             let new_aggregate_premium_sum =

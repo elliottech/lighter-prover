@@ -2,8 +2,7 @@
 name = "p3-schnorr"
 version = "0.1.0"
 edition = "2024"
-license = "MIT OR Apache-2.0"
-readme = "../../README.md"
+license = "Business Source License 1.1"
 
 [features]
 default = ["parallel"]

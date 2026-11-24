@@ -5,6 +5,8 @@ members = [
   "desertexit/circuits",
   "p3/crates/p3-schnorr",
   "p3/crates/p3-schnorr-recursion",
+  "p3/crates/p3-ecdsa",
+  "p3/crates/p3-ecdsa-recursion",
 ]
 exclude = ["plonky2"]
 resolver = "2"
@@ -56,10 +58,12 @@ p3-field = "0.6.3"
 p3-fri = "0.6.3"
 p3-goldilocks = "0.6.3"
 p3-matrix = "0.6.3"
-p3-merkle-tree = "0.6.0"
 p3-symmetric = "0.6.3"
 p3-uni-stark = "0.6.3"
 p3-util = "0.6.3"
+p3-keccak-air = "0.6.3"
+p3-maybe-rayon = "0.6.3"
+p3-merkle-tree = "0.6.0" # Vendored copy with optional Metal-accelerated first digest layer
 poseidon-hash = "0.1.4"
 thiserror = "2"
 
@@ -68,9 +72,6 @@ tiny-keccak = { version = "2.0.2", features = ["keccak"] }
 
 [profile.release]
 incremental = true
-
-# [patch."https://github.com/elliottech/plonky2.git"]
-# plonky2={path = "../plonky2/plonky2"}
 
 # Vendored copy of p3-merkle-tree 0.6.0 with an optional Metal-accelerated
 # first digest layer (`metal` feature; Apple Silicon only, prover-side only).

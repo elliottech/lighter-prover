@@ -20,8 +20,8 @@ use crate::ecdsa::curve::curve_types::Curve;
 use crate::ecdsa::curve::ecdsa::{ECDSAPublicKey, ECDSASignature};
 use crate::ecdsa::curve::secp256k1::Secp256K1;
 use crate::ecdsa::gadgets::curve::{AffinePointTarget, CircuitBuilderCurve};
-use crate::ecdsa::gadgets::curve_fixed_base::{
-    conditional_fixed_base_curve_mul_circuit, fixed_base_curve_mul_circuit,
+use crate::ecdsa::gadgets::curve_complete::{
+    CircuitBuilderCurveComplete, fixed_base_curve_mul_complete,
 };
 use crate::ecdsa::gadgets::glv::CircuitBuilderGlv;
 use crate::keccak::keccak::CircuitBuilderKeccak;
@@ -204,21 +204,12 @@ pub fn verify_ecdsa_sig<F: RichField + Extendable<D>, const D: usize>(
     sig: &ECDSASignatureTarget<Secp256K1>,
     pk: &ECDSAPublicKeyTarget<Secp256K1>,
 ) {
-    let ECDSASignatureTarget { r, s } = sig;
-
-    builder.curve_assert_valid(&pk.0);
-
-    let c = builder.inv_nonnative(s, None);
-    let u1 = builder.mul_nonnative(msg, &c);
-    let u2 = builder.mul_nonnative(r, &c);
-
-    let point1 = fixed_base_curve_mul_circuit(builder, Secp256K1::GENERATOR_AFFINE, &u1);
-    let point2 = builder.glv_mul(&pk.0, &u2);
-    let point = builder.curve_add(&point1, &point2);
-
-    builder.connect_biguint(&r.value, &point.x.value);
+    let _true = builder._true();
+    conditional_verify_ecdsa_sig(builder, _true, msg, sig, pk);
 }
 
+/// Verifies the signature when `flag` is set. Uses complete curve arithmetic, so every valid
+/// signature is provable and the constraints are satisfiable for any input when `flag` is not set.
 pub fn conditional_verify_ecdsa_sig<F: RichField + Extendable<D>, const D: usize>(
     builder: &mut Builder<F, D>,
     flag: BoolTarget,
@@ -229,26 +220,39 @@ pub fn conditional_verify_ecdsa_sig<F: RichField + Extendable<D>, const D: usize
     let ECDSASignatureTarget { r, s } = sig;
 
     builder.conditional_curve_assert_valid(flag, &pk.0);
+    // The curve gadgets need a valid curve point, also when the verification is disabled.
+    let generator = builder.constant_affine_point(Secp256K1::GENERATOR_AFFINE);
+    let pk_point = AffinePointTarget {
+        x: builder.select_nonnative(flag, &pk.0.x, &generator.x),
+        y: builder.select_nonnative(flag, &pk.0.y, &generator.y),
+    };
 
     let c = builder.conditional_inv_nonnative(flag, s, None);
     let u1 = builder.mul_nonnative(msg, &c);
     let u2 = builder.mul_nonnative(r, &c);
 
-    let point1 =
-        conditional_fixed_base_curve_mul_circuit(builder, flag, Secp256K1::GENERATOR_AFFINE, &u1);
-    let point2 = builder.conditional_glv_mul(flag, &pk.0, &u2);
-    let point = builder.conditional_curve_add(flag, &point1, &point2);
+    let point1 = fixed_base_curve_mul_complete(builder, Secp256K1::GENERATOR_AFFINE, &u1);
+    let point2 = builder.glv_mul_complete(&pk_point, &u2);
+    let point = builder.curve_add_complete(&point1, &point2);
+    let point_x = &point.point.x.value;
 
     // Verify that point.x === r mod p(scalar) and because point.x is in the base field one subtraction is enough
     // because 2 * Secp256K1Scalar::order() > Secp256K1Base::order()
-    let cond_1 = builder.is_equal_biguint(&r.value, &point.x.value);
+    let cond_1 = builder.is_equal_biguint(&r.value, point_x);
 
     let scalar_modulus = builder.constant_biguint(&Secp256K1Scalar::order());
-    let (reduced_point_x, borrow) = builder.try_sub_biguint(&point.x.value, &scalar_modulus);
+    let (reduced_point_x, borrow) = builder.try_sub_biguint(point_x, &scalar_modulus);
     let mut cond_2 = builder.is_equal_biguint(&r.value, &reduced_point_x);
     cond_2 = builder.and_not(cond_2, BoolTarget::new_unsafe(borrow.0));
 
-    let cond = builder.or(cond_1, cond_2);
+    let mut cond = builder.or(cond_1, cond_2);
+    // The point at infinity has no x coordinate.
+    cond = builder.and_not(cond, point.is_inf);
+    // `r` must be non-zero in the scalar field. It fits in 256 bits, so it is zero iff it is `0` or the modulus.
+    let is_r_zero = builder.is_zero_biguint(&r.value);
+    let is_r_modulus = builder.is_equal_biguint(&r.value, &scalar_modulus);
+    let is_r_invalid = builder.or(is_r_zero, is_r_modulus);
+    cond = builder.and_not(cond, is_r_invalid);
 
     builder.conditional_assert_true(flag, cond);
 }
@@ -256,16 +260,19 @@ pub fn conditional_verify_ecdsa_sig<F: RichField + Extendable<D>, const D: usize
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
+    use num::BigUint;
     use plonky2::field::types::Sample;
-    use plonky2::iop::witness::PartialWitness;
+    use plonky2::hash::keccak::KeccakHash;
+    use plonky2::iop::witness::{PartialWitness, WitnessWrite};
     use plonky2::plonk::circuit_data::CircuitConfig;
-    use plonky2::plonk::config::PoseidonGoldilocksConfig;
+    use plonky2::plonk::config::{GenericHashOut, Hasher, PoseidonGoldilocksConfig};
 
     use super::*;
-    use crate::ecdsa::curve::curve_types::CurveScalar;
+    use crate::ecdsa::curve::curve_types::{CurveScalar, base_to_scalar};
     use crate::ecdsa::curve::ecdsa::{
-        ECDSAPublicKey, ECDSASecretKey, ECDSASignature, sign_message,
+        ECDSAPublicKey, ECDSASecretKey, ECDSASignature, sign_message, verify_message,
     };
+    use crate::ecdsa::gadgets::curve_fixed_base::fixed_base_curve_mul_circuit;
 
     fn test_ecdsa_circuit_with_config(config: CircuitConfig) -> Result<()> {
         type C = PoseidonGoldilocksConfig;
@@ -291,9 +298,7 @@ mod tests {
             s: s_target,
         };
 
-        let _true = builder._true();
         verify_ecdsa_sig(&mut builder, &msg_target, &sig_target, &pk_target);
-        conditional_verify_ecdsa_sig(&mut builder, _true, &msg_target, &sig_target, &pk_target);
 
         let data = builder.build::<C>();
         let proof = data.prove(pw).unwrap();
@@ -303,5 +308,235 @@ mod tests {
     #[test]
     fn test_ecdsa_circuit() -> Result<()> {
         test_ecdsa_circuit_with_config(CircuitConfig::standard_ecc_config())
+    }
+
+    /// The verification as it was before complete arithmetic: the scalar multiplications start
+    /// from a constant offset point and every addition needs operands with different x.
+    /// Kept to check that the exceptional cases below are the ones it could not prove.
+    fn verify_ecdsa_sig_incomplete<F: RichField + Extendable<D>, const D: usize>(
+        builder: &mut Builder<F, D>,
+        msg: &NonNativeTarget<Secp256K1Scalar>,
+        sig: &ECDSASignatureTarget<Secp256K1>,
+        pk: &ECDSAPublicKeyTarget<Secp256K1>,
+    ) {
+        let ECDSASignatureTarget { r, s } = sig;
+
+        builder.curve_assert_valid(&pk.0);
+
+        let c = builder.inv_nonnative(s, None);
+        let u1 = builder.mul_nonnative(msg, &c);
+        let u2 = builder.mul_nonnative(r, &c);
+
+        let point1 = fixed_base_curve_mul_circuit(builder, Secp256K1::GENERATOR_AFFINE, &u1);
+        let point2 = builder.glv_mul(&pk.0, &u2);
+        let point = builder.curve_add(&point1, &point2);
+
+        let cond_1 = builder.is_equal_biguint(&r.value, &point.x.value);
+        let scalar_modulus = builder.constant_biguint(&Secp256K1Scalar::order());
+        let (reduced_point_x, borrow) = builder.try_sub_biguint(&point.x.value, &scalar_modulus);
+        let mut cond_2 = builder.is_equal_biguint(&r.value, &reduced_point_x);
+        cond_2 = builder.and_not(cond_2, BoolTarget::new_unsafe(borrow.0));
+        let cond = builder.or(cond_1, cond_2);
+        builder.assert_true(cond);
+    }
+
+    /// Valid signatures whose verification adds equal or opposite points, or the point at
+    /// infinity, must be provable. Invalid ones must not be.
+    #[test]
+    fn test_conditional_ecdsa_circuit_exceptional_cases() {
+        type C = PoseidonGoldilocksConfig;
+        type F = <C as plonky2::plonk::config::GenericConfig<2>>::F;
+        type Curve = Secp256K1;
+
+        let mut builder = Builder::<F, 2>::new(CircuitConfig::standard_ecc_config());
+        let flag = builder.add_virtual_bool_target_safe();
+        let msg_target = builder.add_virtual_nonnative_target();
+        let pk_target = builder.add_virtual_ecdsa_public_key();
+        let sig_target = builder.add_virtual_ecdsa_target();
+        conditional_verify_ecdsa_sig(&mut builder, flag, &msg_target, &sig_target, &pk_target);
+        let data = builder.build::<C>();
+
+        let proves = |enabled: bool,
+                      msg: Secp256K1Scalar,
+                      pk: (BigUint, BigUint),
+                      (r, s): (BigUint, BigUint)| {
+            let mut pw = PartialWitness::new();
+            pw.set_bool_target(flag, enabled).unwrap();
+            pw.set_biguint_target(&msg_target.value, &msg.to_canonical_biguint())
+                .unwrap();
+            pw.set_biguint_target(&pk_target.0.x.value, &pk.0).unwrap();
+            pw.set_biguint_target(&pk_target.0.y.value, &pk.1).unwrap();
+            pw.set_biguint_target(&sig_target.r.value, &r).unwrap();
+            pw.set_biguint_target(&sig_target.s.value, &s).unwrap();
+            data.prove(pw).and_then(|proof| data.verify(proof)).is_ok()
+        };
+
+        let mut builder = Builder::<F, 2>::new(CircuitConfig::standard_ecc_config());
+        let incomplete_msg_target = builder.add_virtual_nonnative_target();
+        let incomplete_pk_target = builder.add_virtual_ecdsa_public_key();
+        let incomplete_sig_target = builder.add_virtual_ecdsa_target();
+        verify_ecdsa_sig_incomplete(
+            &mut builder,
+            &incomplete_msg_target,
+            &incomplete_sig_target,
+            &incomplete_pk_target,
+        );
+        let incomplete_data = builder.build::<C>();
+
+        let incomplete_proves =
+            |msg: Secp256K1Scalar, pk: (BigUint, BigUint), (r, s): (BigUint, BigUint)| {
+                let mut pw = PartialWitness::new();
+                pw.set_biguint_target(&incomplete_msg_target.value, &msg.to_canonical_biguint())
+                    .unwrap();
+                pw.set_biguint_target(&incomplete_pk_target.0.x.value, &pk.0)
+                    .unwrap();
+                pw.set_biguint_target(&incomplete_pk_target.0.y.value, &pk.1)
+                    .unwrap();
+                pw.set_biguint_target(&incomplete_sig_target.r.value, &r)
+                    .unwrap();
+                pw.set_biguint_target(&incomplete_sig_target.s.value, &s)
+                    .unwrap();
+                // An unsatisfiable witness is an error or, with debug assertions, a panic.
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    incomplete_data
+                        .prove(pw)
+                        .and_then(|proof| incomplete_data.verify(proof))
+                        .is_ok()
+                }))
+                .unwrap_or(false)
+            };
+
+        let pk_of = |sk: Secp256K1Scalar| {
+            let pk = (CurveScalar(sk) * Curve::GENERATOR_PROJECTIVE).to_affine();
+            (pk.x.to_canonical_biguint(), pk.y.to_canonical_biguint())
+        };
+        let sig_of = |sig: ECDSASignature<Curve>| {
+            (sig.r.to_canonical_biguint(), sig.s.to_canonical_biguint())
+        };
+
+        let msg = Secp256K1Scalar::rand();
+        let two = Secp256K1Scalar::TWO;
+        let three = Secp256K1Scalar::from_canonical_u64(3);
+        // Discrete log of the offset point that the incomplete scalar multiplications started from.
+        let h = Secp256K1Scalar::from_noncanonical_biguint(BigUint::from_bytes_le(
+            &GenericHashOut::<F>::to_bytes(&KeccakHash::<32>::hash_no_pad(&[F::ZERO])),
+        ));
+        // The incomplete MSM builds its table as `offset + i * (+-Q)`, with the sign of the first
+        // half of the GLV decomposition of `u2`. For `Q = +-offset` it fails for both signs, for
+        // the other small multiples only for the sign that walks through the offset.
+        let k1_is_negative = |sig: ECDSASignature<Curve>| {
+            crate::ecdsa::curve::glv::decompose_secp256k1_scalar(sig.r * sig.s.inverse()).2
+        };
+        type IncompleteProves = fn(bool) -> bool;
+        let cases: [(Secp256K1Scalar, IncompleteProves); 7] = [
+            (Secp256K1Scalar::rand(), |_| true),
+            (Secp256K1Scalar::ONE, |_| true),
+            (Secp256K1Scalar::NEG_ONE, |_| true),
+            (h, |_| false),
+            (-h, |_| false),
+            // `offset - 2 * Q` is infinity.
+            (h * two.inverse(), |k1_neg| !k1_neg),
+            // `offset + 3 * Q` is infinity.
+            (-h * three.inverse(), |k1_neg| k1_neg),
+        ];
+        for (sk, incomplete_should_prove) in cases {
+            let sig = sign_message(msg, ECDSASecretKey::<Curve>(sk));
+            assert!(verify_message(msg, sig, ECDSASecretKey(sk).to_public()));
+            assert!(proves(true, msg, pk_of(sk), sig_of(sig)), "sk = {sk:?}");
+            assert_eq!(
+                incomplete_proves(msg, pk_of(sk), sig_of(sig)),
+                incomplete_should_prove(k1_is_negative(sig)),
+                "sk = {sk:?}"
+            );
+        }
+
+        // `u1 * G == u2 * Q`: with nonce `k` and `r = (k * G).x`, take `sk = msg / r`.
+        let k = Secp256K1Scalar::rand();
+        let r =
+            base_to_scalar::<Curve>((CurveScalar(k) * Curve::GENERATOR_PROJECTIVE).to_affine().x);
+        let sk = msg * r.inverse();
+        let sig = ECDSASignature::<Curve> {
+            r,
+            s: k.inverse() * (msg + r * sk),
+        };
+        assert!(verify_message(msg, sig, ECDSASecretKey(sk).to_public()));
+        assert!(proves(true, msg, pk_of(sk), sig_of(sig)));
+        assert!(!incomplete_proves(msg, pk_of(sk), sig_of(sig)));
+
+        // `u1 == 0`.
+        let sk = Secp256K1Scalar::rand();
+        let zero = Secp256K1Scalar::ZERO;
+        let sig = sign_message(zero, ECDSASecretKey::<Curve>(sk));
+        assert!(proves(true, zero, pk_of(sk), sig_of(sig)));
+        assert!(!incomplete_proves(zero, pk_of(sk), sig_of(sig)));
+
+        // `u1 * G == -u2 * Q`: the result is the point at infinity, which is never a valid signature.
+        let sig = sign_message(msg, ECDSASecretKey::<Curve>(sk));
+        let (r, s) = sig_of(sig);
+        let opposite_sk = -msg * Secp256K1Scalar::from_noncanonical_biguint(r.clone()).inverse();
+        assert!(!verify_message(
+            msg,
+            sig,
+            ECDSASecretKey(opposite_sk).to_public()
+        ));
+        assert!(!proves(
+            true,
+            msg,
+            pk_of(opposite_sk),
+            (r.clone(), s.clone())
+        ));
+
+        // Invalid signatures.
+        let order = Secp256K1Scalar::order();
+        let zero_biguint = BigUint::ZERO;
+        assert!(proves(true, msg, pk_of(sk), (r.clone(), s.clone())));
+        assert!(!proves(
+            true,
+            msg + Secp256K1Scalar::ONE,
+            pk_of(sk),
+            (r.clone(), s.clone())
+        ));
+        assert!(!proves(
+            true,
+            msg,
+            pk_of(sk + Secp256K1Scalar::ONE),
+            (r.clone(), s.clone())
+        ));
+        assert!(!proves(true, msg, pk_of(sk), (r.clone(), &s + 1u32)));
+        assert!(!proves(
+            true,
+            msg,
+            pk_of(sk),
+            (r.clone(), zero_biguint.clone())
+        ));
+        assert!(!proves(
+            true,
+            msg,
+            pk_of(sk),
+            (zero_biguint.clone(), s.clone())
+        ));
+        assert!(!proves(true, msg, pk_of(sk), (order.clone(), s.clone())));
+        // `r == 0` with `u1 * G` at infinity.
+        assert!(!proves(
+            true,
+            zero,
+            pk_of(sk),
+            (zero_biguint.clone(), s.clone())
+        ));
+        assert!(!proves(true, zero, pk_of(sk), (order, s.clone())));
+        // Public key not on the curve.
+        let (pk_x, pk_y) = pk_of(sk);
+        assert!(!proves(
+            true,
+            msg,
+            (pk_x.clone(), &pk_y + 1u32),
+            (r.clone(), s.clone())
+        ));
+
+        // Nothing is checked when the verification is disabled.
+        let zeros = (zero_biguint.clone(), zero_biguint.clone());
+        assert!(proves(false, zero, zeros.clone(), zeros.clone()));
+        assert!(proves(false, msg, (pk_x.clone(), zero_biguint), zeros));
+        assert!(proves(false, msg, (pk_x, &pk_y + 1u32), (r, &s + 1u32)));
     }
 }

@@ -44,7 +44,7 @@ impl EvaluateBitstreamGate {
     const WIRES_CONSTANTS: usize = 5;
     const WIRES_PER_STATE: usize = 9;
     //Number of wires representing a transition between states
-    const WIRES_PER_TRANSITION: usize = 1;
+    const WIRES_PER_TRANSITION: usize = 2;
 
     //one extra for chunks
     const TOTAL_PER_OP: usize = Self::WIRES_PER_STATE + Self::WIRES_PER_TRANSITION + 1;
@@ -131,6 +131,10 @@ impl EvaluateBitstreamGate {
         self.wire_transition(i).start
     }
 
+    pub(crate) const fn wire_number_accumulator_inv(&self, i: usize) -> usize {
+        self.wire_transition(i).start + 1
+    }
+
     pub(crate) const fn wire_degree_prev(&self) -> usize {
         0
     }
@@ -199,6 +203,10 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for EvaluateBitstr
             let expected_number_accumulator =
                 number_not_ending_old * (number_accumulator_old * field_chunk_max + current_chunk);
             constraints.push(expected_number_accumulator - number_accumulator);
+            let number_accumulator_inv = vars.local_wires[self.wire_number_accumulator_inv(i)];
+            constraints.push(
+                number_not_ending_old * (const_1 - number_accumulator * number_accumulator_inv),
+            );
             //Constraints for sum
             let expected_sum = (((sum_old * x).add_scalar(number_accumulator))
                 .scalar_mul(number_ending))
@@ -284,6 +292,12 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for EvaluateBitstr
             };
             constraints
                 .push(builder.sub_extension(expected_number_accumulator, number_accumulator));
+            let number_accumulator_inv = vars.local_wires[self.wire_number_accumulator_inv(i)];
+            constraints.push({
+                let t = builder.mul_extension(number_accumulator, number_accumulator_inv);
+                let t = builder.sub_extension(const_1, t);
+                builder.mul_extension(number_not_ending_old, t)
+            });
             //Constraints for sum
             let expected_sum = {
                 let t = mul_quintuple(builder, &sum_old, &x);
@@ -330,7 +344,7 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for EvaluateBitstr
     }
 
     fn num_constraints(&self) -> usize {
-        (self.num_states - 1) * 10 + 1
+        (self.num_states - 1) * 11 + 1
     }
 }
 
@@ -449,6 +463,17 @@ impl<F: RichField + Extendable<D>, const D: usize> SimpleGenerator<F, D>
                 out_buffer,
                 self.gate.wire_number_accumulator(i),
                 number_accumulator,
+            )
+            .unwrap();
+            let number_accumulator_inv = if number_accumulator != F::ZERO {
+                number_accumulator.inverse()
+            } else {
+                F::ZERO
+            };
+            set_element(
+                out_buffer,
+                self.gate.wire_number_accumulator_inv(i),
+                number_accumulator_inv,
             )
             .unwrap();
 
@@ -695,6 +720,12 @@ where
             let t = self.mul_add(old_state.number_accumulator, field_chunk_max, current_chunk);
             self.mul(old_state.not_number_ending.target, t)
         };
+        {
+            let is_zero =
+                self.is_equal(self.bitstream_state[&sequence_id].number_accumulator, zero);
+            let t = self.mul(old_state.not_number_ending.target, is_zero.target);
+            self.assert_zero(t);
+        }
 
         self.bitstream_state.get_mut(&sequence_id).unwrap().degree = self.add(
             self.bitstream_state[&sequence_id].degree,

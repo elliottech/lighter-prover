@@ -1,7 +1,7 @@
 // Copyright (c) Elliot Technologies, Inc.
 // SPDX-License-Identifier: BUSL-1.1
 
-use anyhow::{Ok, Result};
+use anyhow::{Context, Ok, Result};
 use itertools::Itertools;
 use log::Level;
 use plonky2::field::extension::Extendable;
@@ -27,9 +27,11 @@ use crate::block_pre_execution::BlockPreExecWitnessTarget;
 use crate::block_tx::JumpStateTarget;
 use crate::block_tx_chain::BlockTxChainWitnessTarget;
 use crate::bool_utils::CircuitBuilderBoolUtils;
+use crate::ecdsa::ecdsa_helper::dummy_ecdsa_signature_batch_digest;
 use crate::ecdsa::gadgets::ecdsa::{
     CircuitBuilderECDSAPublicKey, CircuitBuilderECDSASignature, conditional_verify_ecdsa_sig,
 };
+use crate::ecdsa::p3_ecdsa_digest::P3EcdsaDigestState;
 use crate::eddsa::p3_schnorr_digest::{P3_DIGEST_STATE_WIDTH, P3SchnorrDigestState};
 use crate::eddsa::schnorr_helper::dummy_signature_batch_digest;
 use crate::hash_utils::CircuitBuilderHashUtils;
@@ -37,7 +39,7 @@ use crate::keccak::keccak::CircuitBuilderKeccak;
 use crate::nonnative::CircuitBuilderNonNative;
 use crate::poseidon2::Poseidon2Hash;
 use crate::recursion::block_witness::BlockWitnessTarget;
-use crate::types::config::{Builder, C, D, F};
+use crate::types::config::{Builder, C, D, F, SignatureSchemes};
 use crate::types::constants::{KECCAK_HASH_OUT_BYTE_SIZE, POSITION_LIST_SIZE};
 use crate::types::market_details::{
     MarketRiskDetailsTarget, PublicMarketDetailsTarget, PublicMarketDetailsWitness,
@@ -63,9 +65,11 @@ pub trait Circuit<
         block_pre_exec_circuit: &CircuitData<F, C, D>,
         block_light_tx_chain_circuit: &CircuitData<F, C, D>,
         block_heavy_tx_chain_circuit: &CircuitData<F, C, D>,
-        signature_batch_circuit: &CircuitData<F, C, D>,
+        signature_batch_circuit: Option<&CircuitData<F, C, D>>,
+        ecdsa_signature_batch_circuit: Option<&CircuitData<F, C, D>>,
         on_chain_operations_limit: usize,
         margined_asset_list_size: usize,
+        signature_schemes: SignatureSchemes,
     ) -> Self;
 
     /// Fills partial witness for batch target with given block data
@@ -75,7 +79,8 @@ pub trait Circuit<
         pre_exec_proof: &ProofWithPublicInputs<F, C, D>,
         light_tx_chain_proof: &ProofWithPublicInputs<F, C, D>,
         heavy_tx_chain_proof: &ProofWithPublicInputs<F, C, D>,
-        signature_batch_proof: &ProofWithPublicInputs<F, C, D>,
+        signature_batch_proof: Option<&ProofWithPublicInputs<F, C, D>>,
+        ecdsa_signature_batch_proof: Option<&ProofWithPublicInputs<F, C, D>>,
     ) -> Result<PartialWitness<F>>;
 
     fn prove(
@@ -85,7 +90,8 @@ pub trait Circuit<
         pre_exec_proof: &ProofWithPublicInputs<F, C, D>,
         light_tx_chain_proof: &ProofWithPublicInputs<F, C, D>,
         heavy_tx_chain_proof: &ProofWithPublicInputs<F, C, D>,
-        signature_batch_proof: &ProofWithPublicInputs<F, C, D>,
+        signature_batch_proof: Option<&ProofWithPublicInputs<F, C, D>>,
+        ecdsa_signature_batch_proof: Option<&ProofWithPublicInputs<F, C, D>>,
     ) -> Result<ProofWithPublicInputs<F, C, D>>;
 
     fn prove_and_compress(
@@ -95,7 +101,8 @@ pub trait Circuit<
         pre_exec_proof: &ProofWithPublicInputs<F, C, D>,
         light_tx_chain_proof: &ProofWithPublicInputs<F, C, D>,
         heavy_tx_chain_proof: &ProofWithPublicInputs<F, C, D>,
-        signature_batch_proof: &ProofWithPublicInputs<F, C, D>,
+        signature_batch_proof: Option<&ProofWithPublicInputs<F, C, D>>,
+        ecdsa_signature_batch_proof: Option<&ProofWithPublicInputs<F, C, D>>,
     ) -> Result<CompressedProofWithPublicInputs<F, C, D>>;
 }
 
@@ -113,8 +120,9 @@ pub struct BlockTarget {
     pub heavy_tx_chain_proof: ProofWithPublicInputsTarget<D>, // proof of heavy tx chain execution
 
     /// Heavy-chain instances first, then light-chain ones. The two chains fold into one digest by seeding
-    /// the light chain's sponge state with the heavy chain's final state.
-    pub signature_batch_proof: ProofWithPublicInputsTarget<D>,
+    /// the light chain's sponge state with the heavy chain's final state. Selected according to apikey type.
+    pub signature_batch_proof: Option<ProofWithPublicInputsTarget<D>>,
+    pub ecdsa_signature_batch_proof: Option<ProofWithPublicInputsTarget<D>>,
 
     pub block: BlockWitnessTarget, // Public block witness
 
@@ -129,7 +137,8 @@ impl BlockCircuit {
         block_pre_exec_common_circuit: &CommonCircuitData<F, D>,
         block_light_tx_chain_common_circuit: &CommonCircuitData<F, D>,
         block_heavy_tx_chain_common_circuit: &CommonCircuitData<F, D>,
-        signature_batch_common_circuit: &CommonCircuitData<F, D>,
+        signature_batch_common_circuit: Option<&CommonCircuitData<F, D>>,
+        ecdsa_signature_batch_common_circuit: Option<&CommonCircuitData<F, D>>,
         on_chain_operations_limit: usize,
     ) -> Self {
         let mut builder = Builder::new(config);
@@ -170,8 +179,10 @@ impl BlockCircuit {
                     .add_virtual_proof_with_pis(block_light_tx_chain_common_circuit),
                 heavy_tx_chain_proof: builder
                     .add_virtual_proof_with_pis(block_heavy_tx_chain_common_circuit),
-                signature_batch_proof: builder
-                    .add_virtual_proof_with_pis(signature_batch_common_circuit),
+                signature_batch_proof: signature_batch_common_circuit
+                    .map(|common| builder.add_virtual_proof_with_pis(common)),
+                ecdsa_signature_batch_proof: ecdsa_signature_batch_common_circuit
+                    .map(|common| builder.add_virtual_proof_with_pis(common)),
             },
             builder,
         }
@@ -323,8 +334,10 @@ impl BlockCircuit {
         block_pre_exec_circuit: &CircuitData<F, C, D>,
         block_light_tx_chain_circuit: &CircuitData<F, C, D>,
         block_heavy_tx_chain_circuit: &CircuitData<F, C, D>,
-        signature_batch_circuit: &CircuitData<F, C, D>,
+        signature_batch_circuit: Option<&CircuitData<F, C, D>>,
+        ecdsa_signature_batch_circuit: Option<&CircuitData<F, C, D>>,
         margined_asset_list_size: usize,
+        signature_schemes: SignatureSchemes,
     ) -> (
         BlockPreExecWitnessTarget,
         BlockTxChainWitnessTarget,
@@ -394,63 +407,159 @@ impl BlockCircuit {
             1,
         );
 
-        // Fold both chains' signed txs into ONE p3-schnorr batch digest:
-        //   heavy seed = initial_with_count(signature_count)   (count = block total)
-        //   light seed = heavy final sponge state
-        //   digest     = squeeze(light final sponge state)
-        // Each chain accumulates its own local `signed_so_far` (0 at step 0); their sum
-        // must equal the count the sponge was seeded with in the beginning.
-        let signature_count = light_tx_chain_witness.signature_count;
-        self.builder
-            .connect(heavy_tx_chain_witness.signature_count, signature_count);
-        let total_signed = self.builder.add(
-            heavy_tx_chain_witness.signed_so_far,
-            light_tx_chain_witness.signed_so_far,
-        );
-        self.builder.connect(total_signed, signature_count);
+        {
+            // Fold both chains' signed txs into ONE p3-schnorr batch digest:
+            //   heavy seed = initial_with_count(signature_count)   (count = block total)
+            //   light seed = heavy final sponge state
+            //   digest     = squeeze(light final sponge state)
+            // Each chain accumulates its own local `signed_so_far` (0 at step 0); their sum
+            // must equal the count the sponge was seeded with in the beginning.
+            let signature_count = light_tx_chain_witness.signature_count;
+            self.builder
+                .connect(heavy_tx_chain_witness.signature_count, signature_count);
+            let total_signed = self.builder.add(
+                heavy_tx_chain_witness.signed_so_far,
+                light_tx_chain_witness.signed_so_far,
+            );
+            self.builder.connect(total_signed, signature_count);
 
-        let heavy_initial_state =
-            P3SchnorrDigestState::initial_with_count(&mut self.builder, signature_count);
-        for i in 0..P3_DIGEST_STATE_WIDTH {
-            self.builder.connect(
-                heavy_tx_chain_witness.signature_digest_seed[i],
-                heavy_initial_state.state[i],
-            );
-            self.builder.connect(
-                light_tx_chain_witness.signature_digest_seed[i],
-                heavy_tx_chain_witness.signature_digest_state[i],
-            );
+            let heavy_initial_state =
+                P3SchnorrDigestState::initial_with_count(&mut self.builder, signature_count);
+            for i in 0..P3_DIGEST_STATE_WIDTH {
+                self.builder.connect(
+                    heavy_tx_chain_witness.signature_digest_seed[i],
+                    heavy_initial_state.state[i],
+                );
+                self.builder.connect(
+                    light_tx_chain_witness.signature_digest_seed[i],
+                    heavy_tx_chain_witness.signature_digest_state[i],
+                );
+            }
+
+            if !signature_schemes.schnorr_signature_enabled() {
+                // Users shouldn't be able to sign anything with Schnorr keys
+                self.builder.assert_zero(signature_count);
+                self.builder
+                    .assert_zero(heavy_tx_chain_witness.signed_so_far);
+                self.builder
+                    .assert_zero(light_tx_chain_witness.signed_so_far);
+            } else {
+                let signature_batch_circuit =
+                    signature_batch_circuit.expect("missing Schnorr circuit");
+                let signature_batch_proof = self
+                    .target
+                    .signature_batch_proof
+                    .as_ref()
+                    .expect("missing Schnorr proof target");
+                // A block with zero signed slots has no batch to prove
+                let one = self.builder.one();
+                let dummy_digest =
+                    dummy_signature_batch_digest().map(|lane| self.builder.constant(lane));
+                let is_empty = self.builder.is_zero(signature_count);
+                let expected_count = self.builder.select(is_empty, one, signature_count);
+                self.builder
+                    .connect(signature_batch_proof.public_inputs[0], expected_count);
+
+                let signature_batch_verifier_data = self
+                    .builder
+                    .constant_verifier_data(&signature_batch_circuit.verifier_only);
+                self.builder.verify_proof::<C>(
+                    signature_batch_proof,
+                    &signature_batch_verifier_data,
+                    &signature_batch_circuit.common,
+                );
+
+                let signature_digest = P3SchnorrDigestState {
+                    state: light_tx_chain_witness.signature_digest_state,
+                }
+                .digest();
+                for (i, &digest_lane) in signature_digest.iter().enumerate() {
+                    let expected_lane = self.builder.select(is_empty, dummy_digest[i], digest_lane);
+                    self.builder
+                        .connect(expected_lane, signature_batch_proof.public_inputs[1 + i]);
+                }
+            }
         }
 
-        // A block with zero signed slots has no batch to prove
-        let one = self.builder.one();
-        let dummy_digest = dummy_signature_batch_digest().map(|lane| self.builder.constant(lane));
-        let is_empty = self.builder.is_zero(signature_count);
-        let expected_count = self.builder.select(is_empty, one, signature_count);
-        self.builder.connect(
-            self.target.signature_batch_proof.public_inputs[0],
-            expected_count,
-        );
-
-        let signature_batch_verifier_data = self
-            .builder
-            .constant_verifier_data(&signature_batch_circuit.verifier_only);
-        self.builder.verify_proof::<C>(
-            &self.target.signature_batch_proof,
-            &signature_batch_verifier_data,
-            &signature_batch_circuit.common,
-        );
-
-        let signature_digest = P3SchnorrDigestState {
-            state: light_tx_chain_witness.signature_digest_state,
-        }
-        .digest();
-        for (i, &digest_lane) in signature_digest.iter().enumerate() {
-            let expected_lane = self.builder.select(is_empty, dummy_digest[i], digest_lane);
+        {
+            // Fold both chains' signed txs into ONE p3-ecdsa batch digest:
+            //   heavy seed = initial_with_count(signature_count)   (count = block total)
+            //   light seed = heavy final sponge state
+            //   digest     = squeeze(light final sponge state)
+            // Each chain accumulates its own local `signed_so_far` (0 at step 0); their sum
+            // must equal the count the sponge was seeded with in the beginning.
+            let ecdsa_signature_count = light_tx_chain_witness.ecdsa_signature_count;
             self.builder.connect(
-                expected_lane,
-                self.target.signature_batch_proof.public_inputs[1 + i],
+                heavy_tx_chain_witness.ecdsa_signature_count,
+                ecdsa_signature_count,
             );
+            let ecdsa_total_signed = self.builder.add(
+                heavy_tx_chain_witness.ecdsa_signed_so_far,
+                light_tx_chain_witness.ecdsa_signed_so_far,
+            );
+            self.builder
+                .connect(ecdsa_total_signed, ecdsa_signature_count);
+
+            let ecdsa_heavy_initial_state =
+                P3EcdsaDigestState::initial_with_count(&mut self.builder, ecdsa_signature_count);
+            for i in 0..P3_DIGEST_STATE_WIDTH {
+                self.builder.connect(
+                    heavy_tx_chain_witness.ecdsa_signature_digest_seed[i],
+                    ecdsa_heavy_initial_state.state[i],
+                );
+                self.builder.connect(
+                    light_tx_chain_witness.ecdsa_signature_digest_seed[i],
+                    heavy_tx_chain_witness.ecdsa_signature_digest_state[i],
+                );
+            }
+
+            if !signature_schemes.ecdsa_signature_enabled() {
+                // Users shouldn't be able to sign anything with ECDSA keys
+                self.builder.assert_zero(ecdsa_signature_count);
+                self.builder
+                    .assert_zero(heavy_tx_chain_witness.ecdsa_signed_so_far);
+                self.builder
+                    .assert_zero(light_tx_chain_witness.ecdsa_signed_so_far);
+            } else {
+                let ecdsa_signature_batch_circuit =
+                    ecdsa_signature_batch_circuit.expect("missing ECDSA circuit");
+                let ecdsa_signature_batch_proof = self
+                    .target
+                    .ecdsa_signature_batch_proof
+                    .as_ref()
+                    .expect("missing ECDSA proof target");
+                // A block with zero signed slots has no batch to prove
+                let one = self.builder.one();
+                let ecdsa_dummy_digest =
+                    dummy_ecdsa_signature_batch_digest().map(|lane| self.builder.constant(lane));
+                let is_empty = self.builder.is_zero(ecdsa_signature_count);
+                let expected_count = self.builder.select(is_empty, one, ecdsa_signature_count);
+                self.builder
+                    .connect(ecdsa_signature_batch_proof.public_inputs[0], expected_count);
+
+                let ecdsa_signature_batch_verifier_data = self
+                    .builder
+                    .constant_verifier_data(&ecdsa_signature_batch_circuit.verifier_only);
+                self.builder.verify_proof::<C>(
+                    ecdsa_signature_batch_proof,
+                    &ecdsa_signature_batch_verifier_data,
+                    &ecdsa_signature_batch_circuit.common,
+                );
+
+                let ecdsa_signature_digest = P3EcdsaDigestState {
+                    state: light_tx_chain_witness.ecdsa_signature_digest_state,
+                }
+                .digest();
+                for (i, &digest_lane) in ecdsa_signature_digest.iter().enumerate() {
+                    let expected_lane =
+                        self.builder
+                            .select(is_empty, ecdsa_dummy_digest[i], digest_lane);
+                    self.builder.connect(
+                        expected_lane,
+                        ecdsa_signature_batch_proof.public_inputs[1 + i],
+                    );
+                }
+            }
         }
 
         (
@@ -500,14 +609,11 @@ impl BlockCircuit {
         self.builder
             .assert_zero(light_tx_chain_witness.priority_operations_count);
         self.builder
-            .assert_zero(light_tx_chain_witness.change_pub_key_message.account_index);
+            .assert_false(light_tx_chain_witness.change_pub_key_message.is_enabled);
         self.builder
-            .assert_zero(light_tx_chain_witness.transfer_message.from_account_index);
-        self.builder.assert_zero(
-            light_tx_chain_witness
-                .approve_integrator_message
-                .account_index,
-        );
+            .assert_false(light_tx_chain_witness.transfer_message.is_enabled);
+        self.builder
+            .assert_false(light_tx_chain_witness.approve_integrator_message.is_enabled);
     }
 
     fn finalize_jump(
@@ -639,16 +745,19 @@ impl Circuit<C, F, D> for BlockCircuit {
         block_pre_exec_circuit: &CircuitData<F, C, D>,
         block_light_tx_chain_circuit: &CircuitData<F, C, D>,
         block_heavy_tx_chain_circuit: &CircuitData<F, C, D>,
-        signature_batch_circuit: &CircuitData<F, C, D>,
+        signature_batch_circuit: Option<&CircuitData<F, C, D>>,
+        ecdsa_signature_batch_circuit: Option<&CircuitData<F, C, D>>,
         on_chain_operations_limit: usize,
         margined_asset_list_size: usize,
+        signature_schemes: SignatureSchemes,
     ) -> Self {
         let mut circuit = Self::new(
             config,
             &block_pre_exec_circuit.common,
             &block_light_tx_chain_circuit.common,
             &block_heavy_tx_chain_circuit.common,
-            &signature_batch_circuit.common,
+            signature_batch_circuit.map(|circuit| &circuit.common),
+            ecdsa_signature_batch_circuit.map(|circuit| &circuit.common),
             on_chain_operations_limit,
         );
 
@@ -659,7 +768,9 @@ impl Circuit<C, F, D> for BlockCircuit {
                 block_light_tx_chain_circuit,
                 block_heavy_tx_chain_circuit,
                 signature_batch_circuit,
+                ecdsa_signature_batch_circuit,
                 margined_asset_list_size,
+                signature_schemes,
             );
 
         circuit.perform_sanity_checks(
@@ -693,9 +804,7 @@ impl Circuit<C, F, D> for BlockCircuit {
         );
 
         // Select l1 signature message hash, l1 address, l1 signature and l1 public key
-        let is_change_pub_key_exists = circuit
-            .builder
-            .is_not_zero(heavy_tx_chain_witness.change_pub_key_message.account_index);
+        let is_change_pub_key_exists = heavy_tx_chain_witness.change_pub_key_message.is_enabled;
         let change_pub_key_message = heavy_tx_chain_witness
             .change_pub_key_message
             .get_change_pub_key_l1_signature_msg_hash(&mut circuit.builder);
@@ -706,9 +815,7 @@ impl Circuit<C, F, D> for BlockCircuit {
             heavy_tx_chain_witness.change_pub_key_message.l1_pk,
         );
 
-        let is_transfer_exists = circuit
-            .builder
-            .is_not_zero(heavy_tx_chain_witness.transfer_message.from_account_index);
+        let is_transfer_exists = heavy_tx_chain_witness.transfer_message.is_enabled;
         let transfer_message = heavy_tx_chain_witness
             .transfer_message
             .get_transfer_l1_signature_msg_hash(&mut circuit.builder);
@@ -733,11 +840,8 @@ impl Circuit<C, F, D> for BlockCircuit {
             ),
         );
 
-        let is_approve_integrator_exists = circuit.builder.is_not_zero(
-            heavy_tx_chain_witness
-                .approve_integrator_message
-                .account_index,
-        );
+        let is_approve_integrator_exists =
+            heavy_tx_chain_witness.approve_integrator_message.is_enabled;
         let approve_integrator_message = heavy_tx_chain_witness
             .approve_integrator_message
             .get_approve_integrator_l1_signature_msg_hash(&mut circuit.builder);
@@ -859,13 +963,25 @@ impl Circuit<C, F, D> for BlockCircuit {
         pre_exec_proof: &ProofWithPublicInputs<F, C, D>,
         light_tx_chain_proof: &ProofWithPublicInputs<F, C, D>,
         heavy_tx_chain_proof: &ProofWithPublicInputs<F, C, D>,
-        signature_batch_proof: &ProofWithPublicInputs<F, C, D>,
+        signature_batch_proof: Option<&ProofWithPublicInputs<F, C, D>>,
+        ecdsa_signature_batch_proof: Option<&ProofWithPublicInputs<F, C, D>>,
     ) -> Result<PartialWitness<F>> {
         let mut pw = Self::witness_inputs_early(target, block, pre_exec_proof)?;
 
         pw.set_proof_with_pis_target(&target.light_tx_chain_proof, light_tx_chain_proof)?;
         pw.set_proof_with_pis_target(&target.heavy_tx_chain_proof, heavy_tx_chain_proof)?;
-        pw.set_proof_with_pis_target(&target.signature_batch_proof, signature_batch_proof)?;
+        if let Some(proof_target) = &target.signature_batch_proof {
+            pw.set_proof_with_pis_target(
+                proof_target,
+                signature_batch_proof.context("missing Schnorr batch proof")?,
+            )?;
+        }
+        if let Some(proof_target) = &target.ecdsa_signature_batch_proof {
+            pw.set_proof_with_pis_target(
+                proof_target,
+                ecdsa_signature_batch_proof.context("missing ECDSA batch proof")?,
+            )?;
+        }
 
         Ok(pw)
     }
@@ -877,7 +993,8 @@ impl Circuit<C, F, D> for BlockCircuit {
         pre_exec_proof: &ProofWithPublicInputs<F, C, D>,
         light_tx_chain_proof: &ProofWithPublicInputs<F, C, D>,
         heavy_tx_chain_proof: &ProofWithPublicInputs<F, C, D>,
-        signature_batch_proof: &ProofWithPublicInputs<F, C, D>,
+        signature_batch_proof: Option<&ProofWithPublicInputs<F, C, D>>,
+        ecdsa_signature_batch_proof: Option<&ProofWithPublicInputs<F, C, D>>,
     ) -> Result<ProofWithPublicInputs<F, C, D>> {
         let mut timing = TimingTree::new("BlockCircuit", Level::Debug);
 
@@ -899,10 +1016,19 @@ impl Circuit<C, F, D> for BlockCircuit {
                         &target.heavy_tx_chain_proof,
                         heavy_tx_chain_proof,
                     )?;
-                    seeder.set_proof_with_pis_target(
-                        &target.signature_batch_proof,
-                        signature_batch_proof,
-                    )
+                    if let Some(proof_target) = &target.signature_batch_proof {
+                        seeder.set_proof_with_pis_target(
+                            proof_target,
+                            signature_batch_proof.context("missing Schnorr batch proof")?,
+                        )?;
+                    }
+                    if let Some(proof_target) = &target.ecdsa_signature_batch_proof {
+                        seeder.set_proof_with_pis_target(
+                            proof_target,
+                            ecdsa_signature_batch_proof.context("missing ECDSA batch proof")?,
+                        )?;
+                    }
+                    Ok(())
                 },
             )?
         });
@@ -929,7 +1055,8 @@ impl Circuit<C, F, D> for BlockCircuit {
         pre_exec_proof: &ProofWithPublicInputs<F, C, D>,
         light_tx_chain_proof: &ProofWithPublicInputs<F, C, D>,
         heavy_tx_chain_proof: &ProofWithPublicInputs<F, C, D>,
-        signature_batch_proof: &ProofWithPublicInputs<F, C, D>,
+        signature_batch_proof: Option<&ProofWithPublicInputs<F, C, D>>,
+        ecdsa_signature_batch_proof: Option<&ProofWithPublicInputs<F, C, D>>,
     ) -> Result<CompressedProofWithPublicInputs<F, C, D>> {
         let mut timing = TimingTree::new("BlockCircuit", Level::Debug);
 
@@ -941,6 +1068,7 @@ impl Circuit<C, F, D> for BlockCircuit {
                 light_tx_chain_proof,
                 heavy_tx_chain_proof,
                 signature_batch_proof,
+                ecdsa_signature_batch_proof,
             )?
         });
         let proof = circuit_data.prove(pw)?;

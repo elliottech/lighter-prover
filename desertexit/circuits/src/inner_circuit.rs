@@ -13,14 +13,16 @@ use circuit::comparison::CircuitBuilderSubtractiveComparison;
 use circuit::hash_utils::CircuitBuilderHashUtils;
 use circuit::keccak::keccak::{CircuitBuilderKeccak, KeccakOutputTarget};
 use circuit::merkle_helpers::{account_index_to_merkle_path, verify_merkle_proof};
+use circuit::poseidon2::Poseidon2Hash;
 use circuit::types::asset::ensure_valid_asset_index;
 use circuit::types::config::{
     BIG_U64_LIMBS, BIG_U96_LIMBS, BIG_U128_LIMBS, BIG_U160_LIMBS, Builder, C, D, F,
 };
 use circuit::types::constants::{
-    ACCOUNT_MERKLE_LEVELS, ASSET_LIST_SIZE_BITS, INSURANCE_FUND_ACCOUNT_TYPE,
-    LIGHTER_STAKING_POOL_ACCOUNT_TYPE, MARKET_MERKLE_LEVELS, MAX_ASSET_INDEX, MIN_ASSET_INDEX,
-    NIL_ACCOUNT_INDEX, POSITION_LIST_SIZE, PUBLIC_POOL_ACCOUNT_TYPE, SHARES_LIST_SIZE,
+    ACCOUNT_MERKLE_LEVELS, ASSET_LIST_SIZE_BITS, BINARY_OPTIONS_MARKET_SLOT_COUNT,
+    INSURANCE_FUND_ACCOUNT_TYPE, LIGHTER_STAKING_POOL_ACCOUNT_TYPE, MARKET_MERKLE_LEVELS,
+    MAX_ASSET_INDEX, MIN_ASSET_INDEX, MIN_BINARY_OPTIONS_MARKET_INDEX, NIL_ACCOUNT_INDEX,
+    POSITION_LIST_SIZE, PUBLIC_POOL_ACCOUNT_TYPE, SHARES_LIST_SIZE, TREASURY_SUB_ACCOUNT_TYPE,
     USDC_ASSET_INDEX, USDC_TO_COLLATERAL_MULTIPLIER,
 };
 use circuit::uint::u32::gadgets::arithmetic_u32::CircuitBuilderU32;
@@ -29,9 +31,10 @@ use log::Level;
 use num::BigUint;
 use plonky2::field::types::Field;
 use plonky2::hash::hash_types::{HashOut, HashOutTarget, RichField};
-use plonky2::iop::target::{BoolTarget, Target};
+use plonky2::iop::target::Target;
 use plonky2::iop::witness::{PartialWitness, WitnessWrite};
 use plonky2::plonk::circuit_data::{CircuitConfig, CircuitData};
+use plonky2::plonk::config::Hasher;
 use plonky2::plonk::proof::ProofWithPublicInputs;
 use plonky2::timed;
 use plonky2::util::timing::TimingTree;
@@ -48,10 +51,6 @@ use crate::pubdata_market::{
 };
 
 pub const DESERT_NUM_ACCOUNTS: usize = 1 + SHARES_LIST_SIZE;
-/// Protocol cap on binary options positions per account, the number of entries proven for the exited account
-pub const DESERT_BINARY_OPTIONS_POSITIONS: usize = 1024;
-/// Market slots are MARKET_MERKLE_LEVELS bits wide, compared at the next multiple of 8
-const MARKET_INDEX_COMPARISON_BITS: usize = MARKET_MERKLE_LEVELS.div_ceil(8) * 8;
 
 #[serde_as]
 #[derive(Debug, Clone, Deserialize)]
@@ -84,11 +83,11 @@ where
     #[serde(deserialize_with = "circuit::deserializers::hash_out")]
     pub market_pub_data_tree_root: HashOut<F>,
 
-    /// Binary options positions of the main account sorted by market slot, padded with empty entries
+    /// Binary options positions of the main account, one entry per binary options market slot
     #[serde(rename = "bop")]
     #[serde(deserialize_with = "crate::deserializers::binary_options_positions")]
     pub binary_options_positions:
-        Box<[PubdataBinaryOptionsPosition; DESERT_BINARY_OPTIONS_POSITIONS]>,
+        Box<[PubdataBinaryOptionsPosition; BINARY_OPTIONS_MARKET_SLOT_COUNT]>,
 
     #[serde(rename = "vr")]
     #[serde(deserialize_with = "circuit::deserializers::hash_out")]
@@ -114,7 +113,7 @@ pub struct InnerDesertExitTarget {
     pub market_pub_data_tree_root: HashOutTarget,
 
     pub binary_options_positions:
-        Box<[PubdataBinaryOptionsPositionTarget; DESERT_BINARY_OPTIONS_POSITIONS]>,
+        Box<[PubdataBinaryOptionsPositionTarget; BINARY_OPTIONS_MARKET_SLOT_COUNT]>,
 
     pub validium_root: HashOutTarget,
     pub state_root: HashOutTarget,
@@ -145,8 +144,11 @@ impl InnerDesertExitCircuit {
                 public_market_details: [(); POSITION_LIST_SIZE]
                     .map(|_| PubdataMarketDetailsTarget::new(&mut builder)),
                 market_pub_data_tree_root: builder.add_virtual_hash(),
-                binary_options_positions: Box::new(core::array::from_fn(|_| {
-                    PubdataBinaryOptionsPositionTarget::new(&mut builder)
+                binary_options_positions: Box::new(core::array::from_fn(|i| {
+                    PubdataBinaryOptionsPositionTarget::new(
+                        &mut builder,
+                        MIN_BINARY_OPTIONS_MARKET_INDEX + i,
+                    )
                 })),
                 validium_root: builder.add_virtual_hash(),
                 state_root: builder.add_virtual_hash(),
@@ -161,6 +163,12 @@ impl InnerDesertExitCircuit {
         ensure_valid_asset_index(&mut self.builder, _true, self.target.asset_index);
         self.builder
             .register_range_check(self.target.asset_index, ASSET_LIST_SIZE_BITS);
+        let max_asset_index = self.builder.constant_u64(MAX_ASSET_INDEX);
+        self.builder.assert_lte(
+            self.target.asset_index,
+            max_asset_index,
+            ASSET_LIST_SIZE_BITS.div_ceil(8) * 8,
+        );
     }
 
     fn verify_accounts(&mut self) {
@@ -205,13 +213,21 @@ impl InnerDesertExitCircuit {
         }
 
         // Validate account types for special accounts
-        // MAI = 0 <==> AI = 0 or account type is staking pool
+        // MAI = 0 <==> AI = 0 or account type is staking pool or treasury sub account
         let is_ai_zero = self.builder.is_zero(self.target.accounts[0].account_index);
         let is_type_staking_pool = self.builder.is_equal_constant(
             self.target.accounts[0].account_type,
             LIGHTER_STAKING_POOL_ACCOUNT_TYPE as u64,
         );
-        let mai_zero_condition = self.builder.or(is_ai_zero, is_type_staking_pool);
+        let is_type_treasury_sub_account = self.builder.is_equal_constant(
+            self.target.accounts[0].account_type,
+            TREASURY_SUB_ACCOUNT_TYPE as u64,
+        );
+        let mai_zero_condition = self.builder.multi_or(&[
+            is_ai_zero,
+            is_type_staking_pool,
+            is_type_treasury_sub_account,
+        ]);
         let is_mai_zero = self.builder.is_zero(self.target.master_account_index);
         self.builder
             .connect(is_mai_zero.target, mai_zero_condition.target);
@@ -238,34 +254,49 @@ impl InnerDesertExitCircuit {
             .connect(mai_zero_or_one.target, l1_address_zero.target);
     }
 
-    /// Every binary options position of the main account is proven against the account's market pub
-    /// data root together with the published state of its market. Entries are sorted strictly by
-    /// market slot and the non empty ones form a prefix, so no position can be counted twice.
+    /// The entries cover every binary options market slot, so rebuilding the account market pub
+    /// data root from their leaves binds the whole tree: a position cannot be left out, and every
+    /// non empty entry is proven against the published state of its market.
     fn verify_binary_options_positions(&mut self) {
-        let account_market_pub_data_root = self.target.accounts[0].market_pub_data_root;
         let market_pub_data_tree_root = self.target.market_pub_data_tree_root;
-
-        let mut previous: Option<(BoolTarget, Target)> = None;
         for position in self.target.binary_options_positions.iter() {
-            position.verify(
-                &mut self.builder,
-                &account_market_pub_data_root,
-                &market_pub_data_tree_root,
-            );
-
-            let is_non_empty = position.is_non_empty(&mut self.builder);
-            if let Some((previous_is_non_empty, previous_market_index)) = previous {
-                self.builder
-                    .conditional_assert_true(is_non_empty, previous_is_non_empty);
-                self.builder.conditional_assert_lt(
-                    is_non_empty,
-                    previous_market_index,
-                    position.market_index,
-                    MARKET_INDEX_COMPARISON_BITS,
-                );
-            }
-            previous = Some((is_non_empty, position.market_index));
+            position.verify(&mut self.builder, &market_pub_data_tree_root);
         }
+
+        let mut empty_hashes = vec![HashOut::<F>::ZERO];
+        for level in 0..MARKET_MERKLE_LEVELS {
+            empty_hashes.push(Poseidon2Hash::two_to_one(
+                empty_hashes[level],
+                empty_hashes[level],
+            ));
+        }
+
+        let mut level_hashes: Vec<Option<HashOutTarget>> = vec![None; 1 << MARKET_MERKLE_LEVELS];
+        for (position, level_hash) in self
+            .target
+            .binary_options_positions
+            .iter()
+            .zip(level_hashes[MIN_BINARY_OPTIONS_MARKET_INDEX..].iter_mut())
+        {
+            *level_hash = Some(position.account_leaf_hash(&mut self.builder));
+        }
+        for level in 0..MARKET_MERKLE_LEVELS {
+            let empty_hash = self.builder.constant_hash(empty_hashes[level]);
+            level_hashes = level_hashes
+                .chunks(2)
+                .map(|pair| match (pair[0], pair[1]) {
+                    (None, None) => None,
+                    (left, right) => Some(self.builder.hash_two_to_one(
+                        &left.unwrap_or(empty_hash),
+                        &right.unwrap_or(empty_hash),
+                    )),
+                })
+                .collect();
+        }
+        self.builder.connect_hashes(
+            level_hashes[0].unwrap(),
+            self.target.accounts[0].market_pub_data_root,
+        );
     }
 
     /// Sum of the binary options payouts of the main account in extended collateral
@@ -636,7 +667,7 @@ impl InnerDesertExitCircuit {
             witness.market_pub_data_tree_root,
         )?;
 
-        for i in 0..DESERT_BINARY_OPTIONS_POSITIONS {
+        for i in 0..BINARY_OPTIONS_MARKET_SLOT_COUNT {
             pw.set_pubdata_binary_options_position_target(
                 &target.binary_options_positions[i],
                 &witness.binary_options_positions[i],

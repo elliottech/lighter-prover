@@ -1,0 +1,38 @@
+[package]
+name = "p3-ecdsa"
+version = "0.1.0"
+edition = "2024"
+license = "Business Source License 1.1"
+
+[features]
+default = ["parallel"]
+parallel = ["p3-schnorr/parallel", "p3-keccak-air/parallel"]
+# Metal leaf hashing (and opt-in GPU NTT via P3_METAL_NTT=1) for both proofs, through
+# p3-schnorr's shared STARK config. Apple Silicon only; proofs are unchanged.
+metal = ["p3-schnorr/metal"]
+
+[dependencies]
+num-bigint = "0.4"
+num-integer = "0.1"
+num-traits = "0.2"
+p3-air.workspace = true
+p3-challenger.workspace = true
+p3-commit.workspace = true
+p3-field.workspace = true
+p3-goldilocks.workspace = true
+p3-keccak-air.workspace = true
+p3-matrix.workspace = true
+p3-maybe-rayon.workspace = true
+p3-schnorr = { path = "../p3-schnorr", default-features = false }
+p3-uni-stark.workspace = true
+p3-util.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tiny-keccak.workspace = true
+tracing = "0.1"
+
+[dev-dependencies]
+bincode.workspace = true
+rand.workspace = true
+tracing-forest = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

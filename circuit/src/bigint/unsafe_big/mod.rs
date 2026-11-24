@@ -9,9 +9,11 @@ use plonky2::iop::target::{BoolTarget, Target};
 use crate::bigint::big_u16::BigIntU16Target;
 use crate::bigint::bigint::{BigIntTarget, CircuitBuilderBigInt, SignTarget};
 use crate::bigint::biguint::{BigUintTarget, CircuitBuilderBiguint};
+use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::builder::Builder;
 use crate::signed::signed_target::{CircuitBuilderSigned, SignedTarget};
 use crate::uint::u32::gadgets::arithmetic_u32::{CircuitBuilderU32, U32Target};
+use crate::utils::CircuitBuilderUtils;
 
 /// UnsafeBigTarget is a vector [x] that represents a big integer
 /// X = x[0] + x[1] * 2^B + x[2] * 2^(2*B) + ...
@@ -275,12 +277,14 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilderUnsafeBig<F, D>
             let (abs_limb, sign_limb) = self.abs(SignedTarget::new_unsafe(unsafe_limb_with_carry));
             let split_limb_with_carry = self.split_u64_to_u16s_le(abs_limb, 4).to_vec();
             let is_limb_negative = self.is_sign_negative(sign_limb);
+            let is_low_zero = self.is_zero(split_limb_with_carry[0].0);
+            let borrows = self.and_not(is_limb_negative, is_low_zero);
 
-            let mut low = self.mul_add(pow, is_limb_negative.target, split_limb_with_carry[0].0);
+            let mut low = self.mul_add(pow, borrows.target, split_limb_with_carry[0].0);
             low = self.arithmetic(
                 F::NEG_ONE * F::TWO,
                 F::ONE,
-                is_limb_negative.target,
+                borrows.target,
                 split_limb_with_carry[0].0,
                 low,
             );
@@ -289,7 +293,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilderUnsafeBig<F, D>
             let mut high =
                 self.mul_add(split_limb_with_carry[3].0, pow, split_limb_with_carry[2].0);
             high = self.mul_add(high, pow, split_limb_with_carry[1].0);
-            high = self.add(high, is_limb_negative.target);
+            high = self.add(high, borrows.target);
             carry = self.arithmetic(
                 F::NEG_ONE * F::TWO,
                 F::ONE,

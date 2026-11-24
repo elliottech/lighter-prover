@@ -124,7 +124,7 @@ impl Verify for InternalDeleverageTxTarget {
 
         // Size should be non-zero
         builder.conditional_assert_not_zero(is_enabled, self.size);
-        builder.register_range_check(self.size, ORDER_SIZE_BITS);
+        builder.register_range_check(self.size, POSITION_SIZE_BITS);
 
         let active_market_status = builder.constant_from_u8(MARKET_STATUS_ACTIVE);
         builder.conditional_assert_eq(

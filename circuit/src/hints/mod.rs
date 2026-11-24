@@ -18,12 +18,23 @@ use crate::comparison::{CircuitBuilderSubtractiveComparison, cmp_bit_size_bucket
 use crate::utils::CircuitBuilderUtils;
 
 pub trait CircuitBuilderHints<F: RichField + Extendable<D>, const D: usize> {
+    /// Returns `(quotient, remainder)` of `dividend / divisor`, or `(0, 0)` when `divisor` is 0.
+    ///
+    /// `quotient * divisor + remainder == dividend` is checked in the field, i.e. modulo
+    /// p = 2^64 - 2^32 + 1, not over the integers. Given `quotient <= dividend` and
+    /// `remainder < divisor`, a prover can satisfy it with a wrong quotient if and only if
+    /// `(dividend + 1) * (divisor - 1) >= p`. Only call this when the operands are bounded below
+    /// that (dividend bits + divisor bits <= 63 is always enough); otherwise use `div_rem_biguint`.
+    ///
+    /// `divisor_bits` only sizes the remainder range check.
     fn div_rem(
         &mut self,
         dividend: Target,
         divisor: Target,
         divisor_bits: usize,
     ) -> (Target, Target);
+    /// Same as `div_rem`, but the division is only checked when `is_enabled` is true. The same
+    /// bound on the operands is required in that case.
     fn conditional_div_rem(
         &mut self,
         is_enabled: BoolTarget,

@@ -35,6 +35,15 @@ const MIN_GPU_PERMUTATIONS: usize = 1 << 21;
 /// Leaves hashed per dispatch; bounds the staging buffer (rows this size at
 /// width 468 stage ~1 GiB).
 const CHUNK_LEAVES: usize = 1 << 18;
+/// Upper bound on one staging buffer. Two are live per call, and wide traces
+/// (ECDSA 800 columns, keccak 2720) otherwise stage several GiB at once.
+const MAX_STAGING_BYTES: usize = 256 << 20;
+
+fn chunk_leaves(row_width: usize) -> usize {
+    let rows = MAX_STAGING_BYTES / (row_width * size_of::<u64>());
+    // A multiple of 1024 rows, never more than the row cap.
+    (rows & !1023).clamp(1024, CHUNK_LEAVES)
+}
 
 struct MetalContext {
     device: Device,
@@ -131,7 +140,8 @@ where
 
     // Two in-flight chunks: while the GPU hashes chunk k, the CPU stages
     // chunk k+1 into the other buffer pair and drains chunk k-1's digests.
-    let chunk_rows = CHUNK_LEAVES.min(height);
+    let chunk_leaves = chunk_leaves(row_width);
+    let chunk_rows = chunk_leaves.min(height);
     let staging: [Buffer; 2] = core::array::from_fn(|_| {
         ctx.device.new_buffer(
             (chunk_rows * row_width * size_of::<u64>()) as NSUInteger,
@@ -213,7 +223,7 @@ where
     let mut start = 0usize;
     let mut slot = 0usize;
     while start < height {
-        let rows = CHUNK_LEAVES.min(height - start);
+        let rows = chunk_leaves.min(height - start);
         stage_chunk(&staging[slot], start, rows);
         let cmd = dispatch_chunk(slot, rows);
         if let Some((prev_cmd, prev_slot, prev_start, prev_rows)) = in_flight.take() {

@@ -278,6 +278,7 @@ impl TxHash for L2ModifyOrderTxTarget {
 impl Verify for L2ModifyOrderTxTarget {
     fn verify(&mut self, builder: &mut Builder, tx_type: &TxTypeTargets, tx_state: &TxState) {
         let is_enabled = tx_type.is_l2_modify_order;
+        builder.conditional_assert_true(is_enabled, tx_state.is_integrator_valid);
 
         builder.conditional_assert_eq(
             is_enabled,
@@ -331,6 +332,7 @@ impl Verify for L2ModifyOrderTxTarget {
             builder.is_equal(tx_state.account_order.index_1, self.index);
         let is_valid_index = builder.or(is_valid_order_index, is_valid_client_order_index);
         builder.conditional_assert_true(is_enabled, is_valid_index);
+        builder.conditional_assert_not_zero(is_enabled, self.index);
 
         // If the order is empty, sequencer can give random order index(any order index that belongs to an empty order). But because order is empty,
         // "self.success" will still be false because "is_account_order_present" is false.
@@ -689,7 +691,7 @@ impl Apply for L2ModifyOrderTxTarget {
         );
 
         let is_limit_order =
-            builder.is_equal_constant(tx_state.account_order.order_type, LIMIT_ORDER as u64);
+            builder.is_equal_constant(account_order_copy.order_type, LIMIT_ORDER as u64);
         let spot_flag = builder.is_equal_constant(tx_state.market.market_type, MARKET_TYPE_SPOT);
         let is_insurance_fund = builder.is_equal_constant(
             tx_state.accounts[OWNER_ACCOUNT_ID].account_type,

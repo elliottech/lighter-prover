@@ -12,6 +12,7 @@ use plonky2::iop::target::{BoolTarget, Target};
 
 use crate::bigint::biguint::{BigUintTarget, CircuitBuilderBiguint};
 use crate::bigint::comparison::CircuitBuilderBiguintSubtractiveComparison;
+use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::ecdsa::curve::curve_types::AffinePoint;
 use crate::ecdsa::curve::ecdsa::{ECDSAPublicKey, ECDSASignature};
 use crate::ecdsa::curve::secp256k1::Secp256K1;
@@ -46,6 +47,7 @@ pub struct TransferMessage {
     pub l1_address: BigUint,
     pub l1_signature: ECDSASignature<Secp256K1>,
     pub l1_pk: ECDSAPublicKey<Secp256K1>,
+    pub is_enabled: bool,
 }
 
 impl Default for TransferMessage {
@@ -65,11 +67,12 @@ impl Default for TransferMessage {
             l1_address: BigUint::default(),
             l1_signature: ECDSASignature::<Secp256K1>::default(),
             l1_pk: ECDSAPublicKey::<Secp256K1>::default(),
+            is_enabled: false,
         }
     }
 }
 
-pub const TRANSFER_PUBLIC_INPUTS_LEN: usize = 81;
+pub const TRANSFER_PUBLIC_INPUTS_LEN: usize = 82;
 
 impl TransferMessage {
     pub fn from_public_inputs<F: Field + Extendable<5> + RichField>(pis: &[F]) -> Self {
@@ -117,6 +120,7 @@ impl TransferMessage {
             y: Secp256K1Base::from_noncanonical_biguint(y),
             zero: false,
         });
+        let is_enabled = pis[81].is_nonzero();
 
         Self {
             from_account_index,
@@ -133,6 +137,7 @@ impl TransferMessage {
             l1_address,
             l1_signature,
             l1_pk,
+            is_enabled,
         }
     }
 }
@@ -154,6 +159,7 @@ pub struct TransferMessageTarget {
     pub l1_address: BigUintTarget,
     pub l1_signature: ECDSASignatureTarget<Secp256K1>,
     pub l1_pk: ECDSAPublicKeyTarget<Secp256K1>,
+    pub is_enabled: BoolTarget,
 }
 
 impl TransferMessageTarget {
@@ -191,6 +197,7 @@ impl TransferMessageTarget {
                 _phantom: std::marker::PhantomData,
             },
         });
+        let is_enabled = BoolTarget::new_unsafe(pis[81]);
 
         Self {
             from_account_index,
@@ -207,6 +214,7 @@ impl TransferMessageTarget {
             l1_address,
             l1_signature,
             l1_pk,
+            is_enabled,
         }
     }
 
@@ -227,6 +235,7 @@ impl TransferMessageTarget {
         builder.register_public_input_biguint(&self.l1_signature.s.value);
         builder.register_public_input_biguint(&self.l1_pk.0.x.value);
         builder.register_public_input_biguint(&self.l1_pk.0.y.value);
+        builder.register_public_input(self.is_enabled.target);
     }
 
     pub fn new(builder: &mut Builder) -> Self {
@@ -266,6 +275,7 @@ impl TransferMessageTarget {
                     _phantom: core::marker::PhantomData,
                 },
             }),
+            is_enabled: BoolTarget::new_unsafe(builder.add_virtual_target()), // safe because connected to safe inputs
         }
     }
 
@@ -306,6 +316,7 @@ impl TransferMessageTarget {
                     _phantom: core::marker::PhantomData,
                 },
             }),
+            is_enabled: BoolTarget::new_unsafe(builder.add_virtual_public_input()), // Safe because it is connected to public witness from constrained circuit
         }
     }
 
@@ -326,6 +337,7 @@ impl TransferMessageTarget {
             l1_address: builder.select_biguint(flag, &a.l1_address, &b.l1_address),
             l1_signature: builder.select_ecdsa_signature(flag, &a.l1_signature, &b.l1_signature),
             l1_pk: builder.select_ecdsa_public_key(flag, &a.l1_pk, &b.l1_pk),
+            is_enabled: builder.select_bool(flag, a.is_enabled, b.is_enabled),
         }
     }
 
@@ -374,6 +386,7 @@ impl TransferMessageTarget {
                     _phantom: core::marker::PhantomData,
                 },
             }),
+            is_enabled: builder._false(),
         }
     }
 
@@ -396,6 +409,17 @@ impl TransferMessageTarget {
         builder.conditional_assert_zero_biguint(cond, &self.l1_signature.s.value);
         builder.conditional_assert_zero_biguint(cond, &self.l1_pk.0.x.value);
         builder.conditional_assert_zero_biguint(cond, &self.l1_pk.0.y.value);
+        builder.conditional_assert_zero(cond, self.is_enabled.target);
+    }
+    /// An enabled message must come from a non-treasury account with a set L1 address and L1 public key.
+    pub fn conditional_assert_signer_not_empty(&self, builder: &mut Builder) {
+        builder.conditional_assert_not_zero(self.is_enabled, self.from_account_index);
+        let is_l1_address_zero = builder.is_zero_biguint(&self.l1_address);
+        builder.conditional_assert_false(self.is_enabled, is_l1_address_zero);
+        let is_l1_pk_x_zero = builder.is_zero_biguint(&self.l1_pk.0.x.value);
+        let is_l1_pk_y_zero = builder.is_zero_biguint(&self.l1_pk.0.y.value);
+        let is_l1_pk_zero = builder.and(is_l1_pk_x_zero, is_l1_pk_y_zero);
+        builder.conditional_assert_false(self.is_enabled, is_l1_pk_zero);
     }
 
     pub fn connect(builder: &mut Builder, a: &Self, b: &Self) {
@@ -417,6 +441,7 @@ impl TransferMessageTarget {
         builder.connect_biguint(&a.l1_signature.s.value, &b.l1_signature.s.value);
         builder.connect_biguint(&a.l1_pk.0.x.value, &b.l1_pk.0.x.value);
         builder.connect_biguint(&a.l1_pk.0.y.value, &b.l1_pk.0.y.value);
+        builder.connect(a.is_enabled.target, b.is_enabled.target);
     }
 
     pub fn get_transfer_l1_signature_msg_hash(

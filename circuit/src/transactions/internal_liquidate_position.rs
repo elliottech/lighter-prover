@@ -72,6 +72,11 @@ impl Verify for InternalLiquidatePositionTxTarget {
     fn verify(&mut self, builder: &mut Builder, tx_type: &TxTypeTargets, tx_state: &TxState) {
         let is_enabled = tx_type.is_internal_liquidate_position;
         self.success = is_enabled;
+        builder.conditional_assert_eq_constant(
+            is_enabled,
+            tx_state.asset_indices[TX_ASSET_ID],
+            USDC_ASSET_INDEX,
+        );
 
         builder.conditional_assert_eq(
             is_enabled,

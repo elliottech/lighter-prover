@@ -7,9 +7,13 @@ use plonky2::iop::target::BoolTarget;
 use plonky2::iop::witness::Witness;
 use serde::Deserialize;
 
+use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::tx_interface::{Apply, Verify};
 use crate::types::config::Builder;
-use crate::types::constants::{INSERT_ORDER, OWNER_ACCOUNT_ID};
+use crate::types::constants::{
+    BASE_ASSET_ID, INSERT_ORDER, MARKET_TYPE_BINARY_OPTIONS, MARKET_TYPE_PERPS, NIL_ASSET_INDEX,
+    OWNER_ACCOUNT_ID, QUOTE_ASSET_ID, TX_ASSET_ID, USDC_ASSET_INDEX, USDC_BASE_ASSET_ID,
+};
 use crate::types::tx_state::TxState;
 use crate::types::tx_type::TxTypeTargets;
 
@@ -74,6 +78,40 @@ impl Verify for InternalClaimOrderTxTarget {
             is_enabled,
             tx_state.market.market_index,
             tx_state.register_stack[0].market_index,
+        );
+        let is_perps_market =
+            builder.is_equal_constant(tx_state.market.market_type, MARKET_TYPE_PERPS);
+        let is_binary_options_market =
+            builder.is_equal_constant(tx_state.market.market_type, MARKET_TYPE_BINARY_OPTIONS);
+        let perps_flag = builder.and(is_enabled, is_perps_market);
+        let non_perps_flag = builder.and_not(is_enabled, is_perps_market);
+        let spot_flag = builder.and_not(non_perps_flag, is_binary_options_market);
+        let bo_flag = builder.and(is_enabled, is_binary_options_market);
+
+        builder.conditional_assert_eq_constant(
+            perps_flag,
+            tx_state.asset_indices[TX_ASSET_ID],
+            USDC_ASSET_INDEX,
+        );
+        builder.conditional_assert_eq(
+            spot_flag,
+            tx_state.market.base_asset_id,
+            tx_state.asset_indices[BASE_ASSET_ID],
+        );
+        builder.conditional_assert_eq(
+            spot_flag,
+            tx_state.market.quote_asset_id,
+            tx_state.asset_indices[QUOTE_ASSET_ID],
+        );
+        builder.conditional_assert_eq(
+            bo_flag,
+            tx_state.market.quote_asset_id,
+            tx_state.asset_indices[USDC_BASE_ASSET_ID],
+        );
+        builder.conditional_assert_eq_constant(
+            bo_flag,
+            tx_state.asset_indices[QUOTE_ASSET_ID],
+            NIL_ASSET_INDEX,
         );
 
         self.success = is_enabled;

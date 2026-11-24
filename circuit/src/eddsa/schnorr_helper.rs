@@ -4,6 +4,7 @@
 //! Off-circuit helpers for building p3-schnorr signature-batch proofs from a block's
 //! tx witnesses.
 
+use log::Level;
 use p3_field::{PrimeCharacteristicRing, PrimeField64 as P3PrimeField64};
 use p3_goldilocks::Goldilocks;
 use p3_schnorr::poseidon::{
@@ -12,6 +13,8 @@ use p3_schnorr::poseidon::{
 use plonky2::field::extension::quintic::QuinticExtension;
 use plonky2::field::types::{Field, PrimeField, PrimeField64};
 use plonky2::plonk::proof::ProofWithPublicInputs;
+use plonky2::timed;
+use plonky2::util::timing::TimingTree;
 
 use crate::eddsa::curve::scalar_field::ECgFp5Scalar;
 use crate::eddsa::schnorr::{SchnorrSig, dummy_schnorr_instance};
@@ -115,11 +118,20 @@ pub fn prove_signature_batch_proof(
         ));
     }
 
+    let mut timing = TimingTree::new("prove_signature_batch_proof", Level::Debug);
     let batch = p3_schnorr::types::Batch::new(instances).expect("batch construction failed");
-    let proving_output = p3_schnorr::prove_signature_batch_with_capacity(&batch, capacity)
-        .expect("p3-schnorr STARK prove failed");
-    let witness = p3_schnorr_recursion::prepare_recursive_witness(&proving_output, capacity)
-        .expect("prepare recursive witness failed");
-    p3_schnorr_recursion::prove_transcript_verifier(signature_batch_circuit, &witness)
-        .expect("p3-schnorr-recursion Plonky2 prove failed")
+    let proving_output = timed!(timing, "p3-schnorr STARK prove", {
+        p3_schnorr::prove_signature_batch_with_capacity(&batch, capacity)
+            .expect("p3-schnorr STARK prove failed")
+    });
+    let witness = timed!(timing, "prepare recursive witness", {
+        p3_schnorr_recursion::prepare_recursive_witness(&proving_output, capacity)
+            .expect("prepare recursive witness failed")
+    });
+    let proof = timed!(timing, "plonky2 transcript verifier prove", {
+        p3_schnorr_recursion::prove_transcript_verifier(signature_batch_circuit, &witness)
+            .expect("p3-schnorr-recursion Plonky2 prove failed")
+    });
+    timing.print();
+    proof
 }

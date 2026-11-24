@@ -35,7 +35,9 @@ use crate::types::constants::{
     ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE, POSITION_LIST_SIZE, PUBLIC_MARKET_INDEX_MERKLE_LEVELS,
     REGISTER_STACK_SIZE, SHARES_DELTA_LIST_SIZE,
 };
+use crate::types::ecdsa_pub_key::{ECDSA_PUB_KEY_COMPRESSED_LEN, EcdsaPubKey};
 use crate::types::register::{BaseRegisterInfo, RegisterStack};
+use crate::types::signature_slot::EcdsaSignature;
 
 type ProofData = Vec<Vec<[u64; 4]>>;
 
@@ -950,4 +952,63 @@ where
         .unwrap();
     let count = stack.iter().filter(|&x| !x.is_empty()).count();
     Ok(RegisterStack { stack, count })
+}
+
+pub fn deserialize_ecdsa_pk_compressed<'de, D>(deserializer: D) -> Result<EcdsaPubKey, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct Visitor;
+    impl<'de> de::Visitor<'de> for Visitor {
+        type Value = [u8; ECDSA_PUB_KEY_COMPRESSED_LEN];
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a byte array of length 33")
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: de::SeqAccess<'de>,
+        {
+            let mut array = [0u8; ECDSA_PUB_KEY_COMPRESSED_LEN];
+            for (i, slot) in array.iter_mut().enumerate() {
+                *slot = seq
+                    .next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(i, &self))?;
+            }
+            Ok(array)
+        }
+    }
+    let bytes = deserializer.deserialize_seq(Visitor)?;
+    EcdsaPubKey::from_compressed(&bytes).map_err(de::Error::custom)
+}
+
+pub fn deserialize_ecdsa_signature<'de, D>(deserializer: D) -> Result<EcdsaSignature, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct Visitor;
+    impl<'de> de::Visitor<'de> for Visitor {
+        type Value = [u8; 64];
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a byte array of length 64")
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: de::SeqAccess<'de>,
+        {
+            let mut array = [0u8; 64];
+            for (i, slot) in array.iter_mut().enumerate() {
+                *slot = seq
+                    .next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(i, &self))?;
+            }
+            Ok(array)
+        }
+    }
+    Ok(EcdsaSignature::from_bytes(
+        &deserializer.deserialize_seq(Visitor)?,
+    ))
 }

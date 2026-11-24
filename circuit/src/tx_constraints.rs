@@ -81,6 +81,9 @@ use crate::transactions::l1_burn_shares::{L1BurnSharesTxTarget, L1BurnSharesTxTa
 use crate::transactions::l1_cancel_all_orders::{
     L1CancelAllOrdersTxTarget, L1CancelAllOrdersTxTargetWitness,
 };
+use crate::transactions::l1_change_ecdsa_pubkey::{
+    L1ChangeECDSAPubKeyTxTarget, L1ChangeECDSAPubKeyTxTargetWitness,
+};
 use crate::transactions::l1_change_pubkey::{
     L1ChangePubKeyTxTarget, L1ChangePubKeyTxTargetWitness,
 };
@@ -108,6 +111,9 @@ use crate::transactions::l2_cancel_all_orders::{
     L2CancelAllOrdersTxTarget, L2CancelAllOrdersTxTargetWitness,
 };
 use crate::transactions::l2_cancel_order::{L2CancelOrderTxTarget, L2CancelOrderTxTargetWitness};
+use crate::transactions::l2_change_ecdsa_pubkey::{
+    L2ChangeECDSAPubKeyTxTarget, L2ChangeECDSAPubKeyTxTargetWitness,
+};
 use crate::transactions::l2_change_pubkey::{
     L2ChangePubKeyTxTarget, L2ChangePubKeyTxTargetWitness,
 };
@@ -169,7 +175,10 @@ use crate::transactions::l2_update_public_pool::{
 };
 use crate::transactions::l2_withdraw::{L2WithdrawTxTarget, L2WithdrawTxTargetWitness};
 use crate::tx::Tx;
-use crate::tx_attributes::{ATTR_SKIP_TX_NONCE, TxAttributesTarget, TxAttributesTargetWitness};
+use crate::tx_attributes::{
+    ATTR_REVOKE_PUB_KEY_WITHOUT_L1_SIGNATURE, ATTR_SKIP_TX_NONCE, TxAttributesTarget,
+    TxAttributesTargetWitness,
+};
 use crate::tx_interface::TransactionTarget;
 use crate::types::account::{AccountTarget, AccountTargetWitness};
 use crate::types::account_asset::{AccountAssetTarget, AccountAssetTargetWitness};
@@ -185,12 +194,13 @@ use crate::types::account_position::{
 };
 use crate::types::api_key::{ApiKeyTarget, ApiKeyTargetWitness};
 use crate::types::asset::{
-    AssetTarget, AssetTargetWitness, all_assets_hash, apply_diff_assets, diff_assets,
-    random_access_assets,
+    AssetTarget, AssetTargetWitness, all_assets_hash, apply_diff_assets, connect_assets,
+    diff_assets, random_access_assets,
 };
 use crate::types::binary_options_position::BinaryOptionsPositionWitness;
-use crate::types::config::{BIG_U96_LIMBS, BIGU16_U64_LIMBS, Builder};
+use crate::types::config::{BIG_U96_LIMBS, BIGU16_U64_LIMBS, Builder, SignatureSchemes};
 use crate::types::constants::*;
+use crate::types::ecdsa_pub_key::EcdsaPubKeyTarget;
 use crate::types::margined_asset::{
     MarginedAssetTarget, MarginedAssetTargetWitness, all_margined_assets_hash,
     apply_diff_margined_assets, diff_margined_assets, random_access_margined_assets,
@@ -211,6 +221,9 @@ use crate::types::register::{
     BaseRegisterInfoTarget, RegisterInfoTargetWitness, RegisterStackTarget,
 };
 use crate::types::risk_info::RiskInfoTarget;
+use crate::types::signature_slot::{
+    EcdsaSignatureTarget, EcdsaSignatureTargetWitness, SignatureSlotTargets,
+};
 use crate::types::system_config::{SystemConfigTarget, SystemConfigTargetWitness};
 use crate::types::tx_state::TxState;
 use crate::types::tx_type::{TxTypeTargets, TxTypeVerifyTargets};
@@ -233,6 +246,7 @@ pub struct TxTarget {
     pub l1_withdraw_tx_target: TransactionTarget<L1WithdrawTxTarget>,
     pub l1_create_order_tx_target: TransactionTarget<L1CreateOrderTxTarget>,
     pub l1_change_pub_key_tx_target: TransactionTarget<L1ChangePubKeyTxTarget>,
+    pub l1_change_ecdsa_pub_key_tx_target: TransactionTarget<L1ChangeECDSAPubKeyTxTarget>,
     pub l1_burn_shares_tx_target: TransactionTarget<L1BurnSharesTxTarget>,
     pub l1_register_asset_tx_target: TransactionTarget<L1RegisterAssetTxTarget>,
     pub l1_update_asset_tx_target: TransactionTarget<L1UpdateAssetTxTarget>,
@@ -242,6 +256,7 @@ pub struct TxTarget {
     /*   L2 Transactions   */
     /***********************/
     pub l2_change_pub_key_tx_target: TransactionTarget<L2ChangePubKeyTxTarget>,
+    pub l2_change_ecdsa_pub_key_tx_target: TransactionTarget<L2ChangeECDSAPubKeyTxTarget>,
     pub l2_create_sub_account_tx_target: TransactionTarget<L2CreateSubAccountTxTarget>,
     pub l2_create_public_pool_tx_target: TransactionTarget<L2CreatePublicPoolTxTarget>,
     pub l2_update_public_pool_tx_target: TransactionTarget<L2UpdatePublicPoolTxTarget>,
@@ -294,6 +309,7 @@ pub struct TxTarget {
     pub nonce: Target,
     pub expired_at: Target, // 48 bits
     pub signature: SchnorrSigTarget,
+    pub ecdsa_signature: EcdsaSignatureTarget,
     // Fee targets for trades
     pub taker_fee: SignedTarget,
     pub maker_fee: SignedTarget,
@@ -458,6 +474,9 @@ impl TxTarget {
             l1_change_pub_key_tx_target: TransactionTarget::new(L1ChangePubKeyTxTarget::new(
                 builder,
             )),
+            l1_change_ecdsa_pub_key_tx_target: TransactionTarget::new(
+                L1ChangeECDSAPubKeyTxTarget::new(builder),
+            ),
             l1_burn_shares_tx_target: TransactionTarget::new(L1BurnSharesTxTarget::new(builder)),
             l1_register_asset_tx_target: TransactionTarget::new(L1RegisterAssetTxTarget::new(
                 builder,
@@ -473,6 +492,9 @@ impl TxTarget {
             l2_change_pub_key_tx_target: TransactionTarget::new(L2ChangePubKeyTxTarget::new(
                 builder,
             )),
+            l2_change_ecdsa_pub_key_tx_target: TransactionTarget::new(
+                L2ChangeECDSAPubKeyTxTarget::new(builder),
+            ),
             l2_create_sub_account_tx_target: TransactionTarget::new(
                 L2CreateSubAccountTxTarget::new(builder),
             ),
@@ -582,6 +604,7 @@ impl TxTarget {
             nonce: builder.add_virtual_target(),
             expired_at: builder.add_virtual_target(),
             signature: SchnorrSigTarget::new(builder),
+            ecdsa_signature: EcdsaSignatureTarget::new(builder),
             taker_fee: builder.add_virtual_signed_target(),
             maker_fee: builder.add_virtual_signed_target(),
 
@@ -700,6 +723,7 @@ impl TxTarget {
         block_created_at: Target,
         state_metadata_hash: HashOutTarget,
         margined_asset_list_size: usize,
+        signature_schemes: SignatureSchemes,
     ) -> (
         [U8Target; MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX], // priority operation's public data
         BoolTarget,                                                // is there a priority operation
@@ -707,14 +731,18 @@ impl TxTarget {
         BoolTarget,                                          // is there a on chain operation
         HashOutTarget,                                       // public market details hash
         HashOutTarget,                                       // account delta tree root
-        QuinticExtensionTarget, // account_pk (absorbed into the p3-schnorr digest when signed)
-        QuinticExtensionTarget, // tx_hash (absorbed into the p3-schnorr digest when signed)
-        SchnorrSigTarget,       // signature (absorbed into the p3-schnorr digest when signed)
-        BoolTarget,             // signature_check: slot carries a real signature to verify
+        SignatureSlotTargets, // absorbed into the p3-schnorr / p3-ecdsa digest when signed
     ) {
         let tx_type = TxTypeTargets::new(builder, self.tx_type);
         let tx_hash = self.select_tx_hash(builder, &tx_type, chain_id);
-        let account_pk = self.select_account_pk(builder, &tx_type);
+        let revoke_with_old_key = self.is_revoke_with_old_key(
+            builder,
+            tx_type.is_l2_change_pub_key,
+            tx_type.is_l2_change_ecdsa_pub_key,
+        );
+        let account_pk = self.select_account_pk(builder, &tx_type, revoke_with_old_key);
+        let (account_is_ecdsa, account_ecdsa_pk) =
+            self.select_account_ecdsa_pk(builder, &tx_type, revoke_with_old_key);
         let partial_main_account = self.build_partial_main_account();
 
         // Perform common verifications for the transaction.
@@ -725,8 +753,10 @@ impl TxTarget {
                 block_created_at,
                 nonce: self.nonce,
                 api_key_before_nonce: self.api_key_before.nonce,
-                signature: self.signature.clone(),
                 account_pk,
+                account_is_ecdsa,
+                account_ecdsa_pk: account_ecdsa_pk.clone(),
+                revoke_with_old_key,
                 tx_hash,
                 instruction_type: self.register_stack_before[0].instruction_type,
                 tx_sender_account_partial: partial_main_account,
@@ -833,7 +863,7 @@ impl TxTarget {
                     .hash(builder, self.market_before.market_type)
             });
 
-        self.attributes.sanitize_and_normalize(
+        let is_integrator_valid = self.attributes.sanitize_and_normalize(
             builder,
             &self.accounts_before[OWNER_ACCOUNT_ID],
             &self.market_before,
@@ -848,6 +878,7 @@ impl TxTarget {
             first_asset_margin_index,
             next_margin_asset_index,
             margined_asset_list_size,
+            signature_schemes,
             new_instructions: [BaseRegisterInfoTarget::empty(builder); NEW_INSTRUCTIONS_MAX_SIZE],
             new_instructions_count: builder.zero(),
             register_stack: self.register_stack_before,
@@ -900,6 +931,7 @@ impl TxTarget {
             apply_pool_share_delta_flag: builder._false(),
             between_strategies_flag: builder
                 .is_equal_constant(self.tx_type, TX_TYPE_L2_STRATEGY_TRANSFER as u64),
+            is_integrator_valid,
             attributes: self.attributes.clone(),
         };
 
@@ -1067,6 +1099,15 @@ impl TxTarget {
         builder.connect_hashes(self.new_validium_root, new_validium_root);
         builder.connect_hashes(self.new_state_root, new_state_root);
 
+        let signature_slot = self.signature_slot(
+            builder,
+            tx_hash,
+            account_pk,
+            account_is_ecdsa,
+            account_ecdsa_pk,
+            signature_check,
+        );
+
         (
             priority_operations_pub_data,
             priority_operations_pub_data_exists,
@@ -1074,10 +1115,7 @@ impl TxTarget {
             on_chain_pub_data_exists,
             current_public_market_details_hash,
             current_delta_root,
-            account_pk,
-            tx_hash,
-            self.signature.clone(),
-            signature_check,
+            signature_slot,
         )
     }
 
@@ -1268,6 +1306,11 @@ impl TxTarget {
                     self.internal_transfer_tx_target.inner.strategy_index,
                     strategy_index,
                 );
+                strategy_index = builder.select(
+                    tx_type.is_l2_transfer,
+                    default_strategy_index,
+                    strategy_index,
+                );
                 builder.select(use_strategy, strategy_index, default_strategy_index)
             };
 
@@ -1377,14 +1420,25 @@ impl TxTarget {
             );
             let use_strategy =
                 builder.and_not(is_second_account_insurance_fund, tx_type.is_l2_mint_shares);
+            let use_strategy = builder.and_not(use_strategy, tx_type.is_l2_update_public_pool);
 
             // Override strategy indices with 0 unless the sub account is an insurance fund.
             // Strategy transfer transactions don't use a sub account and the target strategy balance increases,
             // so we don't need to check for l2_strategy_transfer here.
-            let strategy_index = builder.select(
+            let mut strategy_index = builder.select(
                 use_strategy,
                 current_market_details_before.strategy_index,
                 default_strategy_index,
+            );
+            strategy_index = builder.select(
+                tx_type.is_share_burn_tx,
+                default_strategy_index,
+                strategy_index,
+            );
+            strategy_index = builder.select(
+                tx_type.is_l2_transfer,
+                default_strategy_index,
+                strategy_index,
             );
 
             let mut margined_assets = self.accounts_before[SUB_ACCOUNT_ID].margined_assets.clone();
@@ -1499,8 +1553,15 @@ impl TxTarget {
             // Insurance fund spot orders use strategy-1 for USDC instead of the market's strategy
             let is_market_spot =
                 builder.is_equal_constant(self.market_before.market_type, MARKET_TYPE_SPOT);
+            let is_spot_route = builder.is_equal_constant(
+                self.internal_transfer_tx_target.inner.route_type,
+                ROUTE_TYPE_SPOT,
+            );
+            let is_market_spot =
+                builder.select_bool(tx_type.is_internal_transfer, is_spot_route, is_market_spot);
             let is_insurance_fund_spot = builder.and(is_owner_insurance_fund, is_market_spot);
             result = builder.select(is_insurance_fund_spot, spot_strategy_index, result);
+            result = builder.select(tx_type.is_l2_transfer, default_strategy_index, result);
             builder.select(use_strategy, result, default_strategy_index)
         };
 
@@ -1528,9 +1589,17 @@ impl TxTarget {
             // Insurance fund spot orders (maker side) use strategy-1 for USDC
             let is_market_spot =
                 builder.is_equal_constant(self.market_before.market_type, MARKET_TYPE_SPOT);
+            let is_spot_route = builder.is_equal_constant(
+                self.internal_transfer_tx_target.inner.route_type,
+                ROUTE_TYPE_SPOT,
+            );
+            let is_market_spot =
+                builder.select_bool(tx_type.is_internal_transfer, is_spot_route, is_market_spot);
             let is_insurance_fund_spot =
                 builder.and(is_second_account_insurance_fund, is_market_spot);
             result = builder.select(is_insurance_fund_spot, spot_strategy_index, result);
+            result = builder.select(tx_type.is_share_burn_tx, default_strategy_index, result);
+            result = builder.select(tx_type.is_l2_transfer, default_strategy_index, result);
             builder.select(use_strategy, result, default_strategy_index)
         };
 
@@ -1597,6 +1666,28 @@ impl TxTarget {
             self.accounts_before[1].hash(builder, &position_bucket_hashes_for_account[1]),
             self.accounts_before[2].fee_account_hash(builder),
         ];
+        let empty_market_pub_data_root = builder.constant_hash(EMPTY_MARKET_DATA_TREE_ROOT);
+        let empty_aggregated_balances_root = builder.constant_hash(EMPTY_ASSET_TREE_ROOT);
+        for i in 0..NB_ACCOUNTS_PER_TX {
+            let is_empty = old_hashes_and_is_empty_infos[i].2;
+            builder.conditional_assert_eq_hash(
+                is_empty,
+                &self.accounts_before[i].market_pub_data_root,
+                &empty_market_pub_data_root,
+            );
+            builder.conditional_assert_eq_hash(
+                is_empty,
+                &self.accounts_before[i].aggregated_balances_root,
+                &empty_aggregated_balances_root,
+            );
+        }
+        let empty_partial_pub_data_hash =
+            builder.constant_hash(EMPTY_ACCOUNT_PARTIAL_PUB_DATA_HASH);
+        builder.conditional_assert_eq_hash(
+            old_hashes_and_is_empty_infos[2].2,
+            &self.accounts_before[2].partial_hash_for_pub_data,
+            &empty_partial_pub_data_hash,
+        );
 
         let old_account_delta_hashes = [
             self.accounts_delta_before[0].hash(builder),
@@ -1684,13 +1775,15 @@ impl TxTarget {
                     BIG_U96_LIMBS,
                 );
 
-                let balance_delta = builder.sub_bigint_non_carry(
+                let mut balance_delta = builder.sub_bigint_non_carry(
                     &new_balance_bigint,
                     &old_balance_bigint,
                     BIG_U96_LIMBS,
                 );
-                let balance_delta = builder
-                    .mul_bigint_by_bool(&balance_delta, tx_state.is_sender_receiver_different);
+                if i == RECEIVER_ACCOUNT_ID {
+                    balance_delta = builder
+                        .mul_bigint_by_bool(&balance_delta, tx_state.is_sender_receiver_different);
+                }
 
                 tx_state.accounts[i].aggregated_balances[j] = builder.add_bigint_non_carry(
                     &tx_state.accounts[i].aggregated_balances[j],
@@ -2241,6 +2334,26 @@ impl TxTarget {
             tx_state.accounts[FEE_ACCOUNT_ID].fee_account_hash(builder);
         let new_fee_account_delta_hash =
             tx_state.accounts_delta[FEE_ACCOUNT_ID].fee_account_hash(builder);
+        let is_nil_fee_account = builder.is_equal_constant(
+            self.accounts_before[FEE_ACCOUNT_ID].account_index,
+            NIL_ACCOUNT_INDEX as u64,
+        );
+        let is_distinct_nil_fee_account = builder.and(is_fee_account_different, is_nil_fee_account);
+        builder.conditional_assert_eq_hash(
+            is_distinct_nil_fee_account,
+            &new_fee_account_hash,
+            &old_account_hashes[FEE_ACCOUNT_ID][0],
+        );
+        builder.conditional_assert_eq_hash(
+            is_distinct_nil_fee_account,
+            &new_fee_account_pub_data_hash,
+            &old_account_hashes[FEE_ACCOUNT_ID][1],
+        );
+        builder.conditional_assert_eq_hash(
+            is_distinct_nil_fee_account,
+            &new_fee_account_delta_hash,
+            &old_account_hashes[FEE_ACCOUNT_ID][2],
+        );
 
         let new_root = recalculate_root(
             builder,
@@ -2527,6 +2640,13 @@ impl TxTarget {
 
         // Verify that index_1 is either 0 or a valid client order index. Because MAX_CLIENT_ORDER_INDEX = 1 << 48 - 1, single 48 bit range-check is enough.
         builder.register_range_check(self.account_order_before.index_1, CLIENT_ORDER_INDEX_BITS);
+        let is_account_order_before_empty = self.account_order_before.is_empty(builder);
+        let is_account_order_before_non_empty = builder.not(is_account_order_before_empty);
+        builder.conditional_assert_eq(
+            is_account_order_before_non_empty,
+            self.account_order_before.index_1,
+            self.account_order_before.client_order_index,
+        );
 
         // Set oid leaf and recalculate root
         let old_account_orders_root = builder.select_hash(
@@ -2933,17 +3053,97 @@ impl TxTarget {
         }
     }
 
-    /// Selects the public key for the account. For L2 Change Pub Key transaction, the new public key in transaction is used.
+    /// True for an L2 change pubkey tx (of either scheme) that revokes the slot with the signature
+    /// of the key currently in it, in place of the L1 signature of the account owner: the key in
+    /// the tx is the revoke key and the tx carries the attribute for it. The attribute has no
+    /// effect when the key in the tx is not the revoke key.
+    pub fn is_revoke_with_old_key(
+        &self,
+        builder: &mut Builder,
+        is_l2_change_pub_key: BoolTarget,
+        is_l2_change_ecdsa_pub_key: BoolTarget,
+    ) -> BoolTarget {
+        let is_schnorr_revoke =
+            builder.is_zero_quintic_ext(self.l2_change_pub_key_tx_target.inner.pub_key);
+        let is_schnorr_revoke = builder.and(is_l2_change_pub_key, is_schnorr_revoke);
+        let is_ecdsa_revoke = self
+            .l2_change_ecdsa_pub_key_tx_target
+            .inner
+            .pub_key
+            .is_zero(builder);
+        let is_ecdsa_revoke = builder.and(is_l2_change_ecdsa_pub_key, is_ecdsa_revoke);
+        let is_revoke = builder.or(is_schnorr_revoke, is_ecdsa_revoke);
+
+        // The attribute is range checked to a single bit
+        let without_l1_signature = BoolTarget::new_unsafe(
+            self.attributes
+                .get(ATTR_REVOKE_PUB_KEY_WITHOUT_L1_SIGNATURE),
+        );
+        builder.and(is_revoke, without_l1_signature)
+    }
+
+    /// Selects the Schnorr public key for the account. For L2 Change Pub Key transaction, the new
+    /// public key in transaction is used, unless the slot is revoked with the key currently in it;
+    /// for L2 Change ECDSA Pub Key the Schnorr key is cleared.
     fn select_account_pk(
         &self,
         builder: &mut Builder,
         tx_type: &TxTypeTargets,
+        revoke_with_old_key: BoolTarget,
     ) -> QuinticExtensionTarget {
-        builder.select_quintic_ext(
-            tx_type.is_l2_change_pub_key,
+        let zero = builder.zero_quintic_ext();
+        let use_new_pk = builder.and_not(tx_type.is_l2_change_pub_key, revoke_with_old_key);
+        let pk = builder.select_quintic_ext(
+            use_new_pk,
             self.l2_change_pub_key_tx_target.inner.pub_key,
             self.api_key_before.public_key,
-        )
+        );
+        builder.select_quintic_ext(tx_type.is_l2_change_ecdsa_pub_key, zero, pk)
+    }
+
+    /// Selects the signing scheme and ECDSA public key for the account: the key being installed by
+    /// an L2 Change ECDSA Pub Key transaction, the api key's own ECDSA key otherwise (including an
+    /// L2 Change ECDSA Pub Key that revokes the slot with the key currently in it). An L2 Change
+    /// Pub Key (Schnorr) transaction is always a Schnorr-signed slot.
+    pub fn select_account_ecdsa_pk(
+        &self,
+        builder: &mut Builder,
+        tx_type: &TxTypeTargets,
+        revoke_with_old_key: BoolTarget,
+    ) -> (BoolTarget, EcdsaPubKeyTarget) {
+        let is_ecdsa_before = self.api_key_before.is_ecdsa();
+        let is_ecdsa = builder.or(tx_type.is_l2_change_ecdsa_pub_key, is_ecdsa_before);
+        let is_ecdsa = builder.and_not(is_ecdsa, tx_type.is_l2_change_pub_key);
+
+        let use_new_pk = builder.and_not(tx_type.is_l2_change_ecdsa_pub_key, revoke_with_old_key);
+        let pk = EcdsaPubKeyTarget::select(
+            builder,
+            use_new_pk,
+            &self.l2_change_ecdsa_pub_key_tx_target.inner.pub_key,
+            &self.api_key_before.ecdsa_public_key,
+        );
+        (is_ecdsa, pk)
+    }
+
+    /// Routes the slot's signature to exactly one digest chain according to the signing scheme.
+    pub fn signature_slot(
+        &self,
+        builder: &mut Builder,
+        tx_hash: QuinticExtensionTarget,
+        account_pk: QuinticExtensionTarget,
+        account_is_ecdsa: BoolTarget,
+        account_ecdsa_pk: EcdsaPubKeyTarget,
+        signature_check: BoolTarget,
+    ) -> SignatureSlotTargets {
+        SignatureSlotTargets {
+            tx_hash,
+            account_pk,
+            signature: self.signature.clone(),
+            schnorr_check: builder.and_not(signature_check, account_is_ecdsa),
+            ecdsa_pk: account_ecdsa_pk,
+            ecdsa_signature: self.ecdsa_signature.clone(),
+            ecdsa_check: builder.and(signature_check, account_is_ecdsa),
+        }
     }
 
     /// Compute and select tx_hash for L2 transactions
@@ -2961,6 +3161,18 @@ impl TxTarget {
         selected_hash = builder.select_quintic_ext(
             tx_type.is_l2_change_pub_key,
             l2_change_pub_key_hash,
+            selected_hash,
+        );
+
+        let l2_change_ecdsa_pub_key_hash = self.l2_change_ecdsa_pub_key_tx_target.hash(
+            builder,
+            self.nonce,
+            self.expired_at,
+            chain_id,
+        );
+        selected_hash = builder.select_quintic_ext(
+            tx_type.is_l2_change_ecdsa_pub_key,
+            l2_change_ecdsa_pub_key_hash,
             selected_hash,
         );
 
@@ -3296,6 +3508,17 @@ impl TxTarget {
 
         builder.register_range_check(self.asset_indices[TX_ASSET_ID], ASSET_LIST_SIZE_BITS);
         builder.register_range_check(self.asset_indices[FEE_ASSET_ID], ASSET_LIST_SIZE_BITS);
+        let empty_asset = AssetTarget::empty(builder);
+        connect_assets(
+            builder,
+            &self.all_assets_before[NIL_ASSET_INDEX as usize],
+            &empty_asset,
+        );
+        connect_assets(
+            builder,
+            &self.all_assets_before[ASSET_LIST_SIZE - 1],
+            &empty_asset,
+        );
 
         let fee_account_is_taker_or_maker =
             builder.or(tx_state.fee_account_is_taker, tx_state.fee_account_is_maker);
@@ -3328,6 +3551,8 @@ impl TxTarget {
         self.l1_deposit_tx_target.verify(builder, tx_type, tx_state);
         self.l1_change_pub_key_tx_target
             .verify(builder, tx_type, tx_state);
+        self.l1_change_ecdsa_pub_key_tx_target
+            .verify(builder, tx_type, tx_state);
         self.l1_create_market_tx_target
             .verify(builder, tx_type, tx_state);
         self.l1_update_market_tx_target
@@ -3351,6 +3576,8 @@ impl TxTarget {
         /*   L2 Transactions   */
         /***********************/
         self.l2_change_pub_key_tx_target
+            .verify(builder, tx_type, tx_state);
+        self.l2_change_ecdsa_pub_key_tx_target
             .verify(builder, tx_type, tx_state);
         self.l2_create_sub_account_tx_target
             .verify(builder, tx_type, tx_state);
@@ -3453,6 +3680,11 @@ impl TxTarget {
             .l1_change_pub_key_tx_target
             .priority_operations_pub_data(builder);
         result = builder.select_arr_u8(exists, &l1_change_pubkey, &result);
+
+        let (exists, l1_change_ecdsa_pubkey) = self
+            .l1_change_ecdsa_pub_key_tx_target
+            .priority_operations_pub_data(builder);
+        result = builder.select_arr_u8(exists, &l1_change_ecdsa_pubkey, &result);
 
         let (exists, l1_burn_shares) = self
             .l1_burn_shares_tx_target
@@ -3564,6 +3796,8 @@ impl TxTarget {
         self.l1_cancel_all_orders_tx_target.apply(builder, tx_state);
         self.l1_withdraw_tx_target.apply(builder, tx_state);
         self.l1_change_pub_key_tx_target.apply(builder, tx_state);
+        self.l1_change_ecdsa_pub_key_tx_target
+            .apply(builder, tx_state);
         self.l1_create_order_tx_target.apply(builder, tx_state);
         self.l1_burn_shares_tx_target.apply(builder, tx_state);
         self.l1_register_asset_tx_target.apply(builder, tx_state);
@@ -3574,6 +3808,8 @@ impl TxTarget {
         /*   L2 Transactions   */
         /***********************/
         self.l2_change_pub_key_tx_target.apply(builder, tx_state);
+        self.l2_change_ecdsa_pub_key_tx_target
+            .apply(builder, tx_state);
         self.l2_create_sub_account_tx_target
             .apply(builder, tx_state);
         self.l2_create_public_pool_tx_target
@@ -3874,6 +4110,10 @@ impl<T: Witness<F> + PartialWitnessCurve<F>, F: PrimeField64 + Extendable<5> + R
             &a.l1_change_pub_key_tx_target.inner,
             &b.l1_change_pub_key_tx,
         )?;
+        self.set_l1_change_ecdsa_pub_key_tx_target(
+            &a.l1_change_ecdsa_pub_key_tx_target.inner,
+            &b.l1_change_ecdsa_pub_key_tx,
+        )?;
         self.set_l1_burn_shares_tx_target(&a.l1_burn_shares_tx_target.inner, &b.l1_burn_shares_tx)?;
         self.set_l1_register_asset_tx_target(
             &a.l1_register_asset_tx_target.inner,
@@ -3896,6 +4136,11 @@ impl<T: Witness<F> + PartialWitnessCurve<F>, F: PrimeField64 + Extendable<5> + R
             &a.l2_change_pub_key_tx_target.inner,
             &b.l2_change_pub_key_tx,
         )?;
+        self.set_l2_change_ecdsa_pk_tx_target(
+            &a.l2_change_ecdsa_pub_key_tx_target.inner,
+            &b.l2_change_ecdsa_pub_key_tx,
+        )?;
+        self.set_l2_ecdsa_signature_target(&a.ecdsa_signature, &b.ecdsa_signature)?;
         self.set_l2_create_sub_account_tx_target(
             &a.l2_create_sub_account_tx_target.inner,
             &b.l2_create_sub_account_tx,

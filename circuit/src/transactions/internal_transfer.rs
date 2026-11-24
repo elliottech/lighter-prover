@@ -53,6 +53,7 @@ pub struct InternalTransferTxTarget {
     is_spot: BoolTarget,
 
     // outputs
+    is_enabled: BoolTarget,
     success: BoolTarget,
 }
 
@@ -71,6 +72,7 @@ impl InternalTransferTxTarget {
             is_spot: BoolTarget::default(),
 
             // outputs
+            is_enabled: BoolTarget::default(),
             success: BoolTarget::default(),
         }
     }
@@ -79,21 +81,22 @@ impl InternalTransferTxTarget {
 impl Verify for InternalTransferTxTarget {
     fn verify(&mut self, builder: &mut Builder, tx_type: &TxTypeTargets, tx_state: &TxState) {
         let is_enabled = tx_type.is_internal_transfer;
+        self.is_enabled = is_enabled;
         self.success = is_enabled;
 
         builder.conditional_assert_eq_constant(
-            self.success,
+            self.is_enabled,
             tx_state.register_stack[0].instruction_type,
             TRANSFER_ASSET as u64,
         );
 
         builder.conditional_assert_eq(
-            self.success,
+            self.is_enabled,
             self.from_account_index,
             tx_state.accounts[SENDER_ACCOUNT_ID].account_index,
         );
         builder.conditional_assert_eq(
-            self.success,
+            self.is_enabled,
             tx_state.register_stack[0].account_index, // Fee collector when trade happened
             tx_state.accounts[SENDER_ACCOUNT_ID].account_index,
         );
@@ -105,25 +108,24 @@ impl Verify for InternalTransferTxTarget {
             tx_state.accounts[RECEIVER_ACCOUNT_ID].account_index,
         );
         builder.conditional_assert_eq(
-            self.success,
-            tx_state.accounts[RECEIVER_ACCOUNT_ID].account_index,
+            self.is_enabled,
             tx_state.register_stack[0].generic_field_0,
+            tx_state.accounts[RECEIVER_ACCOUNT_ID].account_index,
         );
         self.success = builder.and_not(self.success, tx_state.is_new_account[RECEIVER_ACCOUNT_ID]);
 
         builder.conditional_assert_eq(
-            self.success,
+            self.is_enabled,
             self.asset_index,
             tx_state.register_stack[0].generic_field_2,
         );
         builder.conditional_assert_eq(
-            self.success,
+            self.is_enabled,
             self.asset_index,
             tx_state.asset_indices[TX_ASSET_ID],
         );
-
         builder.conditional_assert_eq(
-            self.success,
+            self.is_enabled,
             self.route_type,
             tx_state.register_stack[0].pending_type,
         );
@@ -131,7 +133,7 @@ impl Verify for InternalTransferTxTarget {
         builder.range_check_biguint(&self.amount, MAX_TRANSFER_BITS);
         let amount_target = builder.biguint_to_target_unsafe(&self.amount);
         builder.conditional_assert_eq(
-            self.success,
+            self.is_enabled,
             amount_target,
             tx_state.register_stack[0].pending_size,
         );
@@ -141,6 +143,12 @@ impl Verify for InternalTransferTxTarget {
 
         let is_same_account = builder.is_equal(self.from_account_index, self.to_account_index);
         self.success = builder.and_not(self.success, is_same_account);
+
+        builder.conditional_assert_eq(
+            self.is_enabled,
+            self.strategy_index,
+            tx_state.register_stack[0].generic_field_3,
+        );
 
         let nil_strategy_index = builder.constant_usize(NIL_STRATEGY_INDEX);
         let is_invalid_strategy_index = builder.is_gte(self.strategy_index, nil_strategy_index, 64);
@@ -290,9 +298,10 @@ impl Apply for InternalTransferTxTarget {
             &tx_state.margined_asset[TX_ASSET_ID].total_supplied_amount,
         );
 
-        tx_state.register_stack.pop_front(builder, self.success);
+        // Always pop the front of the register stack even if the transaction is not successful
+        tx_state.register_stack.pop_front(builder, self.is_enabled);
 
-        self.success
+        self.is_enabled
     }
 }
 

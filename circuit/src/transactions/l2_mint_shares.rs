@@ -210,6 +210,7 @@ impl Verify for L2MintSharesTxTarget {
             MAX_POOL_SHARES_TO_MINT_OR_BURN_USDC_BITS,
         );
         self.principal_amount = builder.biguint_to_target_safe(&big_principal_amount);
+        builder.conditional_assert_not_zero(is_enabled, self.principal_amount);
 
         let usdc_to_collateral_multiplier =
             builder.constant_biguint(&BigUint::from(USDC_TO_COLLATERAL_MULTIPLIER));

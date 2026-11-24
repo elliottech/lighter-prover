@@ -6,10 +6,10 @@ use plonky2::iop::target::{BoolTarget, Target};
 use super::account::AccountTarget;
 use super::config::Builder;
 use super::constants::*;
+use super::ecdsa_pub_key::EcdsaPubKeyTarget;
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::comparison::CircuitBuilderSubtractiveComparison;
 use crate::eddsa::gadgets::base_field::{CircuitBuilderGFp5, QuinticExtensionTarget};
-use crate::eddsa::schnorr::SchnorrSigTarget;
 use crate::uint::u8::CircuitBuilderU8;
 
 #[derive(Debug)]
@@ -17,6 +17,7 @@ pub struct TxTypeTargets {
     pub is_empty: BoolTarget,
     pub is_l1_deposit: BoolTarget,
     pub is_l1_change_pub_key: BoolTarget,
+    pub is_l1_change_ecdsa_pub_key: BoolTarget,
     pub is_l1_create_market: BoolTarget,
     pub is_l1_update_market: BoolTarget,
     pub is_l1_cancel_all_orders: BoolTarget,
@@ -28,6 +29,7 @@ pub struct TxTypeTargets {
     pub is_l1_set_system_config: BoolTarget,
 
     pub is_l2_change_pub_key: BoolTarget,
+    pub is_l2_change_ecdsa_pub_key: BoolTarget,
     pub is_l2_create_sub_account: BoolTarget,
     pub is_l2_create_public_pool: BoolTarget,
     pub is_l2_update_public_pool: BoolTarget,
@@ -84,8 +86,13 @@ pub struct TxTypeVerifyTargets {
     pub nonce: Target,
     pub api_key_before_nonce: Target,
     pub skip_tx_nonce: Target,
-    pub signature: SchnorrSigTarget,
     pub account_pk: QuinticExtensionTarget,
+    /// True when the signing api key (or the key being installed by a change pubkey tx) is ECDSA.
+    pub account_is_ecdsa: BoolTarget,
+    pub account_ecdsa_pk: EcdsaPubKeyTarget,
+    /// True for an L2 change pubkey tx that revokes the slot with the signature of the key currently in it. The
+    /// account key above is then that key, not the one in the tx.
+    pub revoke_with_old_key: BoolTarget,
     pub tx_hash: QuinticExtensionTarget,
     pub instruction_type: Target,
 
@@ -102,6 +109,8 @@ impl TxTypeTargets {
         let is_l1_deposit = builder.is_equal_constant(tx_type, TX_TYPE_L1_DEPOSIT as u64);
         let is_l1_change_pub_key =
             builder.is_equal_constant(tx_type, TX_TYPE_L1_CHANGE_PUB_KEY as u64);
+        let is_l1_change_ecdsa_pub_key =
+            builder.is_equal_constant(tx_type, TX_TYPE_L1_CHANGE_ECDSA_PUB_KEY as u64);
         let is_l1_create_market =
             builder.is_equal_constant(tx_type, TX_TYPE_L1_CREATE_MARKET as u64);
         let is_l1_update_market =
@@ -119,6 +128,8 @@ impl TxTypeTargets {
 
         let is_l2_change_pub_key =
             builder.is_equal_constant(tx_type, TX_TYPE_L2_CHANGE_PUB_KEY as u64);
+        let is_l2_change_ecdsa_pub_key =
+            builder.is_equal_constant(tx_type, TX_TYPE_L2_CHANGE_ECDSA_PUB_KEY as u64);
         let is_l2_create_sub_account =
             builder.is_equal_constant(tx_type, TX_TYPE_L2_CREATE_SUB_ACCOUNT as u64);
         let is_l2_create_public_pool =
@@ -203,11 +214,13 @@ impl TxTypeTargets {
             is_l1_withdraw.target,
             is_l1_create_order.target,
             is_l1_change_pub_key.target,
+            is_l1_change_ecdsa_pub_key.target,
             is_l1_burn_shares.target,
             is_l1_register_asset.target,
             is_l1_update_asset.target,
             is_l1_set_system_config.target,
             is_l2_change_pub_key.target,
+            is_l2_change_ecdsa_pub_key.target,
             is_l2_create_sub_account.target,
             is_l2_create_public_pool.target,
             is_l2_update_public_pool.target,
@@ -251,6 +264,7 @@ impl TxTypeTargets {
 
         let is_layer2 = BoolTarget::new_unsafe(builder.add_many(vec![
             is_l2_change_pub_key.target,
+            is_l2_change_ecdsa_pub_key.target,
             is_l2_create_sub_account.target,
             is_l2_create_public_pool.target,
             is_l2_update_public_pool.target,
@@ -288,6 +302,7 @@ impl TxTypeTargets {
             is_l1_withdraw.target,
             is_l1_create_order.target,
             is_l1_change_pub_key.target,
+            is_l1_change_ecdsa_pub_key.target,
             is_l1_burn_shares.target,
             is_l1_register_asset.target,
             is_l1_update_asset.target,
@@ -328,12 +343,14 @@ impl TxTypeTargets {
             is_l1_withdraw,
             is_l1_create_order,
             is_l1_change_pub_key,
+            is_l1_change_ecdsa_pub_key,
             is_l1_burn_shares,
             is_l1_register_asset,
             is_l1_update_asset,
             is_l1_set_system_config,
 
             is_l2_change_pub_key,
+            is_l2_change_ecdsa_pub_key,
             is_l2_create_sub_account,
             is_l2_create_public_pool,
             is_l2_update_public_pool,
@@ -447,13 +464,25 @@ impl TxTypeTargets {
             NONCE_BITS,
         );
 
-        // Do not allow empty public keys when executing L2 transactions except for L2 change pubkey.
-        let pk_check = builder.and_not(self.is_layer2, self.is_l2_change_pub_key);
-        builder.conditional_assert_not_zero_quintic_ext(pk_check, verify_inputs.account_pk);
+        // Do not allow empty public keys when executing L2 transactions except for L2 change pubkey
+        // transactions signed with the key in the tx. The key that must be present depends on the
+        // api key's signing scheme.
+        let is_change_pub_key =
+            builder.or(self.is_l2_change_pub_key, self.is_l2_change_ecdsa_pub_key);
+        let is_signed_with_new_pk =
+            builder.and_not(is_change_pub_key, verify_inputs.revoke_with_old_key);
+        let pk_check = builder.and_not(self.is_layer2, is_signed_with_new_pk);
+        let is_schnorr_pk_zero = builder.is_zero_quintic_ext(verify_inputs.account_pk);
+        let is_ecdsa_pk_zero = verify_inputs.account_ecdsa_pk.is_zero(builder);
+        let is_pk_zero = builder.select_bool(
+            verify_inputs.account_is_ecdsa,
+            is_ecdsa_pk_zero,
+            is_schnorr_pk_zero,
+        );
+        builder.conditional_assert_false(pk_check, is_pk_zero);
 
         // Verify transactions signature except for L2 change pubkey with empty new pubkey.
-        let is_new_pubkey_zero = builder.is_zero_quintic_ext(verify_inputs.account_pk);
-        let no_signature_check = builder.and(self.is_l2_change_pub_key, is_new_pubkey_zero);
+        let no_signature_check = builder.and(is_signed_with_new_pk, is_pk_zero);
         let signature_check = builder.and_not(self.is_layer2, no_signature_check);
 
         // If dead man's switch is supposed to be triggered for transaction initiator,
@@ -531,6 +560,14 @@ impl TxTypeTargets {
             is_valid_insurance_fund_operator_tx,
         );
 
+        // Reserved system account is not registered yet, no L2 transactions are allowed.
+        let is_reserved_system_account = builder.is_equal_constant(
+            verify_inputs.tx_sender_account_partial.account_index,
+            RESERVED_SYSTEM_ACCOUNT_INDEX as u64,
+        );
+        let is_reserved_system_account_tx = builder.and(is_reserved_system_account, self.is_layer2);
+        builder.assert_false(is_reserved_system_account_tx);
+
         // For sub-accounts, sub-account creation transactions are not allowed.
         let is_sub_account = builder.is_equal_constant(
             verify_inputs.tx_sender_account_partial.account_type,
@@ -538,6 +575,7 @@ impl TxTypeTargets {
         );
         let is_valid_sub_account_tx = builder.multi_or(&[
             self.is_l2_change_pub_key,
+            self.is_l2_change_ecdsa_pub_key,
             self.is_l2_transfer,
             self.is_l2_withdraw,
             self.is_l2_create_order,
@@ -554,6 +592,9 @@ impl TxTypeTargets {
             self.is_l2_update_account_config,
             self.is_l2_approve_integrator,
             self.is_l2_update_account_asset_config,
+            self.is_l2_create_market,
+            self.is_l2_settle_outcome,
+            self.is_l2_update_market,
         ]);
         let check_sub_account_tx = builder.and(is_sub_account, self.is_layer2);
         builder.conditional_assert_true(check_sub_account_tx, is_valid_sub_account_tx);
@@ -580,6 +621,7 @@ impl TxTypeTargets {
         let is_active_pool = builder.and_not(is_pool_account, is_frozen_status); // Status == 0, is active
         let is_valid_active_pool_tx = builder.multi_or(&[
             self.is_l2_change_pub_key,
+            self.is_l2_change_ecdsa_pub_key,
             self.is_l2_create_order,
             self.is_l2_cancel_order,
             self.is_l2_cancel_all_orders,
@@ -588,8 +630,11 @@ impl TxTypeTargets {
             self.is_l2_create_grouped_orders,
             self.is_l2_strategy_transfer,
         ]);
-        let is_valid_frozen_pool_tx =
-            builder.multi_or(&[self.is_l2_transfer, self.is_l2_change_pub_key]);
+        let is_valid_frozen_pool_tx = builder.multi_or(&[
+            self.is_l2_transfer,
+            self.is_l2_change_pub_key,
+            self.is_l2_change_ecdsa_pub_key,
+        ]);
 
         let check_active_pool_tx = builder.and(is_active_pool, self.is_layer2);
         builder.conditional_assert_true(check_active_pool_tx, is_valid_active_pool_tx);

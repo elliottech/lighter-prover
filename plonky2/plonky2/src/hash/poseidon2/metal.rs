@@ -719,6 +719,45 @@ struct ColumnStorePool {
 
 const MAX_CACHED_COLUMN_STORE_BYTES: u64 = 640 << 20;
 const MAX_COLUMN_STORE_POOL_BYTES: u64 = 4096 << 20;
+/// Hosts at or below this much RAM keep no pool: next to the two signature
+/// batch proofs, the retained buffers push a 16 GiB host into swap.
+const LOW_MEMORY_BYTES: u64 = 20 << 30;
+
+fn column_store_pool_bytes() -> u64 {
+    static BYTES: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *BYTES.get_or_init(|| {
+        if physical_memory_bytes().is_some_and(|bytes| bytes <= LOW_MEMORY_BYTES) {
+            0
+        } else {
+            MAX_COLUMN_STORE_POOL_BYTES
+        }
+    })
+}
+
+fn physical_memory_bytes() -> Option<u64> {
+    unsafe extern "C" {
+        fn sysctlbyname(
+            name: *const core::ffi::c_char,
+            oldp: *mut c_void,
+            oldlenp: *mut usize,
+            newp: *mut c_void,
+            newlen: usize,
+        ) -> core::ffi::c_int;
+    }
+    let mut bytes = 0u64;
+    let mut len = size_of::<u64>();
+    // SAFETY: `hw.memsize` is a 64-bit value and `len` is the size of `bytes`.
+    let status = unsafe {
+        sysctlbyname(
+            c"hw.memsize".as_ptr(),
+            (&raw mut bytes).cast(),
+            &raw mut len,
+            core::ptr::null_mut(),
+            0,
+        )
+    };
+    (status == 0).then_some(bytes)
+}
 
 static COLUMN_STORE_POOL: Mutex<ColumnStorePool> = Mutex::new(ColumnStorePool {
     free: Vec::new(),
@@ -744,7 +783,7 @@ impl ColumnStorePool {
     fn recycle(&mut self, buffer: Buffer) {
         let bytes = buffer.length();
         if bytes <= MAX_CACHED_COLUMN_STORE_BYTES
-            && self.total_bytes + bytes <= MAX_COLUMN_STORE_POOL_BYTES
+            && self.total_bytes + bytes <= column_store_pool_bytes()
         {
             self.total_bytes += bytes;
             self.free.push(buffer);

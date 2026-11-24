@@ -36,8 +36,8 @@ const (
 
 	NilAccountType = MasterAccount
 
-	DesertWitnessAccounts                   = 17   // 1 main account + 16 public pool shares
-	DesertBinaryOptionsPositions            = 1024 // protocol cap on binary options positions per account
+	DesertWitnessAccounts                   = 17 // 1 main account + 16 public pool shares
+	DesertBinaryOptionsPositions            = int(MaxBinaryOptionsMarketIndex-MinBinaryOptionsMarketIndex) + 1
 	TreasuryAccountIndex                    = int64(0)
 	InsuranceFundOperatorAccountIndex       = int64(1)
 	AccountTreeHeight                       = 48
@@ -93,8 +93,8 @@ type DesertWitness struct {
 	AllPublicMarketDetails [PositionListSize]*PubdataMarketDetailWitness `json:"pmda"`
 	MarketPubDataTreeRoot  p2.HashOut                                    `json:"mpdtr"`
 
-	// Binary options positions of the main account sorted by market slot, each proven against the account's
-	// market pub data root and the market pub data tree root
+	// Binary options positions of the main account, one entry per binary options market slot; the circuit rebuilds
+	// the account's market pub data root from them and proves the non empty ones against the market pub data tree
 	BinaryOptionsPositions [DesertBinaryOptionsPositions]*PubdataBinaryOptionsPositionWitness `json:"bop"`
 
 	ValidiumRoot p2.HashOut `json:"vr"`
@@ -125,13 +125,11 @@ type PubdataMarketWitness struct {
 }
 
 type PubdataBinaryOptionsPositionWitness struct {
-	MarketIndex int16 `json:"mi"`
-	Size        int64 `json:"s,omitempty"`
+	Size int64 `json:"s,omitempty"`
 	PubdataMarketWitness
 
 	// Siblings from the leaf up to the root, matching the account pub data proofs
-	AccountMarketPubDataMerkleProof [MarketTreeHeight]p2.NumericalHashOut `json:"mpampd"`
-	MarketPubDataMerkleProof        [MarketTreeHeight]p2.NumericalHashOut `json:"mpmpd"`
+	MarketPubDataMerkleProof [MarketTreeHeight]p2.NumericalHashOut `json:"mpmpd"`
 }
 
 type PubdataMarketDeltaWitness struct {
@@ -176,11 +174,8 @@ func EmptyPubdataAccountWitness(accountIndex int64) *PubdataAccountWitness {
 }
 
 func EmptyPubdataBinaryOptionsPositionWitness() *PubdataBinaryOptionsPositionWitness {
-	proof := nilMarketMerkleProof()
 	return &PubdataBinaryOptionsPositionWitness{
-		MarketIndex:                     MinBinaryOptionsMarketIndex,
-		AccountMarketPubDataMerkleProof: proof,
-		MarketPubDataMerkleProof:        proof,
+		MarketPubDataMerkleProof: nilMarketMerkleProof(),
 	}
 }
 

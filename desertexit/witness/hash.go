@@ -139,16 +139,26 @@ func newMarketPubDataTree(markets map[int16]*PubdataMarketWitness) SparseMerkleT
 	return tree
 }
 
-// Leaf of the account market pub data tree: only the size is published. Negative sizes are hashed as canonical
-// field elements like the circuit's signed targets.
+// Leaf of the account market pub data tree: only the size is published, as four 16-bit limbs of its absolute
+// value followed by its sign, like the circuit's signed targets.
 func computeBinaryOptionsPositionPubDataLeafHash(size int64) []byte {
 	if size == 0 {
 		return NilHash
 	}
 
+	sizeAbs := uint64(abs(size)) // nolint:gosec
+	sizeSign := g.OneF()
+	if size < 0 {
+		sizeSign = g.NegOneF()
+	}
+
 	return p2.HashNoPad([]g.GoldilocksField{
 		g.GoldilocksField(MarketTypeBinaryOptions),
-		g.NonCannonicalGoldilocksField(size),
+		g.GoldilocksField(sizeAbs & 0xFFFF),
+		g.GoldilocksField((sizeAbs >> 16) & 0xFFFF),
+		g.GoldilocksField((sizeAbs >> 32) & 0xFFFF),
+		g.GoldilocksField((sizeAbs >> 48) & 0xFFFF),
+		sizeSign,
 	}).ToLittleEndianBytes()
 }
 

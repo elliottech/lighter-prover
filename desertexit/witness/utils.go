@@ -2,16 +2,17 @@ package main
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"math/big"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 
 	g "github.com/elliottech/poseidon_crypto/field/goldilocks"
 	p2 "github.com/elliottech/poseidon_crypto/hash/poseidon2_goldilocks_plonky2"
 	eth "github.com/ethereum/go-ethereum/common"
-	"github.com/panjf2000/ants/v2"
 )
 
 func AddBig(x *big.Int, y *big.Int) *big.Int {
@@ -271,9 +272,10 @@ func readInt64WithSignBytes(data []byte, offset int) (val int64) {
 func getBlobBytes(blobBytes string) (
 	blobVersion uint16, markPriceBytes, fundingBytes, quoteMultiplierBytes, deltaPubDataBytes []byte, err error,
 ) {
-	blobData := [BlobBytesSize]byte{}
-	copy(blobData[:], eth.Hex2Bytes(blobBytes))
-
+	blobData, err := hex.DecodeString(strings.TrimPrefix(blobBytes, "0x"))
+	if err != nil {
+		return 0, nil, nil, nil, nil, err
+	}
 	if len(blobData) != BlobBytesSize {
 		return 0, nil, nil, nil, nil, fmt.Errorf("invalid blob data size: %d", len(blobData))
 	}
@@ -297,16 +299,6 @@ func getBlobBytes(blobBytes string) (
 }
 
 func initializeAccountPubDataTree(input *BlobDataInput) (SparseMerkleTree, error) {
-	pool, err := ants.NewPool(100, ants.WithPanicHandler(func(p interface{}) {
-		panic("worker exits from a panic")
-	}))
-	if err != nil {
-		return nil, err
-	}
-
-	var opts []Option
-	opts = append(opts, []Option{GoRoutinePool(pool)}...)
-
 	hasher := &Hasher{
 		pool: sync.Pool{
 			New: func() interface{} {
@@ -338,47 +330,28 @@ func initializeAccountPubDataTree(input *BlobDataInput) (SparseMerkleTree, error
 	return accountPubDataTree, nil
 }
 
-// getBinaryOptionsPositionWitnesses collects the binary options positions of the main account sorted by market
-// slot, each with its account market pub data proof and market pub data proof.
+// getBinaryOptionsPositionWitnesses carries one entry per binary options market slot for the main account, the
+// non empty ones with the published state of their market and its market pub data proof.
 // Public pools cannot trade binary options, so only the main account carries them.
 func getBinaryOptionsPositionWitnesses(
 	mainAccount *PubdataAccountWitness,
 	marketPubDatas map[int16]*PubdataMarketWitness,
 	marketPubDataTree SparseMerkleTree,
 ) [DesertBinaryOptionsPositions]*PubdataBinaryOptionsPositionWitness {
-	marketIndices := make([]int16, 0, len(mainAccount.BinaryOptionsPositions))
-	for marketIndex, size := range mainAccount.BinaryOptionsPositions {
-		if size != 0 {
-			marketIndices = append(marketIndices, marketIndex)
-		}
-	}
-	if len(marketIndices) > DesertBinaryOptionsPositions {
-		panic(fmt.Sprintf("account %d has %d binary options positions, witness carries at most %d",
-			mainAccount.AccountIndex, len(marketIndices), DesertBinaryOptionsPositions))
-	}
-	sort.Slice(marketIndices, func(i, j int) bool { return marketIndices[i] < marketIndices[j] })
-
-	accountMarketPubDataTree := newAccountMarketPubDataTree(mainAccount.BinaryOptionsPositions)
-
 	var witnesses [DesertBinaryOptionsPositions]*PubdataBinaryOptionsPositionWitness
 	for i := range witnesses {
-		witnesses[i] = EmptyPubdataBinaryOptionsPositionWitness()
-	}
-	for i, marketIndex := range marketIndices {
-		witness := witnesses[i]
-		witness.MarketIndex = marketIndex
+		marketIndex := MinBinaryOptionsMarketIndex + int16(i) // nolint:gosec
+		witness := EmptyPubdataBinaryOptionsPositionWitness()
+		witnesses[i] = witness
+
 		witness.Size = mainAccount.BinaryOptionsPositions[marketIndex]
+		if witness.Size == 0 {
+			continue
+		}
 		if market, exists := marketPubDatas[marketIndex]; exists {
 			witness.PubdataMarketWitness = *market
 		}
 
-		accountProof, err := accountMarketPubDataTree.GetProof(uint64(marketIndex)) // nolint:gosec
-		if err != nil {
-			panic(fmt.Sprintf("failed to get account market pub data proof for market %d: %v", marketIndex, err))
-		}
-		if witness.AccountMarketPubDataMerkleProof, err = marketMerkleProofFromBytes(accountProof); err != nil {
-			panic(err)
-		}
 		marketProof, err := marketPubDataTree.GetProof(uint64(marketIndex)) // nolint:gosec
 		if err != nil {
 			panic(fmt.Sprintf("failed to get market pub data proof for market %d: %v", marketIndex, err))
@@ -423,7 +396,7 @@ func getUsdcBalanceForWitness(
 	}
 
 	// If main account is public pool, return only operator's share of the TAV.
-	if mainAccount.AccountType == PublicPool {
+	if mainAccount.AccountType == PublicPool || mainAccount.AccountType == InsuranceFund {
 		if mainAccount.PublicPoolInfo.TotalShares == 0 {
 			return new(big.Int).SetInt64(0)
 		}
@@ -476,13 +449,13 @@ func getBinaryOptionsPositionsTavComponent(
 	binaryOptionsPositions [DesertBinaryOptionsPositions]*PubdataBinaryOptionsPositionWitness,
 ) *big.Int {
 	payoutsSum := big.NewInt(0)
-	for _, position := range binaryOptionsPositions {
+	for i, position := range binaryOptionsPositions {
 		if position.Size == 0 || position.Status == ExpiredMarketStatus {
 			continue
 		}
 		if position.Price > position.SettlementCap {
 			panic(fmt.Sprintf("market %d publishes price %d above settlement cap %d",
-				position.MarketIndex, position.Price, position.SettlementCap))
+				MinBinaryOptionsMarketIndex+int16(i), position.Price, position.SettlementCap))
 		}
 
 		payoutPricePerShare := int64(position.Price)

@@ -13,15 +13,6 @@ import (
 	"github.com/panjf2000/ants/v2"
 )
 
-// Option is a function that configures
-type Option func(*LighterSparseMerkleTree)
-
-func GoRoutinePool(pool *ants.Pool) Option {
-	return func(s *LighterSparseMerkleTree) {
-		s.goroutinePool = pool
-	}
-}
-
 type NilHashes struct {
 	Hashes [][]byte
 }
@@ -54,6 +45,8 @@ type LighterSparseMerkleTree struct {
 	goroutinePool *ants.Pool
 }
 
+var defaultGoroutinePool *ants.Pool
+
 func NewSparseMerkleTree(hasher *Hasher, maxDepth uint8, nilHash []byte) (SparseMerkleTree, error) {
 	if maxDepth == 0 {
 		return nil, ErrInvalidDepth
@@ -68,14 +61,15 @@ func NewSparseMerkleTree(hasher *Hasher, maxDepth uint8, nilHash []byte) (Sparse
 	s.root = NewTreeNode(0, 0, s.nilHashes, s.hasher, nil)
 
 	var err error
-	if s.goroutinePool == nil {
-		s.goroutinePool, err = ants.NewPool(128, ants.WithPanicHandler(func(i interface{}) {
+	if defaultGoroutinePool == nil {
+		defaultGoroutinePool, err = ants.NewPool(128, ants.WithPanicHandler(func(i interface{}) {
 			panic(i)
 		}))
 		if err != nil {
 			return nil, err
 		}
 	}
+	s.goroutinePool = defaultGoroutinePool
 
 	return s, nil
 }

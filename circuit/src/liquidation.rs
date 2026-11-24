@@ -9,6 +9,7 @@ use crate::bigint::bigint::{BigIntTarget, CircuitBuilderBigInt, SignTarget};
 use crate::bigint::biguint::{BigUintTarget, CircuitBuilderBiguint};
 use crate::bigint::comparison::CircuitBuilderBiguintSubtractiveComparison;
 use crate::bigint::div_rem::CircuitBuilderBiguintDivRem;
+use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::types::account::AccountTarget;
 use crate::types::account_asset::AccountAssetTarget;
 use crate::types::account_position::AccountPositionTarget;
@@ -374,6 +375,9 @@ pub fn get_available_margin_balance(
 
     let asset_index_price = margin_asset.index_price;
     let is_asset_index_price_is_not_zero = builder.is_not_zero(asset_index_price);
+    let is_asset_index_price_zero = builder.not(is_asset_index_price_is_not_zero);
+    let is_available_margin_in_usdc_zero = builder.is_zero_biguint(&available_margin_in_usdc);
+    let is_available_margin_in_usdc_positive = builder.not(is_available_margin_in_usdc_zero);
 
     available_margin_in_usdc =
         builder.mul_biguint_by_bool(&available_margin_in_usdc, is_asset_index_price_is_not_zero);
@@ -390,14 +394,24 @@ pub fn get_available_margin_balance(
     let mut available_margin_native =
         builder.mul_biguint_non_carry(&available_margin_in_usdc, &multiplier, BIG_U128_LIMBS);
     available_margin_native = builder.div_biguint(&available_margin_native, &divider);
-    available_margin_native = builder.trim_biguint(&available_margin_native, BIG_U96_LIMBS);
 
     let margin_balance_non_negative = builder.is_not_equal(margin_balance.sign.target, neg_one);
 
     available_margin_native =
         builder.mul_biguint_by_bool(&available_margin_native, margin_balance_non_negative);
 
-    let result_non_usdc = builder.min_biguint(&available_margin_native, &margin_balance.abs);
+    let fallback_to_margin_balance = builder.multi_and(&[
+        is_asset_index_price_zero,
+        is_available_margin_in_usdc_positive,
+        margin_balance_non_negative,
+    ]);
+    let mut result_non_usdc = builder.min_biguint(&available_margin_native, &margin_balance.abs);
+    result_non_usdc = builder.select_biguint(
+        fallback_to_margin_balance,
+        &margin_balance.abs,
+        &result_non_usdc,
+    );
+    let result_non_usdc = builder.trim_biguint(&result_non_usdc, BIG_U96_LIMBS);
 
     let collateral_with_funding = risk_info.usdc_collateral_with_funding.clone();
     let is_collateral_with_funding_non_negative =
@@ -458,8 +472,14 @@ pub fn get_shares_usdc_value_for_public_pool(
         builder.constant_biguint(&BigUint::from(INITIAL_POOL_SHARE_VALUE));
     let default_usdc_value = builder.mul_biguint(&big_share_amount, &big_initial_pool_share_value);
 
+    let is_total_portfolio_value_positive =
+        builder.is_sign_positive(risk_info.total_portfolio_value.sign);
+    let total_portfolio_value = builder.mul_biguint_by_bool(
+        &risk_info.total_portfolio_value.abs,
+        is_total_portfolio_value_positive,
+    );
     let share_amount_mul_total_portfolio_value =
-        builder.mul_biguint(&big_share_amount, &risk_info.total_portfolio_value.abs);
+        builder.mul_biguint(&big_share_amount, &total_portfolio_value);
     let big_old_total_shares = builder.target_to_biguint(account.public_pool_info.total_shares);
     let usdc_to_collateral_multiplier =
         builder.constant_biguint(&BigUint::from(USDC_TO_COLLATERAL_MULTIPLIER));

@@ -133,6 +133,11 @@ impl Verify for L1CreateOrderTxTarget {
     fn verify(&mut self, builder: &mut Builder, tx_type: &TxTypeTargets, tx_state: &TxState) {
         self.is_enabled = tx_type.is_l1_create_order;
         self.success = tx_type.is_l1_create_order;
+        builder.conditional_assert_eq_constant(
+            self.is_enabled,
+            tx_state.asset_indices[TX_ASSET_ID],
+            USDC_ASSET_INDEX,
+        );
 
         builder.register_range_check(self.public_market_index, PUBLIC_MARKET_INDEX_BITS);
         let is_tx_public_market_index_nil =

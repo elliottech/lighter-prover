@@ -34,7 +34,8 @@ pub const ATTR_CANCEL_ALL_PUBLIC_MARKET_INDEX: usize = 5;
 pub const ATTR_SELF_TRADE_BEHAVIOR_MODE: usize = 6;
 pub const ATTR_SELF_TRADE_EQUALITY_MODE: usize = 7;
 pub const ATTR_ORDER_VERSION: usize = 8;
-pub const TOTAL_ATTRIBUTE_COUNT: usize = ATTR_ORDER_VERSION + 1;
+pub const ATTR_REVOKE_PUB_KEY_WITHOUT_L1_SIGNATURE: usize = 9;
+pub const TOTAL_ATTRIBUTE_COUNT: usize = ATTR_REVOKE_PUB_KEY_WITHOUT_L1_SIGNATURE + 1;
 
 pub const ATTRIBUTE_TYPE_BITS: usize = 4;
 
@@ -53,6 +54,7 @@ lazy_static! {
         m.insert(ATTR_SELF_TRADE_BEHAVIOR_MODE, 8);
         m.insert(ATTR_SELF_TRADE_EQUALITY_MODE, 8);
         m.insert(ATTR_ORDER_VERSION, TIMESTAMP_BITS);
+        m.insert(ATTR_REVOKE_PUB_KEY_WITHOUT_L1_SIGNATURE, 1);
         m
     };
     pub static ref ATTR_MAX_VALUES: HashMap<usize, u64> = {
@@ -72,6 +74,7 @@ lazy_static! {
         m.insert(ATTR_SELF_TRADE_BEHAVIOR_MODE, SELF_TRADE_BEHAVIOR_REDUCE);
         m.insert(ATTR_SELF_TRADE_EQUALITY_MODE, SELF_TRADE_EQUALITY_MASTER_ACCOUNT_INDEX);
         m.insert(ATTR_ORDER_VERSION, MAX_ORDER_VERSION as u64);
+        m.insert(ATTR_REVOKE_PUB_KEY_WITHOUT_L1_SIGNATURE, 1u64);
         m
     };
     pub static ref ATTR_NIL_VALUES: [F; TOTAL_ATTRIBUTE_COUNT] = {
@@ -85,6 +88,7 @@ lazy_static! {
             F::ZERO, // Self-trade behavior mode
             F::ZERO, // Self-trade equality mode
             F::ZERO, // Order Modify Nonce
+            F::ZERO, // Revoke Pub Key Without L1 Signature
         ]
     };
 }
@@ -210,7 +214,7 @@ impl TxAttributesTarget {
 
     fn verify_attribute_types(&self, builder: &mut Builder) {
         let max_attribute_type = builder.constant_usize(TOTAL_ATTRIBUTE_COUNT - 1);
-        let mut last_type = self.inner_types[0];
+        let mut last_type = builder.zero();
         for i in 0..NB_ATTRIBUTES_PER_TX {
             let (t, v) = (self.inner_types[i], self.inner_values[i]);
 
@@ -220,15 +224,13 @@ impl TxAttributesTarget {
             let is_nil_type = builder.is_zero(t);
             builder.conditional_assert_zero(is_nil_type, v);
 
-            if i == 0 {
-                continue;
+            if i != 0 {
+                let is_type_increasing = builder.is_lt(last_type, t, ATTRIBUTE_TYPE_BITS);
+                let should_be_true = builder.or(is_type_increasing, is_nil_type);
+                builder.assert_true(should_be_true);
             }
 
-            let is_type_increasing = builder.is_lt(last_type, t, ATTRIBUTE_TYPE_BITS);
-            let should_be_true = builder.or(is_type_increasing, is_nil_type);
-            builder.assert_true(should_be_true);
-
-            last_type = t;
+            last_type = builder.select(is_nil_type, max_attribute_type, t);
         }
     }
 
@@ -307,7 +309,7 @@ impl TxAttributesTarget {
         market: &MarketTarget,
         system_config: &SystemConfigTarget,
         block_created_at: Target,
-    ) {
+    ) -> BoolTarget {
         let is_enabled = {
             let is_nil_integrator_index = builder.is_equal_f(
                 self.get(ATTR_INTEGRATOR_FEE_COLLECTOR_INDEX),
@@ -335,24 +337,22 @@ impl TxAttributesTarget {
             system_config.max_integrator_perps_maker_fee,
             system_config.max_integrator_spot_maker_fee,
         );
-        let mut sanitized = builder.not(is_enabled);
+        let mut found = builder.not(is_enabled);
+        let mut is_valid = builder.not(is_enabled);
         for i in 0..MAX_APPROVED_INTEGRATORS {
             let is_integrator = builder.is_equal(
                 account.approved_integrators[i].integrator_account_index,
                 self.get(ATTR_INTEGRATOR_FEE_COLLECTOR_INDEX),
             );
-            let flag = builder.and_not(is_integrator, sanitized);
-            sanitized = builder.or(sanitized, flag);
+            let flag = builder.and_not(is_integrator, found);
+            found = builder.or(found, flag);
 
-            // Not expired
-            builder.conditional_assert_lt(
-                flag,
+            let not_expired = builder.is_lt(
                 block_created_at,
                 account.approved_integrators[i].expiry,
                 TIMESTAMP_BITS,
             );
 
-            // Taker and maker fees
             let taker_fee = builder.select(
                 is_perps,
                 account.approved_integrators[i].max_perps_taker_fee,
@@ -363,20 +363,31 @@ impl TxAttributesTarget {
                 account.approved_integrators[i].max_perps_maker_fee,
                 account.approved_integrators[i].max_spot_maker_fee,
             );
-            for (attr_type, target, cap) in [
-                (ATTR_INTEGRATOR_TAKER_FEE, taker_fee, taker_cap),
-                (ATTR_INTEGRATOR_MAKER_FEE, maker_fee, maker_cap),
+            let taker_fee_bit_size = *ATTR_BIT_SIZES.get(&ATTR_INTEGRATOR_TAKER_FEE).unwrap();
+            let maker_fee_bit_size = *ATTR_BIT_SIZES.get(&ATTR_INTEGRATOR_MAKER_FEE).unwrap();
+            let taker_ok = builder.is_lte(
+                self.get(ATTR_INTEGRATOR_TAKER_FEE),
+                taker_fee,
+                taker_fee_bit_size,
+            );
+            let maker_ok = builder.is_lte(
+                self.get(ATTR_INTEGRATOR_MAKER_FEE),
+                maker_fee,
+                maker_fee_bit_size,
+            );
+            for (attr_type, cap) in [
+                (ATTR_INTEGRATOR_TAKER_FEE, taker_cap),
+                (ATTR_INTEGRATOR_MAKER_FEE, maker_cap),
             ] {
-                // First assert over given value, then cap
                 let fee_bit_size = *ATTR_BIT_SIZES.get(&attr_type).unwrap();
                 let fee_value = self.get(attr_type);
-                builder.conditional_assert_lte(flag, fee_value, target, fee_bit_size);
-
                 let capped_fee = builder.min(&[fee_value, cap], fee_bit_size);
                 self.set(builder, flag, attr_type, capped_fee);
             }
+            let slot_is_valid = builder.multi_and(&[flag, not_expired, taker_ok, maker_ok]);
+            is_valid = builder.or(is_valid, slot_is_valid);
         }
-        builder.conditional_assert_true(is_enabled, sanitized);
+        is_valid
     }
 
     pub fn get_register_generic_fields(

@@ -186,11 +186,14 @@ impl Verify for L1WithdrawTxTarget {
         ]);
 
         // Withdrawal balance checks
-        self.extended_amount = builder.mul_biguint_non_carry(
+        let extended_amount = builder.mul_biguint(
             &self.amount,
             &tx_state.assets[TX_ASSET_ID].extension_multiplier,
-            BIG_U96_LIMBS,
         );
+        let (is_extended_amount_in_range, extended_amount) =
+            builder.try_trim_biguint(&extended_amount, BIG_U96_LIMBS);
+        self.extended_amount = extended_amount;
+        self.success = builder.and(self.success, is_extended_amount_in_range);
         let is_spot = builder.is_equal_constant(self.route_type, ROUTE_TYPE_SPOT);
         let is_perps = builder.not(is_spot);
         let product_type = builder.select_constant(is_spot, PRODUCT_TYPE_SPOT, PRODUCT_TYPE_PERPS);

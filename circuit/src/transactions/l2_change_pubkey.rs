@@ -10,15 +10,19 @@ use plonky2::iop::target::{BoolTarget, Target};
 use plonky2::iop::witness::Witness;
 use serde::Deserialize;
 
+use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::deserializers;
 use crate::eddsa::gadgets::base_field::{
     CircuitBuilderGFp5, PartialWitnessQuinticExt, QuinticExtensionTarget,
 };
 use crate::eddsa::gadgets::curve::PartialWitnessCurve;
 use crate::eddsa::schnorr::hash_to_quintic_extension_circuit;
+use crate::tx_attributes::ATTR_REVOKE_PUB_KEY_WITHOUT_L1_SIGNATURE;
 use crate::tx_interface::{Apply, TxHash, Verify};
+use crate::types::api_key::API_KEY_TYPE_SCHNORR;
 use crate::types::config::{Builder, F};
 use crate::types::constants::*;
+use crate::types::ecdsa_pub_key::EcdsaPubKeyTarget;
 use crate::types::tx_state::TxState;
 use crate::types::tx_type::TxTypeTargets;
 use crate::utils::CircuitBuilderUtils;
@@ -102,16 +106,61 @@ impl Verify for L2ChangePubKeyTxTarget {
             tx_state.api_key.api_key_index,
         );
 
+        // System owned accounts can not change their public keys with L2 transactions
+        let treasury_account_index = builder.constant_u64(TREASURY_ACCOUNT_INDEX as u64);
+        builder.conditional_assert_not_eq(
+            is_enabled,
+            tx_state.accounts[OWNER_ACCOUNT_ID].master_account_index,
+            treasury_account_index,
+        );
+        let insurance_fund_operator_account_index =
+            builder.constant_u64(INSURANCE_FUND_OPERATOR_ACCOUNT_INDEX as u64);
+        builder.conditional_assert_not_eq(
+            is_enabled,
+            tx_state.accounts[OWNER_ACCOUNT_ID].master_account_index,
+            insurance_fund_operator_account_index,
+        );
+
         // Can not fill NIL_API_KEY_INDEX
         let nil_api_key_index = builder.constant_from_u8(NIL_API_KEY_INDEX);
         builder.conditional_assert_not_eq(is_enabled, self.api_key_index, nil_api_key_index);
+
+        let revoked = builder.is_zero_quintic_ext(self.pub_key);
+        let old_schnorr =
+            builder.is_equal_constant(tx_state.api_key.key_type, API_KEY_TYPE_SCHNORR as u64);
+
+        // A slot revoked with the signature of the key in it must hold a Schnorr key. The attribute is range checked to
+        // a single bit.
+        let without_l1_signature = BoolTarget::new_unsafe(
+            tx_state.get_attribute(ATTR_REVOKE_PUB_KEY_WITHOUT_L1_SIGNATURE),
+        );
+        let revoke_with_old_key = builder.multi_and(&[is_enabled, revoked, without_l1_signature]);
+        builder.conditional_assert_true(revoke_with_old_key, old_schnorr);
+
+        // Only allow revoking old schnorr keys if new schnorr keys cannot be created
+        if !tx_state.signature_schemes.can_create_schnorr_keys() {
+            let revoking_old_schnorr = builder.and(revoked, old_schnorr);
+            builder.conditional_assert_true(self.success, revoking_old_schnorr);
+        }
     }
 }
 
 impl Apply for L2ChangePubKeyTxTarget {
     fn apply(&mut self, builder: &mut Builder, tx_state: &mut TxState) -> BoolTarget {
-        tx_state.api_key.public_key =
-            builder.select_quintic_ext(self.success, self.pub_key, tx_state.api_key.public_key);
+        let api_key = &mut tx_state.api_key;
+        api_key.public_key =
+            builder.select_quintic_ext(self.success, self.pub_key, api_key.public_key);
+
+        // Installing a Schnorr key (or clearing the slot) always resets the slot to Schnorr mode.
+        let schnorr = builder.constant_from_u8(API_KEY_TYPE_SCHNORR);
+        api_key.key_type = builder.select(self.success, schnorr, api_key.key_type);
+        let zero_ecdsa_pk = EcdsaPubKeyTarget::zero(builder);
+        api_key.ecdsa_public_key = EcdsaPubKeyTarget::select(
+            builder,
+            self.success,
+            &zero_ecdsa_pk,
+            &api_key.ecdsa_public_key,
+        );
 
         self.success
     }

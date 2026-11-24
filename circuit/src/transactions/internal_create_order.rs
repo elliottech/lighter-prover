@@ -7,6 +7,8 @@ use plonky2::iop::target::{BoolTarget, Target};
 use plonky2::iop::witness::Witness;
 use serde::Deserialize;
 
+use crate::bigint::biguint::CircuitBuilderBiguint;
+use crate::bigint::comparison::CircuitBuilderBiguintSubtractiveComparison;
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::comparison::CircuitBuilderSubtractiveComparison;
 use crate::matching_engine::{
@@ -14,7 +16,7 @@ use crate::matching_engine::{
 };
 use crate::tx_interface::{Apply, Verify};
 use crate::types::account_order::{AccountOrderTarget, select_account_order_target};
-use crate::types::config::Builder;
+use crate::types::config::{BIG_U96_LIMBS, Builder};
 use crate::types::constants::*;
 use crate::types::order::{get_market_index_and_order_nonce_from_order_index, get_order_index};
 use crate::types::register::BaseRegisterInfoTarget;
@@ -519,7 +521,18 @@ impl Apply for InternalCreateOrderTxTarget {
             trigger_child_order_flag =
                 builder.and_not(trigger_child_order_flag, self.is_empty_order);
 
-            // Handle invalid reduce only or expiry - Decrement order count
+            // The child takes the parent's filled size here, cancel it if its quote exceeds the
+            // order quote limit
+            let base_amount_big =
+                builder.target_to_biguint(tx_state.register_stack[0].pending_size);
+            let price_big =
+                builder.target_to_biguint_single_limb_unsafe(tx_state.account_order.price);
+            let quote = builder.mul_biguint_non_carry(&base_amount_big, &price_big, BIG_U96_LIMBS);
+            let order_quote_limit = builder.target_to_biguint(tx_state.market.order_quote_limit);
+            let is_quote_over_limit = builder.is_gt_biguint(&quote, &order_quote_limit);
+            let cancel_order_flag = builder.or(cancel_order_flag, is_quote_over_limit);
+
+            // Handle invalid reduce only, expiry or size - Decrement order count
             let cancel_order_flag = builder.and(trigger_child_order_flag, cancel_order_flag);
             decrement_order_count_in_place(
                 builder,

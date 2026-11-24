@@ -20,7 +20,8 @@ use crate::builder::Builder;
 use crate::ecdsa::curve::glv::{GLV_BETA, GLV_S, decompose_secp256k1_scalar};
 use crate::ecdsa::curve::secp256k1::Secp256K1;
 use crate::ecdsa::gadgets::curve::{AffinePointTarget, CircuitBuilderCurve};
-use crate::ecdsa::gadgets::curve_msm::{conditional_curve_msm_circuit, curve_msm_circuit};
+use crate::ecdsa::gadgets::curve_complete::{CompletePointTarget, curve_msm_complete};
+use crate::ecdsa::gadgets::curve_msm::curve_msm_circuit;
 use crate::nonnative::{CircuitBuilderNonNative, NonNativeTarget};
 
 pub trait CircuitBuilderGlv<F: RichField + Extendable<D>, const D: usize> {
@@ -41,12 +42,12 @@ pub trait CircuitBuilderGlv<F: RichField + Extendable<D>, const D: usize> {
         p: &AffinePointTarget<Secp256K1>,
         k: &NonNativeTarget<Secp256K1Scalar>,
     ) -> AffinePointTarget<Secp256K1>;
-    fn conditional_glv_mul(
+    /// Same as `glv_mul`, for any valid curve point `p` and any `k`.
+    fn glv_mul_complete(
         &mut self,
-        cond: BoolTarget,
         p: &AffinePointTarget<Secp256K1>,
         k: &NonNativeTarget<Secp256K1Scalar>,
-    ) -> AffinePointTarget<Secp256K1>;
+    ) -> CompletePointTarget<Secp256K1>;
 }
 
 impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilderGlv<F, D> for Builder<F, D> {
@@ -65,8 +66,8 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilderGlv<F, D> for B
     ) {
         let k1 = self.add_virtual_nonnative_target_sized::<Secp256K1Scalar>(4);
         let k2 = self.add_virtual_nonnative_target_sized::<Secp256K1Scalar>(4);
-        let k1_neg = self.add_virtual_bool_target_unsafe();
-        let k2_neg = self.add_virtual_bool_target_unsafe();
+        let k1_neg = self.add_virtual_bool_target_safe();
+        let k2_neg = self.add_virtual_bool_target_safe();
 
         self.add_simple_generator(GLVDecompositionGenerator::<F, D> {
             k: k.clone(),
@@ -107,12 +108,11 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilderGlv<F, D> for B
         curve_msm_circuit(self, &p_neg, &sp_neg, &k1, &k2)
     }
 
-    fn conditional_glv_mul(
+    fn glv_mul_complete(
         &mut self,
-        cond: BoolTarget,
         p: &AffinePointTarget<Secp256K1>,
         k: &NonNativeTarget<Secp256K1Scalar>,
-    ) -> AffinePointTarget<Secp256K1> {
+    ) -> CompletePointTarget<Secp256K1> {
         let (k1, k2, k1_neg, k2_neg) = self.decompose_secp256k1_scalar(k);
 
         let beta = self.secp256k1_glv_beta();
@@ -124,7 +124,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilderGlv<F, D> for B
 
         let p_neg = self.curve_conditional_neg(p, k1_neg);
         let sp_neg = self.curve_conditional_neg(&sp, k2_neg);
-        conditional_curve_msm_circuit(self, cond, &p_neg, &sp_neg, &k1, &k2)
+        curve_msm_complete(self, &p_neg, &sp_neg, &k1, &k2)
     }
 }
 

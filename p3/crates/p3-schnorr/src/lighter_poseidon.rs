@@ -33,7 +33,7 @@ pub const LIGHTER_POSEIDON_ROUND_STATE_COUNT: usize =
 /// Round constants for the 8 full (external) rounds: the first
 /// [`LIGHTER_POSEIDON_EXTERNAL_HALF_ROUNDS`] run before the internal rounds,
 /// the rest after.
-pub(crate) const LIGHTER_EXTERNAL_CONSTANTS: [[u64; LIGHTER_POSEIDON_WIDTH]; 8] = [
+pub const LIGHTER_EXTERNAL_CONSTANTS: [[u64; LIGHTER_POSEIDON_WIDTH]; 8] = [
     [
         15492826721047263190,
         11728330187201910315,
@@ -149,7 +149,7 @@ pub(crate) const LIGHTER_EXTERNAL_CONSTANTS: [[u64; LIGHTER_POSEIDON_WIDTH]; 8] 
 ];
 
 /// Round constants for the [`LIGHTER_POSEIDON_INTERNAL_ROUNDS`] partial rounds.
-pub(crate) const LIGHTER_INTERNAL_CONSTANTS: [u64; LIGHTER_POSEIDON_INTERNAL_ROUNDS] = [
+pub const LIGHTER_INTERNAL_CONSTANTS: [u64; LIGHTER_POSEIDON_INTERNAL_ROUNDS] = [
     11921381764981422944,
     10318423381711320787,
     8291411502347000766,
@@ -283,7 +283,7 @@ pub(crate) fn lighter_poseidon2_round_states<R: PrimeCharacteristicRing>(
 }
 
 /// The linear layer applied once before any round constants, with no S-box.
-pub(crate) fn lighter_external_initial_linear_layer<R: PrimeCharacteristicRing>(
+pub fn lighter_external_initial_linear_layer<R: PrimeCharacteristicRing>(
     state: &mut [R; LIGHTER_POSEIDON_WIDTH],
 ) {
     external_linear_layer(state);
@@ -291,7 +291,7 @@ pub(crate) fn lighter_external_initial_linear_layer<R: PrimeCharacteristicRing>(
 
 /// One full round: add round constants and apply the S-box to every lane,
 /// then the external linear layer.
-pub(crate) fn lighter_external_full_round<R: PrimeCharacteristicRing>(
+pub fn lighter_external_full_round<R: PrimeCharacteristicRing>(
     state: &mut [R; LIGHTER_POSEIDON_WIDTH],
     round_constants: &[u64; LIGHTER_POSEIDON_WIDTH],
 ) {
@@ -304,7 +304,7 @@ pub(crate) fn lighter_external_full_round<R: PrimeCharacteristicRing>(
 
 /// One partial round: add the round constant and apply the S-box to lane 0
 /// only, then the internal linear layer.
-pub(crate) fn lighter_internal_partial_round<R: PrimeCharacteristicRing>(
+pub fn lighter_internal_partial_round<R: PrimeCharacteristicRing>(
     state: &mut [R; LIGHTER_POSEIDON_WIDTH],
     rc: u64,
 ) {
@@ -321,7 +321,7 @@ fn exp_7<R: PrimeCharacteristicRing>(value: &R) -> R {
 }
 
 /// The partial round's linear layer: `state[i] = state[i] * diag[i] + sum(state)`.
-fn internal_linear_layer<R: PrimeCharacteristicRing>(state: &mut [R; LIGHTER_POSEIDON_WIDTH]) {
+pub fn internal_linear_layer<R: PrimeCharacteristicRing>(state: &mut [R; LIGHTER_POSEIDON_WIDTH]) {
     let sum: R = state.iter().map(|value| value.dup()).sum();
     for (lane, value) in state.iter_mut().enumerate() {
         *value *= R::from_u64(LIGHTER_MATRIX_DIAG_12[lane]);
@@ -331,7 +331,7 @@ fn internal_linear_layer<R: PrimeCharacteristicRing>(state: &mut [R; LIGHTER_POS
 
 /// The external linear layer: [`apply_mat4`] on each 4-lane chunk, then mix
 /// across chunks by adding each chunk's column sums.
-fn external_linear_layer<R: PrimeCharacteristicRing>(state: &mut [R; LIGHTER_POSEIDON_WIDTH]) {
+pub fn external_linear_layer<R: PrimeCharacteristicRing>(state: &mut [R; LIGHTER_POSEIDON_WIDTH]) {
     for chunk in state.as_chunks_mut::<4>().0 {
         apply_mat4(chunk);
     }

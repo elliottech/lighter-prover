@@ -12,6 +12,7 @@ use plonky2::iop::target::{BoolTarget, Target};
 
 use crate::bigint::biguint::{BigUintTarget, CircuitBuilderBiguint};
 use crate::bigint::comparison::CircuitBuilderBiguintSubtractiveComparison;
+use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::ecdsa::curve::curve_types::AffinePoint;
 use crate::ecdsa::curve::ecdsa::{ECDSAPublicKey, ECDSASignature};
 use crate::ecdsa::curve::secp256k1::Secp256K1;
@@ -23,7 +24,10 @@ use crate::ecdsa::gadgets::ecdsa::{
 use crate::eddsa::gadgets::base_field::{CircuitBuilderGFp5, QuinticExtensionTarget};
 use crate::keccak::keccak::CircuitBuilderKeccak;
 use crate::nonnative::NonNativeTarget;
+use crate::types::api_key::{API_KEY_TYPE_ECDSA, API_KEY_TYPE_SCHNORR};
 use crate::types::config::{BIG_U160_LIMBS, BIG_U256_LIMBS, Builder};
+use crate::types::constants::TIMESTAMP_BITS;
+use crate::types::ecdsa_pub_key::{ECDSA_PUB_KEY_X_LIMBS, EcdsaPubKey, EcdsaPubKeyTarget};
 use crate::uint::u8::{CircuitBuilderU8, U8Target};
 use crate::uint::u32::gadgets::arithmetic_u32::CircuitBuilderU32;
 use crate::utils::{CircuitBuilderUtils, bytes_to_hex, split_le_base16};
@@ -37,9 +41,16 @@ where
     pub api_key_index: u8,
     pub nonce: i64,
     pub pub_key: QuinticExtension<F>,
+    /// `API_KEY_TYPE_SCHNORR`: `pub_key` is signed; `API_KEY_TYPE_ECDSA`: `ecdsa_pub_key` is.
+    pub key_type: u8,
+    pub ecdsa_pub_key: EcdsaPubKey,
     pub l1_address: BigUint,
     pub l1_signature: ECDSASignature<Secp256K1>,
     pub l1_pk: ECDSAPublicKey<Secp256K1>,
+    /// Tx expiry and chain id, part of the signed text only for `API_KEY_TYPE_ECDSA`.
+    pub expired_at: i64,
+    pub chain_id: i64,
+    pub is_enabled: bool,
 }
 
 impl<F: Field + Extendable<5> + RichField + Default> Default for ChangePubKeyMessage<F> {
@@ -49,14 +60,23 @@ impl<F: Field + Extendable<5> + RichField + Default> Default for ChangePubKeyMes
             api_key_index: 0,
             nonce: 0,
             pub_key: QuinticExtension::<F>::ZERO,
+            key_type: API_KEY_TYPE_SCHNORR,
+            ecdsa_pub_key: EcdsaPubKey::zero(),
             l1_address: BigUint::default(),
             l1_signature: ECDSASignature::<Secp256K1>::default(),
             l1_pk: ECDSAPublicKey::<Secp256K1>::default(),
+            expired_at: 0,
+            chain_id: 0,
+            is_enabled: false,
         }
     }
 }
 
-pub const CHANGE_PK_PUBLIC_INPUTS_LEN: usize = 45;
+// [0] account index, [1] api key index, [2] nonce, [3..8] Schnorr pk, [8..13] l1 address,
+// [13..21] r, [21..29] s, [29..37] l1 pk x, [37..45] l1 pk y, [45] key type,
+// [46..54] ECDSA pk x limbs, [54] ECDSA pk y parity, [55] expired at, [56] chain id,
+// [57] is enabled
+pub const CHANGE_PK_PUBLIC_INPUTS_LEN: usize = 46 + ECDSA_PUB_KEY_X_LIMBS + 4;
 
 impl<F: Field + Extendable<5> + RichField> ChangePubKeyMessage<F> {
     pub fn from_public_inputs(public_inputs: &[F]) -> Self {
@@ -94,15 +114,32 @@ impl<F: Field + Extendable<5> + RichField> ChangePubKeyMessage<F> {
             y: Secp256K1Base::from_noncanonical_biguint(y),
             zero: false,
         });
+        let key_type = public_inputs[45].to_canonical_u64() as u8; // [45]
+        let mut ecdsa_x = BigUint::ZERO;
+        for i in 0..ECDSA_PUB_KEY_X_LIMBS {
+            ecdsa_x += BigUint::from(public_inputs[46 + i].to_canonical_u64()) << (i * 32);
+        } // [46, 47, 48, 49, 50, 51, 52, 53]
+        let ecdsa_pub_key = EcdsaPubKey {
+            x: ecdsa_x,
+            y_odd: public_inputs[54].is_nonzero(), // [54]
+        };
+        let expired_at = public_inputs[55].to_canonical_u64() as i64; // [55]
+        let chain_id = public_inputs[56].to_canonical_u64() as i64; // [56]
+        let is_enabled = public_inputs[57].is_nonzero(); // [57]
 
         Self {
             account_index,
             api_key_index,
             nonce,
             pub_key,
+            key_type,
+            ecdsa_pub_key,
             l1_address,
             l1_signature,
             l1_pk,
+            expired_at,
+            chain_id,
+            is_enabled,
         }
     }
 }
@@ -113,9 +150,14 @@ pub struct ChangePubKeyMessageTarget {
     pub api_key_index: Target,
     pub nonce: Target,
     pub pub_key: QuinticExtensionTarget,
+    pub key_type: Target,
+    pub ecdsa_pub_key: EcdsaPubKeyTarget,
     pub l1_address: BigUintTarget,
     pub l1_signature: ECDSASignatureTarget<Secp256K1>,
     pub l1_pk: ECDSAPublicKeyTarget<Secp256K1>,
+    pub expired_at: Target,
+    pub chain_id: Target,
+    pub is_enabled: BoolTarget,
 }
 
 impl ChangePubKeyMessageTarget {
@@ -146,15 +188,28 @@ impl ChangePubKeyMessageTarget {
                 _phantom: std::marker::PhantomData,
             }, // [37, 38, 39, 40, 41, 42, 43, 44]
         }); // [29, 30, 31, 32, 33, 34, 35, 36], [37, 38, 39, 40, 41, 42, 43, 44]
+        let key_type = public_inputs[45]; // [45]
+        let ecdsa_pub_key = EcdsaPubKeyTarget {
+            x: BigUintTarget::from(&public_inputs[46..54]), // [46, 47, 48, 49, 50, 51, 52, 53]
+            y_odd: BoolTarget::new_unsafe(public_inputs[54]), // [54]
+        };
+        let expired_at = public_inputs[55]; // [55]
+        let chain_id = public_inputs[56]; // [56]
+        let is_enabled = BoolTarget::new_unsafe(public_inputs[57]); // [57]
 
         Self {
             account_index,
             api_key_index,
             nonce,
             pub_key,
+            key_type,
+            ecdsa_pub_key,
             l1_address,
             l1_signature,
             l1_pk,
+            expired_at,
+            chain_id,
+            is_enabled,
         }
     }
 
@@ -168,6 +223,12 @@ impl ChangePubKeyMessageTarget {
         builder.register_public_input_biguint(&self.l1_signature.s.value);
         builder.register_public_input_biguint(&self.l1_pk.0.x.value);
         builder.register_public_input_biguint(&self.l1_pk.0.y.value);
+        builder.register_public_input(self.key_type);
+        builder.register_public_input_biguint(&self.ecdsa_pub_key.x);
+        builder.register_public_input(self.ecdsa_pub_key.y_odd.target);
+        builder.register_public_input(self.expired_at);
+        builder.register_public_input(self.chain_id);
+        builder.register_public_input(self.is_enabled.target);
     }
 
     pub fn new(builder: &mut Builder) -> Self {
@@ -176,6 +237,11 @@ impl ChangePubKeyMessageTarget {
             api_key_index: builder.add_virtual_target(),
             nonce: builder.add_virtual_target(),
             pub_key: builder.add_virtual_quintic_ext_target(),
+            key_type: builder.add_virtual_target(),
+            ecdsa_pub_key: EcdsaPubKeyTarget {
+                x: builder.add_virtual_biguint_target_unsafe(ECDSA_PUB_KEY_X_LIMBS), // safe because connected to safe inputs
+                y_odd: BoolTarget::new_unsafe(builder.add_virtual_target()), // safe because connected to safe inputs
+            },
             l1_address: builder.add_virtual_biguint_target_unsafe(BIG_U160_LIMBS), // safe because connected to safe inputs
             l1_signature: ECDSASignatureTarget {
                 r: NonNativeTarget {
@@ -197,6 +263,9 @@ impl ChangePubKeyMessageTarget {
                     _phantom: core::marker::PhantomData,
                 },
             }),
+            expired_at: builder.add_virtual_target(),
+            chain_id: builder.add_virtual_target(),
+            is_enabled: BoolTarget::new_unsafe(builder.add_virtual_target()), // safe because connected to safe inputs
         }
     }
 
@@ -227,6 +296,16 @@ impl ChangePubKeyMessageTarget {
                     _phantom: core::marker::PhantomData,
                 },
             }),
+            // Public-input order must match `register_public_input` / `from_public_inputs`:
+            // key type and ECDSA key come after the L1 pk ([45..55]).
+            key_type: builder.add_virtual_public_input(),
+            ecdsa_pub_key: EcdsaPubKeyTarget {
+                x: builder.add_virtual_biguint_public_input_unsafe(ECDSA_PUB_KEY_X_LIMBS), // Safe because it is connected to public witness from constrained circuit
+                y_odd: BoolTarget::new_unsafe(builder.add_virtual_public_input()), // Safe because it is connected to public witness from constrained circuit
+            },
+            expired_at: builder.add_virtual_public_input(),
+            chain_id: builder.add_virtual_public_input(),
+            is_enabled: BoolTarget::new_unsafe(builder.add_virtual_public_input()), // Safe because it is connected to public witness from constrained circuit
         }
     }
 
@@ -236,9 +315,19 @@ impl ChangePubKeyMessageTarget {
             api_key_index: builder.select(flag, a.api_key_index, b.api_key_index),
             nonce: builder.select(flag, a.nonce, b.nonce),
             pub_key: builder.select_quintic_ext(flag, a.pub_key, b.pub_key),
+            key_type: builder.select(flag, a.key_type, b.key_type),
+            ecdsa_pub_key: EcdsaPubKeyTarget::select(
+                builder,
+                flag,
+                &a.ecdsa_pub_key,
+                &b.ecdsa_pub_key,
+            ),
             l1_address: builder.select_biguint(flag, &a.l1_address, &b.l1_address),
             l1_signature: builder.select_ecdsa_signature(flag, &a.l1_signature, &b.l1_signature),
             l1_pk: builder.select_ecdsa_public_key(flag, &a.l1_pk, &b.l1_pk),
+            expired_at: builder.select(flag, a.expired_at, b.expired_at),
+            chain_id: builder.select(flag, a.chain_id, b.chain_id),
+            is_enabled: builder.select_bool(flag, a.is_enabled, b.is_enabled),
         }
     }
 
@@ -248,6 +337,8 @@ impl ChangePubKeyMessageTarget {
             api_key_index: builder.zero(),
             nonce: builder.zero(),
             pub_key: builder.zero_quintic_ext(),
+            key_type: builder.zero(),
+            ecdsa_pub_key: EcdsaPubKeyTarget::zero(builder),
             l1_address: BigUintTarget {
                 limbs: vec![builder.zero_u32(); BIG_U160_LIMBS],
             },
@@ -279,6 +370,9 @@ impl ChangePubKeyMessageTarget {
                     _phantom: core::marker::PhantomData,
                 },
             }),
+            expired_at: builder.zero(),
+            chain_id: builder.zero(),
+            is_enabled: builder._false(),
         }
     }
 
@@ -289,11 +383,27 @@ impl ChangePubKeyMessageTarget {
         self.pub_key.0.iter().for_each(|&t| {
             builder.conditional_assert_zero(cond, t);
         });
+        builder.conditional_assert_zero(cond, self.key_type);
+        builder.conditional_assert_zero_biguint(cond, &self.ecdsa_pub_key.x);
+        builder.conditional_assert_zero(cond, self.ecdsa_pub_key.y_odd.target);
         builder.conditional_assert_zero_biguint(cond, &self.l1_address);
         builder.conditional_assert_zero_biguint(cond, &self.l1_signature.r.value);
         builder.conditional_assert_zero_biguint(cond, &self.l1_signature.s.value);
         builder.conditional_assert_zero_biguint(cond, &self.l1_pk.0.x.value);
         builder.conditional_assert_zero_biguint(cond, &self.l1_pk.0.y.value);
+        builder.conditional_assert_zero(cond, self.expired_at);
+        builder.conditional_assert_zero(cond, self.chain_id);
+        builder.conditional_assert_zero(cond, self.is_enabled.target);
+    }
+    /// An enabled message must come from a non-treasury account with a set L1 address and L1 public key.
+    pub fn conditional_assert_signer_not_empty(&self, builder: &mut Builder) {
+        builder.conditional_assert_not_zero(self.is_enabled, self.account_index);
+        let is_l1_address_zero = builder.is_zero_biguint(&self.l1_address);
+        builder.conditional_assert_false(self.is_enabled, is_l1_address_zero);
+        let is_l1_pk_x_zero = builder.is_zero_biguint(&self.l1_pk.0.x.value);
+        let is_l1_pk_y_zero = builder.is_zero_biguint(&self.l1_pk.0.y.value);
+        let is_l1_pk_zero = builder.and(is_l1_pk_x_zero, is_l1_pk_y_zero);
+        builder.conditional_assert_false(self.is_enabled, is_l1_pk_zero);
     }
 
     pub fn connect(builder: &mut Builder, a: &Self, b: &Self) {
@@ -301,17 +411,91 @@ impl ChangePubKeyMessageTarget {
         builder.connect(a.api_key_index, b.api_key_index);
         builder.connect(a.nonce, b.nonce);
         builder.connect_quintic_ext(a.pub_key, b.pub_key);
+        builder.connect(a.key_type, b.key_type);
+        EcdsaPubKeyTarget::connect(builder, &a.ecdsa_pub_key, &b.ecdsa_pub_key);
         builder.connect_biguint(&a.l1_address, &b.l1_address);
         builder.connect_biguint(&a.l1_signature.r.value, &b.l1_signature.r.value);
         builder.connect_biguint(&a.l1_signature.s.value, &b.l1_signature.s.value);
         builder.connect_biguint(&a.l1_pk.0.x.value, &b.l1_pk.0.x.value);
         builder.connect_biguint(&a.l1_pk.0.y.value, &b.l1_pk.0.y.value);
+        builder.connect(a.expired_at, b.expired_at);
+        builder.connect(a.chain_id, b.chain_id);
+        builder.connect(a.is_enabled.target, b.is_enabled.target);
     }
 
+    /// keccak of the personal-sign message the L1 wallet signed. Both schemes fill the same 284 bytes:
+    /// Schnorr signs an 80 hex char key and the trusted-client line, ECDSA signs a 66 hex char key,
+    /// the tx expiry and the chain id.
     pub fn get_change_pub_key_l1_signature_msg_hash(
         &self,
         builder: &mut Builder,
     ) -> NonNativeTarget<Secp256K1Scalar> {
+        let is_ecdsa = builder.is_equal_constant(self.key_type, API_KEY_TYPE_ECDSA as u64);
+        let [nonce, account_index, api_key_index, expired_at, chain_id] =
+            self.l1_signature_rest_hex_bytes(builder);
+        let common_bytes = [
+            builder.constant_u8s(&L1_SIGNATURE_TEMPLATE_BYTES[1]),
+            nonce,
+            builder.constant_u8s(&L1_SIGNATURE_TEMPLATE_BYTES[2]),
+            account_index,
+            builder.constant_u8s(&L1_SIGNATURE_TEMPLATE_BYTES[3]),
+            api_key_index,
+        ]
+        .concat();
+        let schnorr_bytes = [
+            self.schnorr_pub_key_hex_bytes(builder),
+            common_bytes.clone(),
+            builder.constant_u8s(&L1_SIGNATURE_TEMPLATE_BYTES[4]),
+        ]
+        .concat();
+        let ecdsa_bytes = [
+            self.ecdsa_pub_key_hex_bytes(builder),
+            common_bytes,
+            builder.constant_u8s(&L1_SIGNATURE_TEMPLATE_BYTES[5]),
+            expired_at,
+            builder.constant_u8s(&L1_SIGNATURE_TEMPLATE_BYTES[6]),
+            chain_id,
+        ]
+        .concat();
+        assert_eq!(schnorr_bytes.len(), ecdsa_bytes.len());
+
+        let mut l1_signature_body_bytes = builder.constant_u8s(&L1_SIGNATURE_TEMPLATE_BYTES[0]);
+        l1_signature_body_bytes.extend(schnorr_bytes.into_iter().zip(ecdsa_bytes).map(
+            |(schnorr_byte, ecdsa_byte)| builder.select_u8(is_ecdsa, ecdsa_byte, schnorr_byte),
+        ));
+        assert_eq!(
+            l1_signature_body_bytes.len(),
+            L1_SIGNATURE_TEMPLATE_BYTE_LEN
+        );
+
+        builder.keccak256_circuit_to_nonnative(l1_signature_body_bytes)
+    }
+
+    /// `"0x" + 16 hex chars` (big-endian, zero padded) of nonce, account index, api key index,
+    /// expired at and chain id. Expired at and chain id are split at their own bit size, so that
+    /// each has a single hex representation.
+    fn l1_signature_rest_hex_bytes(&self, builder: &mut Builder) -> [Vec<U8Target>; 5] {
+        let zero_hex_byte = builder.constant_u8(48);
+        let x_hex_byte = builder.constant_u8(120);
+        [
+            (self.nonce, 64),
+            (self.account_index, 64),
+            (self.api_key_index, 64),
+            (self.expired_at, TIMESTAMP_BITS),
+            (self.chain_id, 32),
+        ]
+        .map(|(t, bits)| {
+            let hex = split_le_base16(builder, t, bits / 2);
+            let mut bytes = bytes_to_hex(builder, &hex);
+            bytes.resize(16, zero_hex_byte);
+            bytes.reverse(); // Make big-endian
+            bytes.insert(0, x_hex_byte);
+            bytes.insert(0, zero_hex_byte);
+            bytes
+        })
+    }
+
+    fn schnorr_pub_key_hex_bytes(&self, builder: &mut Builder) -> Vec<U8Target> {
         let pub_key_hex = [
             split_le_base16(builder, self.pub_key.0[0], 32),
             split_le_base16(builder, self.pub_key.0[1], 32),
@@ -330,65 +514,50 @@ impl ChangePubKeyMessageTarget {
                 pub_key_bytes[i].swap(j, j + 1);
             }
         }
-        let pub_key_bytes = pub_key_bytes.concat();
+        pub_key_bytes.concat()
+    }
 
-        let rest_hex = [
-            split_le_base16(builder, self.nonce, 32),
-            split_le_base16(builder, self.account_index, 32),
-            split_le_base16(builder, self.api_key_index, 32),
-        ];
-        let mut rest_bytes = vec![];
-        for i in 0..rest_hex.len() {
-            rest_bytes.push(bytes_to_hex(builder, &rest_hex[i]));
-        }
-
-        // Append "0x" to nonce, account index and api key index
+    /// Hex of the compressed SEC1 key: `02`/`03` (y parity) followed by x big-endian (64 hex chars).
+    fn ecdsa_pub_key_hex_bytes(&self, builder: &mut Builder) -> Vec<U8Target> {
         let zero_hex_byte = builder.constant_u8(48);
-        let x_hex_byte = builder.constant_u8(120);
-        for i in 0..rest_bytes.len() {
-            rest_bytes[i].reverse(); // Make big-endian
-            rest_bytes[i].insert(0, x_hex_byte);
-            rest_bytes[i].insert(0, zero_hex_byte);
+        let two_hex_byte = builder.constant_u8(50);
+        let three_hex_byte = builder.constant_u8(51);
+        let parity_byte = builder.select_u8(self.ecdsa_pub_key.y_odd, three_hex_byte, two_hex_byte);
+
+        assert_eq!(self.ecdsa_pub_key.x.limbs.len(), ECDSA_PUB_KEY_X_LIMBS);
+        let mut x_hex = Vec::with_capacity(ECDSA_PUB_KEY_X_LIMBS * 8);
+        for limb in self.ecdsa_pub_key.x.limbs.iter().rev() {
+            let mut nibbles = builder.split_u32_to_4_bit_limbs_le(*limb);
+            nibbles.reverse(); // Make big-endian
+            x_hex.extend(nibbles);
         }
-
-        // Treat elements of L1_SIGNATURE_TEMPLATE_BYTES as constants
-        let l1_signature_body_bytes: [U8Target; L1_SIGNATURE_TEMPLATE_BYTE_LEN] = [
-            builder.constant_u8s(&L1_SIGNATURE_TEMPLATE_BYTES[0]),
-            pub_key_bytes,
-            builder.constant_u8s(&L1_SIGNATURE_TEMPLATE_BYTES[1]),
-            rest_bytes[0].clone(),
-            builder.constant_u8s(&L1_SIGNATURE_TEMPLATE_BYTES[2]),
-            rest_bytes[1].clone(),
-            builder.constant_u8s(&L1_SIGNATURE_TEMPLATE_BYTES[3]),
-            rest_bytes[2].clone(),
-            builder.constant_u8s(&L1_SIGNATURE_TEMPLATE_BYTES[4]),
-        ]
-        .iter()
-        .flatten()
-        .cloned()
-        .collect::<Vec<U8Target>>()
-        .try_into()
-        .unwrap();
-
-        builder.keccak256_circuit_to_nonnative(l1_signature_body_bytes.to_vec())
+        let mut bytes = vec![zero_hex_byte, parity_byte];
+        bytes.extend(bytes_to_hex(builder, &x_hex));
+        bytes
     }
 }
 
 const L1_SIGNATURE_TEMPLATE_BYTE_LEN: usize = 284;
 
 lazy_static! {
-    static ref L1_SIGNATURE_TEMPLATE_BYTES: Vec<Vec<u8>> = [ // Filled length -> 260 bytes
+    static ref L1_SIGNATURE_TEMPLATE_BYTES: Vec<Vec<u8>> = [ // Filled length -> 284 bytes
         // 26 - "\x19Ethereum Signed Message:\n"
         // 3 - %d (body len)
         b"\x19Ethereum Signed Message:\n255Register Lighter Account\n\npubkey: 0x".to_vec(), // 65 bytes
-        // L2 pubkey -> 80 bytes
+        // L2 pubkey -> 80 bytes (Schnorr), 66 bytes (ECDSA)
         b"\nnonce: ".to_vec(), // 8 bytes
-        // nonceHex -> 10 bytes
+        // nonceHex -> 18 bytes
         b"\naccount index: ".to_vec(), // 16 bytes
-        // accountIndexHex -> 10 bytes
+        // accountIndexHex -> 18 bytes
         b"\napi key index: ".to_vec(), // 16 bytes
-        // apiKeyIndexHex -> 10 bytes
+        // apiKeyIndexHex -> 18 bytes
+        // Schnorr tail -> 45 bytes
         b"\nOnly sign this message for a trusted client!".to_vec(), // 45 bytes
+        // ECDSA tail -> 14 + 45 bytes
+        b"\nexpired at: ".to_vec(), // 13 bytes
+        // expiredAtHex -> 18 bytes
+        b"\nchainId: ".to_vec(), // 10 bytes
+        // chainIdHex -> 18 bytes
     ].to_vec();
 }
 

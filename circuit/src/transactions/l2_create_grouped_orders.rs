@@ -170,11 +170,9 @@ impl L2CreateGroupedOrdersTxTarget {
         );
 
         // Both orders should be reduce only
-        builder.conditional_assert_eq(
-            oco_flag,
-            self.orders[0].reduce_only,
-            self.orders[1].reduce_only,
-        );
+        let one = builder.one();
+        builder.conditional_assert_eq(oco_flag, self.orders[0].reduce_only, one);
+        builder.conditional_assert_eq(oco_flag, self.orders[1].reduce_only, one);
 
         // Both orders should have the same order expiry
         builder.conditional_assert_eq(
@@ -365,6 +363,12 @@ impl Verify for L2CreateGroupedOrdersTxTarget {
         let nil_order_expiry = builder.constant(F::from_canonical_i64(NIL_ORDER_EXPIRY));
 
         let is_enabled = tx_type.is_l2_create_grouped_orders;
+        builder.conditional_assert_true(is_enabled, tx_state.is_integrator_valid);
+        builder.conditional_assert_eq_constant(
+            is_enabled,
+            tx_state.asset_indices[TX_ASSET_ID],
+            USDC_ASSET_INDEX,
+        );
         self.success = is_enabled;
 
         self.public_market_index = self.orders[0].public_market_index;
@@ -525,8 +529,8 @@ impl Verify for L2CreateGroupedOrdersTxTarget {
 
             // ReduceOnly - If base amount is 0, reduce only must be 1
             let is_base_amount_zero = builder.is_zero(self.orders[i].base_amount);
-            let flag = builder.and(flag, is_base_amount_zero);
-            builder.conditional_assert_eq(flag, self.orders[i].reduce_only, one);
+            let zero_base_flag = builder.and(flag, is_base_amount_zero);
+            builder.conditional_assert_eq(zero_base_flag, self.orders[i].reduce_only, one);
 
             // Price - (Must fit in 32 bits) & (shouldn't be zero if enabled)
             builder.conditional_assert_not_zero(flag, self.orders[i].price);
@@ -654,6 +658,25 @@ impl Verify for L2CreateGroupedOrdersTxTarget {
             );
         }
 
+        // OCO and OTO sign only two orders, so the unused last slot must be the empty order
+        let last_order = &self.orders[MAX_NB_GROUPED_ORDERS - 1];
+        let is_last_order_unused =
+            builder.and_not(is_enabled, self.order_exists[MAX_NB_GROUPED_ORDERS - 1]);
+        for field in [
+            last_order.public_market_index,
+            last_order.client_order_index,
+            last_order.base_amount,
+            last_order.price,
+            last_order.is_ask.target,
+            last_order.order_type,
+            last_order.time_in_force,
+            last_order.reduce_only,
+            last_order.trigger_price,
+            last_order.order_expiry,
+        ] {
+            builder.conditional_assert_zero(is_last_order_unused, field);
+        }
+
         self.verify_oco(builder, oco_flag, &order_types);
         self.verify_oto(builder, oto_flag, &order_types);
         self.verify_otoco(builder, otoco_flag, &order_types);
@@ -697,11 +720,11 @@ impl Verify for L2CreateGroupedOrdersTxTarget {
             position_tied_order_base_amount,
             self.base_amounts[0],
         );
+        let is_oco_with_nil_base_amount = builder.and(self.is_oco, is_order_0_nil);
         for i in 0..MAX_NB_GROUPED_ORDERS {
             let is_ioc = builder.is_equal(self.orders[i].time_in_force, ioc);
             let base_amount_to_check =
                 builder.select(is_oto_or_otoco, self.base_amounts[0], self.base_amounts[i]);
-            let is_base_amount_to_check_zero = builder.is_zero(base_amount_to_check);
             let is_valid_base_size_and_price = tx_state.is_valid_base_size_and_price(
                 builder,
                 base_amount_to_check,
@@ -712,7 +735,7 @@ impl Verify for L2CreateGroupedOrdersTxTarget {
             let is_order_empty = builder.not(self.order_exists[i]);
             let is_valid_base_size_and_price_or_zero = builder.multi_or(&[
                 is_valid_base_size_and_price,
-                is_base_amount_to_check_zero,
+                is_oco_with_nil_base_amount,
                 is_order_empty,
             ]);
             self.success = builder.and(self.success, is_valid_base_size_and_price_or_zero);
@@ -929,6 +952,8 @@ impl Apply for L2CreateGroupedOrdersTxTarget {
             );
         }
         tx_state.matching_engine_flag = builder.or(tx_state.matching_engine_flag, self.success);
+        tx_state.update_impact_prices_flag =
+            builder.or(self.success, tx_state.update_impact_prices_flag);
 
         self.success
     }

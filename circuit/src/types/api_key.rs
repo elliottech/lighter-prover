@@ -4,11 +4,10 @@
 use anyhow::Result;
 use plonky2::field::extension::Extendable;
 use plonky2::field::extension::quintic::QuinticExtension;
-use plonky2::field::types::{Field, Field64, PrimeField64};
-use plonky2::hash::hash_types::{HashOut, HashOutTarget, RichField};
+use plonky2::field::types::{Field, PrimeField64};
+use plonky2::hash::hash_types::{HashOutTarget, RichField};
 use plonky2::iop::target::{BoolTarget, Target};
 use plonky2::iop::witness::Witness;
-use plonky2::plonk::config::Hasher;
 use serde::Deserialize;
 
 use super::config::{Builder, F};
@@ -21,6 +20,9 @@ use crate::eddsa::gadgets::base_field::{
 use crate::eddsa::gadgets::curve::PartialWitnessCurve;
 use crate::hash_utils::CircuitBuilderHashUtils;
 use crate::poseidon2::Poseidon2Hash;
+use crate::types::ecdsa_pub_key::{
+    ECDSA_PUB_KEY_FIELD_ELEMENTS, EcdsaPubKey, EcdsaPubKeyTarget, EcdsaPubKeyTargetWitness,
+};
 use crate::utils::CircuitBuilderUtils;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -39,7 +41,20 @@ where
 
     #[serde(rename = "n")]
     pub nonce: i64,
+
+    /// `API_KEY_TYPE_SCHNORR` (0) or `API_KEY_TYPE_ECDSA` (1); selects which
+    /// signature digest chain transactions signed by this key are absorbed into.
+    #[serde(rename = "kt")]
+    pub key_type: u8,
+
+    /// Compressed secp256k1 key, only set when `key_type == API_KEY_TYPE_ECDSA`.
+    #[serde(rename = "epk")]
+    #[serde(deserialize_with = "deserializers::deserialize_ecdsa_pk_compressed")]
+    pub ecdsa_public_key: EcdsaPubKey,
 }
+
+pub const API_KEY_TYPE_SCHNORR: u8 = 0;
+pub const API_KEY_TYPE_ECDSA: u8 = 1;
 
 impl<F: RichField + Extendable<5> + Default> Default for ApiKey<F> {
     fn default() -> Self {
@@ -47,6 +62,8 @@ impl<F: RichField + Extendable<5> + Default> Default for ApiKey<F> {
             api_key_index: 0,
             public_key: QuinticExtension::<F>::ZERO,
             nonce: 0,
+            key_type: API_KEY_TYPE_SCHNORR,
+            ecdsa_public_key: EcdsaPubKey::zero(),
         }
     }
 }
@@ -61,26 +78,17 @@ where
 
             public_key: QuinticExtension::<F>::ZERO,
             nonce: 0,
+            key_type: API_KEY_TYPE_SCHNORR,
+            ecdsa_public_key: EcdsaPubKey::zero(),
         }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.public_key.is_zero()
+    pub fn is_schnorr(&self) -> bool {
+        self.key_type == API_KEY_TYPE_SCHNORR
     }
 
-    pub fn hash(&self) -> HashOut<F> {
-        if self.is_empty() {
-            return HashOut::ZERO;
-        }
-
-        Poseidon2Hash::hash_no_pad(&[
-            self.public_key.0[0],
-            self.public_key.0[1],
-            self.public_key.0[2],
-            self.public_key.0[3],
-            self.public_key.0[4],
-            F::from_canonical_i64(self.nonce),
-        ])
+    pub fn is_ecdsa(&self) -> bool {
+        self.key_type == API_KEY_TYPE_ECDSA
     }
 }
 
@@ -89,7 +97,9 @@ pub struct ApiKeyTarget {
     pub api_key_index: Target,
 
     pub public_key: QuinticExtensionTarget,
-    pub nonce: Target, // 48 bits
+    pub nonce: Target,    // 48 bits
+    pub key_type: Target, // 0 = schnorr, 1 = ecdsa
+    pub ecdsa_public_key: EcdsaPubKeyTarget,
 }
 
 impl ApiKeyTarget {
@@ -99,7 +109,17 @@ impl ApiKeyTarget {
 
             public_key: builder.add_virtual_quintic_ext_target(),
             nonce: builder.add_virtual_target(),
+            key_type: builder.add_virtual_target(),
+            ecdsa_public_key: EcdsaPubKeyTarget::new(builder),
         }
+    }
+
+    pub fn is_ecdsa(&self) -> BoolTarget {
+        BoolTarget::new_unsafe(self.key_type)
+    }
+
+    pub fn is_schnorr(&self, builder: &mut Builder) -> BoolTarget {
+        builder.not(self.is_ecdsa())
     }
 
     pub fn is_empty(&self, builder: &mut Builder) -> BoolTarget {
@@ -108,6 +128,8 @@ impl ApiKeyTarget {
         let assertions = [
             builder.is_equal_quintic_ext(self.public_key, zero_quintic),
             builder.is_zero(self.nonce),
+            builder.is_zero(self.key_type),
+            self.ecdsa_public_key.is_zero(builder),
         ];
 
         builder.multi_and(&assertions)
@@ -117,6 +139,11 @@ impl ApiKeyTarget {
         builder.println(self.api_key_index, &format!("{} api_key_index", tag));
         builder.println_arr(&self.public_key.0, &format!("{} public_key", tag));
         builder.println(self.nonce, &format!("{} nonce", tag));
+        builder.println(self.key_type, &format!("{} key_type", tag));
+        builder.println_arr(
+            &self.ecdsa_public_key.to_targets(),
+            &format!("{} ecdsa_public_key", tag),
+        );
     }
 
     pub fn empty(builder: &mut Builder, api_key_index: Target) -> Self {
@@ -125,18 +152,18 @@ impl ApiKeyTarget {
 
             public_key: builder.zero_quintic_ext(),
             nonce: builder.zero(),
+            key_type: builder.zero(),
+            ecdsa_public_key: EcdsaPubKeyTarget::zero(builder),
         }
     }
 
     pub fn hash(&self, builder: &mut Builder) -> HashOutTarget {
-        let non_empty_hash = builder.hash_n_to_hash_no_pad::<Poseidon2Hash>(vec![
-            self.public_key.0[0],
-            self.public_key.0[1],
-            self.public_key.0[2],
-            self.public_key.0[3],
-            self.public_key.0[4],
-            self.nonce,
-        ]);
+        let mut elements = Vec::with_capacity(7 + ECDSA_PUB_KEY_FIELD_ELEMENTS);
+        elements.extend_from_slice(&self.public_key.0);
+        elements.push(self.nonce);
+        elements.push(self.key_type);
+        elements.extend(self.ecdsa_public_key.to_targets());
+        let non_empty_hash = builder.hash_n_to_hash_no_pad::<Poseidon2Hash>(elements);
 
         let empty_hash = builder.zero_hash_out();
         let is_empty = self.is_empty(builder);
@@ -156,6 +183,8 @@ impl<T: Witness<F> + PartialWitnessCurve<F>, F: PrimeField64 + Extendable<5> + R
         self.set_target(a.api_key_index, F::from_canonical_u8(b.api_key_index))?;
         self.set_quintic_ext_target(a.public_key, b.public_key)?;
         self.set_target(a.nonce, F::from_canonical_i64(b.nonce))?;
+        self.set_target(a.key_type, F::from_canonical_u8(b.key_type))?;
+        self.set_ecdsa_pub_key_target(&a.ecdsa_public_key, &b.ecdsa_public_key)?;
 
         Ok(())
     }
@@ -171,41 +200,12 @@ pub fn select_api_key_target(
         api_key_index: builder.select(flag, a.api_key_index, b.api_key_index),
         public_key: builder.select_quintic_ext(flag, a.public_key, b.public_key),
         nonce: builder.select(flag, a.nonce, b.nonce),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use anyhow::Result;
-    use plonky2::iop::witness::{PartialWitness, WitnessWrite};
-    use rand::Rng;
-
-    use super::*;
-    use crate::eddsa::schnorr::{ONE_SK, schnorr_pk_from_sk};
-    use crate::types::config::{C, CIRCUIT_CONFIG};
-
-    #[test]
-    fn api_key_hash_check() -> Result<()> {
-        let mut builder = Builder::new(CIRCUIT_CONFIG);
-
-        let api_key_target = ApiKeyTarget::new(&mut builder);
-        let api_key_hash_target = api_key_target.hash(&mut builder);
-
-        let data = builder.build::<C>();
-
-        // Set the values
-        let mut pw = PartialWitness::new();
-
-        let api_key = ApiKey {
-            api_key_index: rand::thread_rng().r#gen(),
-            public_key: schnorr_pk_from_sk(&ONE_SK),
-            nonce: rand::thread_rng().r#gen::<u32>() as i64,
-        };
-        let api_key_hash = api_key.hash();
-
-        pw.set_api_key_target(&api_key_target, &api_key)?;
-        pw.set_hash_target(api_key_hash_target, api_key_hash)?;
-
-        data.verify(data.prove(pw)?)
+        key_type: builder.select(flag, a.key_type, b.key_type),
+        ecdsa_public_key: EcdsaPubKeyTarget::select(
+            builder,
+            flag,
+            &a.ecdsa_public_key,
+            &b.ecdsa_public_key,
+        ),
     }
 }

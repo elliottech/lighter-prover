@@ -66,12 +66,6 @@ pub trait CircuitBuilderCurve<F: RichField + Extendable<D>, const D: usize> {
         p1: &AffinePointTarget<C>,
         p2: &AffinePointTarget<C>,
     ) -> AffinePointTarget<C>;
-    fn conditional_curve_add<C: Curve>(
-        &mut self,
-        cond: BoolTarget,
-        p1: &AffinePointTarget<C>,
-        p2: &AffinePointTarget<C>,
-    ) -> AffinePointTarget<C>;
 
     fn curve_mul_bool_add<C: Curve>(
         &mut self,
@@ -212,29 +206,6 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilderCurve<F, D> for
         let u = self.sub_nonnative(y2, y1);
         let v = self.sub_nonnative(x2, x1);
         let v_inv = self.inv_nonnative(&v, None);
-        let s = self.mul_nonnative(&u, &v_inv);
-        let s_squared = self.mul_nonnative(&s, &s);
-        let x_sum = self.add_nonnative(x2, x1);
-        let x3 = self.sub_nonnative(&s_squared, &x_sum);
-        let x_diff = self.sub_nonnative(x1, &x3);
-        let prod = self.mul_nonnative(&s, &x_diff);
-        let y3 = self.sub_nonnative(&prod, y1);
-
-        AffinePointTarget { x: x3, y: y3 }
-    }
-
-    fn conditional_curve_add<C: Curve>(
-        &mut self,
-        cond: BoolTarget,
-        p1: &AffinePointTarget<C>,
-        p2: &AffinePointTarget<C>,
-    ) -> AffinePointTarget<C> {
-        let AffinePointTarget { x: x1, y: y1 } = p1;
-        let AffinePointTarget { x: x2, y: y2 } = p2;
-
-        let u = self.sub_nonnative(y2, y1);
-        let v = self.sub_nonnative(x2, x1);
-        let v_inv = self.conditional_inv_nonnative(cond, &v, None);
         let s = self.mul_nonnative(&u, &v_inv);
         let s_squared = self.mul_nonnative(&s, &s);
         let x_sum = self.add_nonnative(x2, x1);

@@ -39,7 +39,10 @@ https://github.com/Consensys/gnark-crypto
 Modifications: Modified SRS reader functions in [ecc/bn254/kzg/marshal.go] to support
 legacy SRS serialization format.
 ================================================================================
-
+Plonky3 (MIT)
+Copyright (c) 2022 The Plonky3 Authors
+https://github.com/Plonky3/plonky3
+================================================================================
 ---
 
 MIT License

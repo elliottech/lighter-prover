@@ -13,11 +13,15 @@ use circuit::block_tx::{BlockTx, BlockTxWitness, JumpState};
 use circuit::block_tx_chain_constraints::{BlockTxChainCircuit, Circuit as _};
 use circuit::block_tx_constraints::{BlockTxCircuit, Circuit as _};
 use circuit::builder::custom::cyclic_base_proof;
+use circuit::ecdsa::ecdsa_helper::{
+    absorb_ecdsa_signature_instance, initial_ecdsa_signature_digest_state,
+    prove_ecdsa_signature_batch_proof,
+};
 use circuit::eddsa::schnorr_helper::{
     absorb_signature_instance, initial_signature_digest_state, prove_signature_batch_proof,
 };
 use circuit::types::config::{
-    BLOCK_CIRCUIT_CONFIG, BLOCK_TX_CHAIN_CIRCUIT_CONFIG, C, CIRCUIT_CONFIG, F,
+    BLOCK_CIRCUIT_CONFIG, BLOCK_TX_CHAIN_CIRCUIT_CONFIG, C, CIRCUIT_CONFIG, F, SignatureSchemes,
 };
 use circuit::types::constants::*;
 use clap::Parser;
@@ -28,6 +32,7 @@ use plonky2::recursion::dummy_circuit::dummy_circuit;
 
 const CHAIN_ID: u32 = 304;
 const MARGINED_ASSET_LIST_SIZE: usize = 7;
+const SIGNATURE_SCHEMES: SignatureSchemes = SignatureSchemes::Both;
 
 #[derive(Parser, Debug)]
 #[command(about = "Lighter circuits block proving benchmark")]
@@ -83,6 +88,7 @@ fn main() {
         CHAIN_ID,
         TX_HEAVY,
         MARGINED_ASSET_LIST_SIZE,
+        SIGNATURE_SCHEMES,
     );
     let bt = circuit.target;
     let data = circuit.builder.build::<C>();
@@ -98,6 +104,7 @@ fn main() {
         CHAIN_ID,
         TX_LIGHT,
         MARGINED_ASSET_LIST_SIZE,
+        SIGNATURE_SCHEMES,
     );
     let light_bt = light_circuit.target;
     let light_data = light_circuit.builder.build::<C>();
@@ -110,18 +117,25 @@ fn main() {
     let light_chain_circuit_t = light_chain_circuit.target;
     let light_chain_circuit_data = light_chain_circuit.builder.build::<C>();
 
-    let signature_batch_circuit =
+    let signature_batch_circuit = SIGNATURE_SCHEMES.schnorr_signature_enabled().then(|| {
         p3_schnorr_recursion::build_transcript_verifier_circuit(MAX_REAL_SIGNATURES)
-            .expect("failed to build p3-schnorr-recursion TranscriptVerifierCircuit");
+            .expect("failed to build p3-schnorr-recursion TranscriptVerifierCircuit")
+    });
+    let ecdsa_signature_batch_circuit = SIGNATURE_SCHEMES.ecdsa_signature_enabled().then(|| {
+        p3_ecdsa_recursion::build_batch_verifier_circuit(MAX_REAL_SIGNATURES)
+            .expect("failed to build p3-ecdsa-recursion BatchVerifierCircuit")
+    });
 
     let block_circuit = BlockCircuit::define(
         BLOCK_CIRCUIT_CONFIG,
         &pre_exec_data,
         &light_chain_circuit_data,
         &heavy_chain_circuit_data,
-        &signature_batch_circuit.data,
+        signature_batch_circuit.as_ref().map(|c| &c.data),
+        ecdsa_signature_batch_circuit.as_ref().map(|c| &c.data),
         1,
         MARGINED_ASSET_LIST_SIZE,
+        SIGNATURE_SCHEMES,
     );
     let block_circuit_t = block_circuit.target;
     let block_circuit_data = block_circuit.builder.build::<C>();
@@ -169,6 +183,14 @@ fn main() {
         .fold(heavy_seed, |state, (pk, tx_hash, sig)| {
             absorb_signature_instance(state, *pk, *tx_hash, sig)
         });
+    let (all_heavy_ecdsa_signature_data, all_light_ecdsa_signature_data) =
+        block.ecdsa_signature_batches();
+    let total_ecdsa_signed_count =
+        (all_heavy_ecdsa_signature_data.len() + all_light_ecdsa_signature_data.len()) as u64;
+    let ecdsa_heavy_seed = initial_ecdsa_signature_digest_state(total_ecdsa_signed_count as usize);
+    let ecdsa_light_seed = all_heavy_ecdsa_signature_data
+        .iter()
+        .fold(ecdsa_heavy_seed, absorb_ecdsa_signature_instance);
     let mut current_heavy_chain_proof = BlockTxChainCircuit::cyclic_base_proof(
         &heavy_chain_circuit_data,
         &dummy_heavy_tx_chain_circuit,
@@ -179,6 +201,8 @@ fn main() {
         block.old_delta_root,
         total_signed_count,
         heavy_seed,
+        total_ecdsa_signed_count,
+        ecdsa_heavy_seed,
     );
     let mut current_light_chain_proof = BlockTxChainCircuit::cyclic_base_proof(
         &light_chain_circuit_data,
@@ -190,6 +214,8 @@ fn main() {
         block.old_delta_root,
         total_signed_count,
         light_seed,
+        total_ecdsa_signed_count,
+        ecdsa_light_seed,
     );
 
     let mut heavy_jump = JumpState::initial(pre_exec_witness.new_state_root, block.old_delta_root);
@@ -207,6 +233,10 @@ fn main() {
     let mut light_digest_state = light_seed;
     let mut heavy_signed_so_far = 0u64;
     let mut light_signed_so_far = 0u64;
+    let mut ecdsa_heavy_digest_state = ecdsa_heavy_seed;
+    let mut ecdsa_light_digest_state = ecdsa_light_seed;
+    let mut ecdsa_heavy_signed_so_far = 0u64;
+    let mut ecdsa_light_signed_so_far = 0u64;
     for (index, tx) in block.tx_chunks.iter().enumerate() {
         let is_light = tx[0].tx_circuit_type == TX_LIGHT;
         let block_tx = BlockTx {
@@ -223,6 +253,16 @@ fn main() {
                 light_signed_so_far
             } else {
                 heavy_signed_so_far
+            }),
+            ecdsa_signature_digest_state_before: if is_light {
+                ecdsa_light_digest_state
+            } else {
+                ecdsa_heavy_digest_state
+            },
+            ecdsa_signed_count_before: F::from_canonical_u64(if is_light {
+                ecdsa_light_signed_so_far
+            } else {
+                ecdsa_heavy_signed_so_far
             }),
         };
 
@@ -260,6 +300,21 @@ fn main() {
         for (pk, tx_hash, sig) in &signature_slots {
             *digest_state = absorb_signature_instance(*digest_state, *pk, *tx_hash, sig);
             *signed_so_far += 1;
+        }
+        let (ecdsa_digest_state, ecdsa_signed_so_far) = if is_light {
+            (
+                &mut ecdsa_light_digest_state,
+                &mut ecdsa_light_signed_so_far,
+            )
+        } else {
+            (
+                &mut ecdsa_heavy_digest_state,
+                &mut ecdsa_heavy_signed_so_far,
+            )
+        };
+        for instance in tx.iter().filter_map(|tx| tx.ecdsa_signature_instance()) {
+            *ecdsa_digest_state = absorb_ecdsa_signature_instance(*ecdsa_digest_state, &instance);
+            *ecdsa_signed_so_far += 1;
         }
         if is_light {
             light_jump = tx_witness.new_jump;
@@ -316,8 +371,17 @@ fn main() {
         .chain(all_light_tx_signature_data.iter())
         .cloned()
         .collect();
-    let signature_batch_proof =
-        prove_signature_batch_proof(&signature_batch_circuit, &all_tx_signature_data);
+    let signature_batch_proof = signature_batch_circuit
+        .as_ref()
+        .map(|c| prove_signature_batch_proof(c, &all_tx_signature_data));
+    let all_ecdsa_signature_data: Vec<_> = all_heavy_ecdsa_signature_data
+        .iter()
+        .chain(all_light_ecdsa_signature_data.iter())
+        .cloned()
+        .collect();
+    let ecdsa_signature_batch_proof = ecdsa_signature_batch_circuit
+        .as_ref()
+        .map(|c| prove_ecdsa_signature_batch_proof(c, &all_ecdsa_signature_data));
 
     let block_prove_time = Instant::now();
     let final_proof = BlockCircuit::prove(
@@ -327,7 +391,8 @@ fn main() {
         &pre_proof,
         &current_light_chain_proof,
         &current_heavy_chain_proof,
-        &signature_batch_proof,
+        signature_batch_proof.as_ref(),
+        ecdsa_signature_batch_proof.as_ref(),
     );
     let block_prove_total = block_prove_time.elapsed();
     if let Err(err) = final_proof {

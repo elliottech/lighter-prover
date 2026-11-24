@@ -3,36 +3,32 @@
 
 use anyhow::Result;
 use plonky2::field::extension::Extendable;
-use plonky2::field::extension::quintic::QuinticExtension;
 use plonky2::field::types::{Field, PrimeField64};
 use plonky2::hash::hash_types::RichField;
 use plonky2::iop::target::{BoolTarget, Target};
 use plonky2::iop::witness::Witness;
 use serde::Deserialize;
+use serde_with::serde_as;
 
 use crate::bool_utils::CircuitBuilderBoolUtils;
-use crate::deserializers;
-use crate::eddsa::gadgets::base_field::{
-    CircuitBuilderGFp5, PartialWitnessQuinticExt, QuinticExtensionTarget,
-};
+use crate::eddsa::gadgets::base_field::{CircuitBuilderGFp5, QuinticExtensionTarget};
 use crate::tx_interface::{Apply, PriorityOperationsPubData, Verify};
-use crate::types::config::Builder;
+use crate::types::api_key::API_KEY_TYPE_SCHNORR;
+use crate::types::config::{Builder, F};
 use crate::types::constants::{
     LIGHTER_STAKING_POOL_ACCOUNT_TYPE, MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX,
     NIL_API_KEY_INDEX, OWNER_ACCOUNT_ID, PRIORITY_PUB_DATA_TYPE_L1_CHANGE_PUB_KEY,
 };
+use crate::types::ecdsa_pub_key::EcdsaPubKeyTarget;
 use crate::types::target_pub_data_helper::*;
 use crate::types::tx_state::TxState;
 use crate::types::tx_type::TxTypeTargets;
-use crate::uint::u8::U8Target;
+use crate::uint::u8::{CircuitBuilderU8, U8Target, WitnessU8};
 use crate::utils::CircuitBuilderUtils;
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
-pub struct L1ChangePubKeyTx<F>
-where
-    F: Field + Extendable<5> + RichField,
-{
+pub struct L1ChangePubKeyTx {
     #[serde(rename = "ai")]
     pub account_index: i64,
     #[serde(rename = "mai")]
@@ -40,16 +36,48 @@ where
     #[serde(rename = "ki")]
     pub api_key_index: u8,
     #[serde(rename = "p")]
-    #[serde(deserialize_with = "deserializers::pub_key")]
-    pub pub_key: QuinticExtension<F>,
+    #[serde(deserialize_with = "deserialize_pub_key")]
+    pub pub_key: [u8; 40],
 }
 
+impl Default for L1ChangePubKeyTx {
+    fn default() -> Self {
+        Self {
+            account_index: 0,
+            master_account_index: 0,
+            api_key_index: 0,
+            pub_key: [0; 40],
+        }
+    }
+}
+
+fn deserialize_pub_key<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<[u8; 40], D::Error> {
+    let values = Vec::<u64>::deserialize(deserializer)?;
+    match values.len() {
+        5 => Ok(core::array::from_fn(|i| values[i / 8].to_le_bytes()[i % 8])),
+        40 => values
+            .into_iter()
+            .map(|v| u8::try_from(v).map_err(serde::de::Error::custom))
+            .collect::<Result<Vec<_>, _>>()?
+            .try_into()
+            .map_err(|_| serde::de::Error::custom("expected 40 bytes")),
+        _ => Err(serde::de::Error::custom(
+            "expected 40 bytes or 5 legacy limbs",
+        )),
+    }
+}
+
+#[serde_as]
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct L1ChangePubKeyTxTarget {
     pub account_index: Target,
     pub master_account_index: Target,
     pub api_key_index: Target,
-    pub pub_key: QuinticExtensionTarget,
+    #[serde_as(as = "[_; 40]")]
+    pub pub_key: [U8Target; 40],
+    schnorr_pub_key: QuinticExtensionTarget,
 
     // Output
     success: BoolTarget,
@@ -62,13 +90,61 @@ impl L1ChangePubKeyTxTarget {
             account_index: builder.add_virtual_target(),
             master_account_index: builder.add_virtual_target(),
             api_key_index: builder.add_virtual_target(),
-            pub_key: builder.add_virtual_quintic_ext_target(),
+            pub_key: core::array::from_fn(|_| builder.add_virtual_u8_target_safe()),
+            schnorr_pub_key: QuinticExtensionTarget::default(),
 
             // Output
             success: BoolTarget::default(),
             is_enabled: BoolTarget::default(),
         }
     }
+
+    fn validate_pub_key(&mut self, builder: &mut Builder, tx_state: &TxState) -> BoolTarget {
+        let (mut schnorr_valid, schnorr_revoke, schnorr_pub_key) = {
+            let mut canonical = Vec::new();
+            let limbs = self
+                .pub_key
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|bytes| {
+                    let lo = bytes_le(builder, &bytes[..4]);
+                    let hi = bytes_le(builder, &bytes[4..]);
+                    let hi_max = builder.is_equal_constant(hi, u32::MAX as u64);
+                    let lo_nonzero = builder.is_not_zero(lo);
+                    let invalid = builder.and(hi_max, lo_nonzero);
+                    canonical.push(builder.not(invalid));
+                    builder.mul_const_add(F::from_canonical_u64(1 << 32), hi, lo)
+                })
+                .collect::<Vec<_>>();
+
+            let zero_bytes = self
+                .pub_key
+                .iter()
+                .map(|b| builder.is_zero(b.0))
+                .collect::<Vec<_>>();
+            (
+                builder.multi_and(&canonical),
+                builder.multi_and(&zero_bytes),
+                QuinticExtensionTarget(limbs.try_into().unwrap()),
+            )
+        };
+        self.schnorr_pub_key = schnorr_pub_key;
+
+        // Only allow revoking old schnorr keys if new schnorr keys cannot be created
+        if !tx_state.signature_schemes.can_create_schnorr_keys() {
+            let old_schnorr =
+                builder.is_equal_constant(tx_state.api_key.key_type, API_KEY_TYPE_SCHNORR as u64);
+            schnorr_valid = builder.multi_and(&[schnorr_valid, schnorr_revoke, old_schnorr]);
+        }
+        schnorr_valid
+    }
+}
+
+fn bytes_le(builder: &mut Builder, bytes: &[U8Target]) -> Target {
+    bytes.iter().rev().fold(builder.zero(), |acc, byte| {
+        builder.mul_const_add(F::from_canonical_u64(256), acc, byte.0)
+    })
 }
 
 impl Verify for L1ChangePubKeyTxTarget {
@@ -106,13 +182,26 @@ impl Verify for L1ChangePubKeyTxTarget {
             LIGHTER_STAKING_POOL_ACCOUNT_TYPE as u64,
         );
         self.success = builder.and_not(self.success, is_staking_pool);
+
+        let key_valid = self.validate_pub_key(builder, tx_state);
+        self.success = builder.and(self.success, key_valid);
     }
 }
 
 impl Apply for L1ChangePubKeyTxTarget {
     fn apply(&mut self, builder: &mut Builder, tx_state: &mut TxState) -> BoolTarget {
-        tx_state.api_key.public_key =
-            builder.select_quintic_ext(self.success, self.pub_key, tx_state.api_key.public_key);
+        let api_key = &mut tx_state.api_key;
+        api_key.public_key =
+            builder.select_quintic_ext(self.success, self.schnorr_pub_key, api_key.public_key);
+        let key_type = builder.constant_from_u8(API_KEY_TYPE_SCHNORR);
+        api_key.key_type = builder.select(self.success, key_type, api_key.key_type);
+        let zero_ecdsa_pk = EcdsaPubKeyTarget::zero(builder);
+        api_key.ecdsa_public_key = EcdsaPubKeyTarget::select(
+            builder,
+            self.success,
+            &zero_ecdsa_pk,
+            &api_key.ecdsa_public_key,
+        );
 
         self.success
     }
@@ -133,7 +222,7 @@ impl PriorityOperationsPubData for L1ChangePubKeyTxTarget {
             add_target(builder, bytes, self.account_index, 48),
             add_target(builder, bytes, self.master_account_index, 48),
             add_byte_target_unsafe(bytes, self.api_key_index),
-            add_pub_key_target(builder, bytes, &self.pub_key),
+            add_pub_key_target(bytes, &self.pub_key),
         ]
         .iter()
         .sum();
@@ -149,7 +238,7 @@ pub trait L1ChangePubKeyTxTargetWitness<F: PrimeField64 + Extendable<5> + RichFi
     fn set_l1_change_pub_key_tx_target(
         &mut self,
         a: &L1ChangePubKeyTxTarget,
-        b: &L1ChangePubKeyTx<F>,
+        b: &L1ChangePubKeyTx,
     ) -> Result<()>;
 }
 
@@ -159,7 +248,7 @@ impl<T: Witness<F>, F: PrimeField64 + RichField + Extendable<5>> L1ChangePubKeyT
     fn set_l1_change_pub_key_tx_target(
         &mut self,
         a: &L1ChangePubKeyTxTarget,
-        b: &L1ChangePubKeyTx<F>,
+        b: &L1ChangePubKeyTx,
     ) -> Result<()> {
         self.set_target(a.account_index, F::from_canonical_i64(b.account_index))?;
         self.set_target(
@@ -167,7 +256,9 @@ impl<T: Witness<F>, F: PrimeField64 + RichField + Extendable<5>> L1ChangePubKeyT
             F::from_canonical_i64(b.master_account_index),
         )?;
         self.set_target(a.api_key_index, F::from_canonical_u8(b.api_key_index))?;
-        self.set_quintic_ext_target(a.pub_key, b.pub_key)?;
+        for (target, byte) in a.pub_key.iter().zip(b.pub_key) {
+            self.set_u8_target(*target, byte)?;
+        }
 
         Ok(())
     }

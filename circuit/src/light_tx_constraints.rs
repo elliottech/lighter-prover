@@ -10,7 +10,6 @@ use crate::bigint::bigint::CircuitBuilderBigInt;
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::comparison::CircuitBuilderSubtractiveComparison;
 use crate::eddsa::gadgets::base_field::{CircuitBuilderGFp5, QuinticExtensionTarget};
-use crate::eddsa::schnorr::SchnorrSigTarget;
 use crate::hash_utils::CircuitBuilderHashUtils;
 use crate::hints::CircuitBuilderHints;
 use crate::matching_engine::execute_matching_light;
@@ -31,8 +30,8 @@ use crate::types::account_margined_asset::AccountMarginedAssetTarget;
 use crate::types::account_position::{
     AccountPositionTarget, random_access_account_position, random_access_positions,
 };
-use crate::types::asset::{AssetTarget, all_assets_hash, random_access_assets};
-use crate::types::config::Builder;
+use crate::types::asset::{AssetTarget, all_assets_hash, connect_assets, random_access_assets};
+use crate::types::config::{Builder, SignatureSchemes};
 use crate::types::constants::*;
 use crate::types::margined_asset::{
     MarginedAssetTarget, all_margined_assets_hash, random_access_margined_assets,
@@ -41,6 +40,7 @@ use crate::types::market_details::{MarketRiskDetailsTarget, all_market_details_h
 use crate::types::public_pool::PublicPoolShareTarget;
 use crate::types::register::BaseRegisterInfoTarget;
 use crate::types::risk_info::RiskInfoTarget;
+use crate::types::signature_slot::SignatureSlotTargets;
 use crate::types::tx_state::TxState;
 use crate::types::tx_type::{TxTypeTargets, TxTypeVerifyTargets};
 use crate::uint::u8::{CircuitBuilderU8, U8Target};
@@ -117,18 +117,16 @@ impl TxTarget {
         block_created_at: Target,
         state_metadata_hash: HashOutTarget,
         margined_asset_list_size: usize,
+        signature_schemes: SignatureSchemes,
         batch: &LightBatchInvariantHashes,
     ) -> (
         [U8Target; MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX],
         BoolTarget,
         [U8Target; ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE],
         BoolTarget,
-        HashOutTarget,          // public market details hash
-        HashOutTarget,          // account delta tree root
-        QuinticExtensionTarget, // account_pk (absorbed into the p3-schnorr digest when signed)
-        QuinticExtensionTarget, // tx_hash (absorbed into the p3-schnorr digest when signed)
-        SchnorrSigTarget,       // signature (absorbed into the p3-schnorr digest when signed)
-        BoolTarget,             // signature_check: slot carries a real signature to verify
+        HashOutTarget,        // public market details hash
+        HashOutTarget,        // account delta tree root
+        SignatureSlotTargets, // absorbed into the p3-schnorr / p3-ecdsa digest when signed
     ) {
         let tx_type = TxTypeTargets::new(builder, self.tx_type);
 
@@ -143,9 +141,13 @@ impl TxTarget {
 
         let tx_hash = self.select_light_tx_hash(builder, &tx_type, chain_id);
         let account_pk = self.api_key_before.public_key;
+        let account_is_ecdsa = self.api_key_before.is_ecdsa();
+        let account_ecdsa_pk = self.api_key_before.ecdsa_public_key.clone();
         let partial_main_account = self.select_light_partial_main_account(builder);
 
         let nil_account_index = builder.constant_i64(NIL_ACCOUNT_INDEX);
+        // Change pubkey txs are not light txs
+        let revoke_with_old_key = builder._false();
         let signature_check = tx_type.verify(
             builder,
             &TxTypeVerifyTargets {
@@ -153,8 +155,10 @@ impl TxTarget {
                 block_created_at,
                 nonce: self.nonce,
                 api_key_before_nonce: self.api_key_before.nonce,
-                signature: self.signature.clone(),
                 account_pk,
+                account_is_ecdsa,
+                account_ecdsa_pk: account_ecdsa_pk.clone(),
+                revoke_with_old_key,
                 tx_hash,
                 instruction_type: self.register_stack_before[0].instruction_type,
                 tx_sender_account_partial: partial_main_account,
@@ -239,10 +243,22 @@ impl TxTarget {
             self.accounts_before[OWNER_ACCOUNT_ID].get_position_bucket_hashes(builder);
         let (old_owner_account_hash, _, owner_account_is_empty) =
             self.accounts_before[OWNER_ACCOUNT_ID].hash(builder, &owner_position_bucket_hashes);
+        let empty_market_pub_data_root = builder.constant_hash(EMPTY_MARKET_DATA_TREE_ROOT);
+        builder.conditional_assert_eq_hash(
+            owner_account_is_empty,
+            &self.accounts_before[OWNER_ACCOUNT_ID].market_pub_data_root,
+            &empty_market_pub_data_root,
+        );
+        let empty_aggregated_balances_root = builder.constant_hash(EMPTY_ASSET_TREE_ROOT);
+        builder.conditional_assert_eq_hash(
+            owner_account_is_empty,
+            &self.accounts_before[OWNER_ACCOUNT_ID].aggregated_balances_root,
+            &empty_aggregated_balances_root,
+        );
         let old_owner_asset_hashes: [HashOutTarget; NB_ASSETS_PER_TX] =
             core::array::from_fn(|j| self.account_assets_before[OWNER_ACCOUNT_ID][j].hash(builder));
 
-        self.attributes.sanitize_and_normalize(
+        let is_integrator_valid = self.attributes.sanitize_and_normalize(
             builder,
             &self.accounts_before[OWNER_ACCOUNT_ID],
             &self.market_before,
@@ -257,6 +273,7 @@ impl TxTarget {
             first_asset_margin_index,
             next_margin_asset_index: builder.constant_usize(margined_asset_list_size),
             margined_asset_list_size,
+            signature_schemes,
             new_instructions: [BaseRegisterInfoTarget::empty(builder); NEW_INSTRUCTIONS_MAX_SIZE],
             new_instructions_count: builder.zero(),
             register_stack: self.register_stack_before,
@@ -304,6 +321,7 @@ impl TxTarget {
             public_pool_share: PublicPoolShareTarget::default(),
             apply_pool_share_delta_flag: builder._false(),
             between_strategies_flag: _false,
+            is_integrator_valid,
             attributes: self.attributes.clone(),
         };
 
@@ -399,6 +417,15 @@ impl TxTarget {
         );
         builder.connect_hashes(self.old_delta_root, old_delta_root);
 
+        let signature_slot = self.signature_slot(
+            builder,
+            tx_hash,
+            account_pk,
+            account_is_ecdsa,
+            account_ecdsa_pk,
+            signature_check,
+        );
+
         (
             [builder.zero_u8(); MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX],
             builder._false(),
@@ -406,10 +433,7 @@ impl TxTarget {
             builder._false(),
             batch.public_market_details_hash,
             self.old_delta_root,
-            account_pk,
-            tx_hash,
-            self.signature.clone(),
-            signature_check,
+            signature_slot,
         )
     }
 
@@ -558,6 +582,17 @@ impl TxTarget {
 
         builder.register_range_check(self.asset_indices[TX_ASSET_ID], ASSET_LIST_SIZE_BITS);
         builder.register_range_check(self.asset_indices[FEE_ASSET_ID], ASSET_LIST_SIZE_BITS);
+        let empty_asset = AssetTarget::empty(builder);
+        connect_assets(
+            builder,
+            &self.all_assets_before[NIL_ASSET_INDEX as usize],
+            &empty_asset,
+        );
+        connect_assets(
+            builder,
+            &self.all_assets_before[ASSET_LIST_SIZE - 1],
+            &empty_asset,
+        );
 
         for i in [TX_ASSET_ID, FEE_ASSET_ID] {
             builder.connect(
@@ -665,6 +700,7 @@ impl TxTarget {
             tx_state.next_public_market_index,
             self.next_public_market_index_before,
         );
+        builder.connect(tx_state.market.status, self.market_before.status);
     }
 
     fn verify_light_api_key_merkle_proof(&self, builder: &mut Builder, tx_state: &mut TxState) {
@@ -735,6 +771,13 @@ impl TxTarget {
         builder.assert_true(is_valid_index_0);
 
         builder.register_range_check(self.account_order_before.index_1, CLIENT_ORDER_INDEX_BITS);
+        let is_account_order_before_empty = self.account_order_before.is_empty(builder);
+        let is_account_order_before_non_empty = builder.not(is_account_order_before_empty);
+        builder.conditional_assert_eq(
+            is_account_order_before_non_empty,
+            self.account_order_before.index_1,
+            self.account_order_before.client_order_index,
+        );
 
         let account_order_hash_for_index_0 = self.account_order_before.hash(builder);
         let account_orders_merkle_path_for_index_0 =

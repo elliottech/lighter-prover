@@ -43,6 +43,7 @@ pub struct InternalCancelOrderTxTarget {
     is_empty_order: BoolTarget,
     is_cancel_all_kind: BoolTarget,
     is_register_set: BoolTarget,
+    is_trigger_status_na: BoolTarget,
 
     // outputs
     pub success: BoolTarget,
@@ -58,6 +59,7 @@ impl InternalCancelOrderTxTarget {
             is_empty_order: BoolTarget::default(),
             is_cancel_all_kind: BoolTarget::default(),
             is_register_set: BoolTarget::default(),
+            is_trigger_status_na: BoolTarget::default(),
 
             // outputs
             success: BoolTarget::default(),
@@ -93,11 +95,11 @@ impl Verify for InternalCancelOrderTxTarget {
         );
 
         // Verify that we load correct order from orderbook if needed
-        let is_trigger_status_na = builder.is_equal_constant(
+        self.is_trigger_status_na = builder.is_equal_constant(
             tx_state.account_order.trigger_status,
             TRIGGER_STATUS_NA as u64,
         );
-        let is_trigger_state_na_and_enabled = builder.and(is_enabled, is_trigger_status_na);
+        let is_trigger_state_na_and_enabled = builder.and(is_enabled, self.is_trigger_status_na);
         builder.conditional_assert_eq(
             is_trigger_state_na_and_enabled,
             tx_state.account_order.price,
@@ -391,7 +393,9 @@ impl Apply for InternalCancelOrderTxTarget {
             tx_state.order.price_index,
             tx_state.order.nonce_index,
         );
-        tx_state.order = select_order_target(builder, update_state, &empty_order, &tx_state.order);
+        let update_order_leaf = builder.and(update_state, self.is_trigger_status_na);
+        tx_state.order =
+            select_order_target(builder, update_order_leaf, &empty_order, &tx_state.order);
 
         // Set update_impact_prices_flag
         tx_state.update_impact_prices_flag =

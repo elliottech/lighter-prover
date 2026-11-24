@@ -441,7 +441,9 @@ impl MarketTarget {
     pub fn is_empty(&self, builder: &mut Builder) -> BoolTarget {
         let nil_public_market_index = builder.constant_u64(NIL_PUBLIC_MARKET_INDEX as u64);
         let nil_market_operator = builder.constant_i64(NIL_ACCOUNT_INDEX);
+        let empty_order_book_root = builder.constant_hash(EMPTY_ORDER_BOOK_TREE_ROOT);
         let assertions = [
+            builder.is_equal_hash(&self.order_book_root, &empty_order_book_root),
             builder.is_equal(self.public_market_index, nil_public_market_index),
             builder.is_zero(self.market_type),
             builder.is_zero(self.status),

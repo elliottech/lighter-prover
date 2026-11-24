@@ -9,7 +9,7 @@ use plonky2::field::types::{Field, Field64};
 use plonky2::gates::constant::ConstantGate;
 use plonky2::gates::gate::GateRef;
 use plonky2::hash::hash_types::{HashOutTarget, NUM_HASH_OUT_ELTS, RichField};
-use plonky2::iop::target::{BoolTarget, Target};
+use plonky2::iop::target::Target;
 use plonky2::iop::witness::PartialWitness;
 use plonky2::plonk::circuit_data::{CircuitConfig, CircuitData};
 use plonky2::plonk::config::GenericConfig;
@@ -20,17 +20,20 @@ use plonky2::util::timing::TimingTree;
 
 use crate::block_tx::{BlockTx, JumpStateTarget};
 use crate::bool_utils::CircuitBuilderBoolUtils;
-use crate::eddsa::gadgets::base_field::QuinticExtensionTarget;
+use crate::ecdsa::p3_ecdsa_digest::P3EcdsaDigestState;
+use crate::eddsa::gadgets::base_field::CircuitBuilderGFp5;
 use crate::eddsa::p3_schnorr_digest::{P3_DIGEST_STATE_WIDTH, P3SchnorrDigestState};
-use crate::eddsa::schnorr::SchnorrSigTarget;
 use crate::hash_utils::CircuitBuilderHashUtils;
 use crate::light_tx_constraints::LightBatchInvariantHashes;
 use crate::poseidon2::Poseidon2Hash;
 use crate::tx_constraints::{TxTarget, TxTargetWitness};
+use crate::types::api_key::{API_KEY_TYPE_ECDSA, API_KEY_TYPE_SCHNORR};
 use crate::types::approve_integrator::ApproveIntegratorMessageTarget;
 use crate::types::change_pub_key::ChangePubKeyMessageTarget;
-use crate::types::config::{Builder, C, D, F};
+use crate::types::config::{Builder, C, D, F, SignatureSchemes};
 use crate::types::constants::*;
+use crate::types::ecdsa_pub_key::EcdsaPubKeyTarget;
+use crate::types::signature_slot::SignatureSlotTargets;
 use crate::types::transfer::TransferMessageTarget;
 use crate::uint::u8::{CircuitBuilderU8, U8Target};
 use crate::utils::CircuitBuilderUtils;
@@ -52,6 +55,7 @@ pub trait Circuit<
         chain_id: u32,
         mode: u8,
         margined_asset_list_size: usize,
+        signature_schemes: SignatureSchemes,
     ) -> Self;
     /// Fills partial witness for block target with given block data
     fn generate_witness(block: &BlockTx<F>, target: &BlockTxTarget) -> Result<PartialWitness<F>>;
@@ -118,6 +122,11 @@ pub struct BlockTxTarget {
     pub signature_digest_state_after: [Target; P3_DIGEST_STATE_WIDTH],
     pub signed_count_before: Target,
     pub signed_count_after: Target,
+
+    pub ecdsa_signature_digest_state_before: [Target; P3_DIGEST_STATE_WIDTH],
+    pub ecdsa_signature_digest_state_after: [Target; P3_DIGEST_STATE_WIDTH],
+    pub ecdsa_signed_count_before: Target,
+    pub ecdsa_signed_count_after: Target,
 }
 
 impl Default for BlockTxTarget {
@@ -161,6 +170,11 @@ impl Default for BlockTxTarget {
             signature_digest_state_after: core::array::from_fn(|_| Target::default()),
             signed_count_before: Target::default(),
             signed_count_after: Target::default(),
+
+            ecdsa_signature_digest_state_before: core::array::from_fn(|_| Target::default()),
+            ecdsa_signature_digest_state_after: core::array::from_fn(|_| Target::default()),
+            ecdsa_signed_count_before: Target::default(),
+            ecdsa_signed_count_after: Target::default(),
         }
     }
 }
@@ -172,6 +186,7 @@ impl Circuit<C, F, D> for BlockTxCircuit {
         chain_id: u32,
         mode: u8,
         margined_asset_list_size: usize,
+        signature_schemes: SignatureSchemes,
     ) -> Self {
         let mut circuit = Self::new(config, tx_limit, mode, margined_asset_list_size);
 
@@ -185,7 +200,13 @@ impl Circuit<C, F, D> for BlockTxCircuit {
             public_market_details_hash_after,
             delta_root_after,
             tx_signature_data,
-        ) = circuit.define_tx_loop(tx_limit, chain_id, mode, margined_asset_list_size);
+        ) = circuit.define_tx_loop(
+            tx_limit,
+            chain_id,
+            mode,
+            margined_asset_list_size,
+            signature_schemes,
+        );
 
         circuit.define_post_tx_batch(
             chain_id,
@@ -197,6 +218,7 @@ impl Circuit<C, F, D> for BlockTxCircuit {
             &priority_operations_pub_data,
             &tx_signature_data,
             mode,
+            signature_schemes,
         );
 
         circuit.builder.perform_registered_range_checks();
@@ -286,6 +308,18 @@ impl BlockTxCircuit {
         }
         pw.set_target(target.signed_count_before, block.signed_count_before)?;
 
+        for (t, v) in target
+            .ecdsa_signature_digest_state_before
+            .iter()
+            .zip(block.ecdsa_signature_digest_state_before.iter())
+        {
+            pw.set_target(*t, *v)?;
+        }
+        pw.set_target(
+            target.ecdsa_signed_count_before,
+            block.ecdsa_signed_count_before,
+        )?;
+
         target
             .txs
             .iter()
@@ -370,6 +404,15 @@ impl BlockTxCircuit {
                 }),
                 signed_count_before: builder.add_virtual_target(),
                 signed_count_after: builder.add_virtual_target(),
+
+                ecdsa_signature_digest_state_before: core::array::from_fn(|_| {
+                    builder.add_virtual_target()
+                }),
+                ecdsa_signature_digest_state_after: core::array::from_fn(|_| {
+                    builder.add_virtual_target()
+                }),
+                ecdsa_signed_count_before: builder.add_virtual_target(),
+                ecdsa_signed_count_after: builder.add_virtual_target(),
             },
 
             builder,
@@ -440,6 +483,18 @@ impl BlockTxCircuit {
             .register_public_input(self.target.signed_count_before);
         self.builder
             .register_public_input(self.target.signed_count_after);
+        self.builder.register_public_input(self.target.created_at);
+
+        for &lane in &self.target.ecdsa_signature_digest_state_before {
+            self.builder.register_public_input(lane);
+        }
+        for &lane in &self.target.ecdsa_signature_digest_state_after {
+            self.builder.register_public_input(lane);
+        }
+        self.builder
+            .register_public_input(self.target.ecdsa_signed_count_before);
+        self.builder
+            .register_public_input(self.target.ecdsa_signed_count_after);
     }
 
     fn define_tx_loop(
@@ -448,6 +503,7 @@ impl BlockTxCircuit {
         chain_id: u32,
         mode: u8,
         margined_asset_list_size: usize,
+        signature_schemes: SignatureSchemes,
     ) -> (
         Target,                                                    // on chain operations count
         [U8Target; ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE], // on chain operations public data
@@ -455,12 +511,7 @@ impl BlockTxCircuit {
         [U8Target; MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX], // priority operations public data
         HashOutTarget,                                             // new public market details hash
         HashOutTarget,                                             // new account delta tree root
-        Vec<(
-            QuinticExtensionTarget,
-            QuinticExtensionTarget,
-            SchnorrSigTarget,
-            BoolTarget,
-        )>, // (account_pk, tx_hash, signature, signature_check) per tx slot
+        Vec<SignatureSlotTargets>,                                 // signature material per tx slot
     ) {
         assert_eq!(self.target.txs.len(), tx_limit, "txs count mismatch");
         assert!(
@@ -499,10 +550,7 @@ impl BlockTxCircuit {
                 on_chain_pub_data_exists,
                 tx_public_market_details_hash_after,
                 delta_root_after,
-                account_pk,
-                tx_hash,
-                signature,
-                signature_check,
+                signature_slot,
             ) = match mode {
                 TX_HEAVY => tx.define(
                     index,
@@ -511,6 +559,7 @@ impl BlockTxCircuit {
                     self.target.created_at,
                     self.target.state_metadata_hash,
                     margined_asset_list_size,
+                    signature_schemes,
                 ),
                 TX_LIGHT => tx.define_light(
                     index,
@@ -519,6 +568,7 @@ impl BlockTxCircuit {
                     self.target.created_at,
                     self.target.state_metadata_hash,
                     margined_asset_list_size,
+                    signature_schemes,
                     light_batch_hashes
                         .as_ref()
                         .expect("light batch hashes are defined for the light circuit"),
@@ -560,7 +610,7 @@ impl BlockTxCircuit {
                 );
             }
 
-            tx_signature_data.push((account_pk, tx_hash, signature, signature_check));
+            tx_signature_data.push(signature_slot);
         }
 
         JumpStateTarget::connect(&mut self.builder, &jump, &self.target.new_jump);
@@ -683,19 +733,15 @@ impl BlockTxCircuit {
         on_chain_operations_pub_data: &[U8Target; ON_CHAIN_OPERATIONS_PUB_DATA_BYTES_SIZE],
         priority_operations_count: Target,
         priority_operations_pub_data: &[U8Target; MAX_PRIORITY_OPERATIONS_PUB_DATA_BYTES_PER_TX],
-        tx_signature_data: &[(
-            QuinticExtensionTarget,
-            QuinticExtensionTarget,
-            SchnorrSigTarget,
-            BoolTarget,
-        )],
+        tx_signature_data: &[SignatureSlotTargets],
         mode: u8,
+        signature_schemes: SignatureSchemes,
     ) {
-        self.handle_signature_digest(tx_signature_data);
+        self.handle_signature_digest(tx_signature_data, signature_schemes);
 
         match mode {
             TX_HEAVY => {
-                self.handle_change_pub_key();
+                self.handle_change_pub_key(chain_id);
                 self.handle_transfer(chain_id);
                 self.handle_approve_integrator(chain_id);
             }
@@ -733,37 +779,64 @@ impl BlockTxCircuit {
         );
     }
 
+    /// Each signed slot is absorbed into exactly one chain, picked by the signing api key's
+    /// scheme (`schnorr_check` / `ecdsa_check` are mutually exclusive).
     fn handle_signature_digest(
         &mut self,
-        tx_signature_data: &[(
-            QuinticExtensionTarget,
-            QuinticExtensionTarget,
-            SchnorrSigTarget,
-            BoolTarget,
-        )],
+        tx_signature_data: &[SignatureSlotTargets],
+        signature_schemes: SignatureSchemes,
     ) {
         let mut digest_state = P3SchnorrDigestState {
             state: self.target.signature_digest_state_before,
         };
         let mut signed_count = self.target.signed_count_before;
-        for (account_pk, tx_hash, signature, signature_check) in tx_signature_data {
-            digest_state.absorb_instance_conditional(
-                &mut self.builder,
-                *account_pk,
-                *tx_hash,
-                signature,
-                *signature_check,
-            );
-            signed_count = self.builder.add(signed_count, signature_check.target);
+        let mut ecdsa_digest_state = P3EcdsaDigestState {
+            state: self.target.ecdsa_signature_digest_state_before,
+        };
+        let mut ecdsa_signed_count = self.target.ecdsa_signed_count_before;
+        for slot in tx_signature_data {
+            if signature_schemes.schnorr_signature_enabled() {
+                digest_state.absorb_instance_conditional(
+                    &mut self.builder,
+                    slot.account_pk,
+                    slot.tx_hash,
+                    &slot.signature,
+                    slot.schnorr_check,
+                );
+                signed_count = self.builder.add(signed_count, slot.schnorr_check.target);
+            } else {
+                self.builder.assert_false(slot.schnorr_check);
+            }
+
+            if signature_schemes.ecdsa_signature_enabled() {
+                ecdsa_digest_state.absorb_instance_conditional(
+                    &mut self.builder,
+                    slot.tx_hash,
+                    &slot.ecdsa_signature,
+                    &slot.ecdsa_pk,
+                    slot.ecdsa_check,
+                );
+                ecdsa_signed_count = self
+                    .builder
+                    .add(ecdsa_signed_count, slot.ecdsa_check.target);
+            } else {
+                self.builder.assert_false(slot.ecdsa_check);
+            }
         }
         for i in 0..P3_DIGEST_STATE_WIDTH {
             self.builder.connect(
                 digest_state.state[i],
                 self.target.signature_digest_state_after[i],
             );
+            self.builder.connect(
+                ecdsa_digest_state.state[i],
+                self.target.ecdsa_signature_digest_state_after[i],
+            );
         }
         self.builder
             .connect(signed_count, self.target.signed_count_after);
+        self.builder
+            .connect(ecdsa_signed_count, self.target.ecdsa_signed_count_after);
     }
 
     fn handle_zero_change_pub_key(&mut self) {
@@ -775,17 +848,33 @@ impl BlockTxCircuit {
         );
     }
 
-    fn handle_change_pub_key(&mut self) {
+    fn handle_change_pub_key(&mut self, chain_id: u32) {
         let l2_change_pk = self.builder.constant_from_u8(TX_TYPE_L2_CHANGE_PUB_KEY);
+        let l2_change_ecdsa_pk = self
+            .builder
+            .constant_from_u8(TX_TYPE_L2_CHANGE_ECDSA_PUB_KEY);
+        let schnorr_key_type = self.builder.constant_from_u8(API_KEY_TYPE_SCHNORR);
+        let ecdsa_key_type = self.builder.constant_from_u8(API_KEY_TYPE_ECDSA);
+        let chain_id = self.builder.constant(F::from_canonical_u32(chain_id));
         let mut count = self.builder.zero();
+        let _true = self.builder._true();
 
         let mut change_pub_key_message = ChangePubKeyMessageTarget::empty(&mut self.builder);
 
         for tx in self.target.txs.iter() {
             let is_change_pk = self.builder.is_equal(tx.tx_type, l2_change_pk);
+            let is_change_ecdsa_pk = self.builder.is_equal(tx.tx_type, l2_change_ecdsa_pk);
+
+            // Revoking a slot with the signature of the key in it does not carry an L1 signature
+            let skip_l1_signature =
+                tx.is_revoke_with_old_key(&mut self.builder, is_change_pk, is_change_ecdsa_pk);
+            let is_change_pk = self.builder.and_not(is_change_pk, skip_l1_signature);
+            let is_change_ecdsa_pk = self.builder.and_not(is_change_ecdsa_pk, skip_l1_signature);
 
             count = self.builder.add(is_change_pk.target, count);
+            count = self.builder.add(is_change_ecdsa_pk.target, count);
 
+            let zero_ecdsa_pk = EcdsaPubKeyTarget::zero(&mut self.builder);
             change_pub_key_message = ChangePubKeyMessageTarget::select(
                 &mut self.builder,
                 is_change_pk,
@@ -794,15 +883,41 @@ impl BlockTxCircuit {
                     account_index: tx.l2_change_pub_key_tx_target.inner.account_index,
                     api_key_index: tx.l2_change_pub_key_tx_target.inner.api_key_index,
                     pub_key: tx.l2_change_pub_key_tx_target.inner.pub_key,
+                    key_type: schnorr_key_type,
+                    ecdsa_pub_key: zero_ecdsa_pk,
                     nonce: tx.nonce,
                     l1_pk: tx.l1_pub_key.clone(),
                     l1_signature: tx.l1_signature.clone(),
+                    expired_at: tx.expired_at,
+                    chain_id,
+                    is_enabled: _true,
+                },
+                &change_pub_key_message,
+            );
+
+            let zero_schnorr_pk = self.builder.zero_quintic_ext();
+            change_pub_key_message = ChangePubKeyMessageTarget::select(
+                &mut self.builder,
+                is_change_ecdsa_pk,
+                &ChangePubKeyMessageTarget {
+                    l1_address: tx.accounts_before[OWNER_ACCOUNT_ID].l1_address.clone(),
+                    account_index: tx.l2_change_ecdsa_pub_key_tx_target.inner.account_index,
+                    api_key_index: tx.l2_change_ecdsa_pub_key_tx_target.inner.api_key_index,
+                    pub_key: zero_schnorr_pk,
+                    key_type: ecdsa_key_type,
+                    ecdsa_pub_key: tx.l2_change_ecdsa_pub_key_tx_target.inner.pub_key.clone(),
+                    nonce: tx.nonce,
+                    l1_pk: tx.l1_pub_key.clone(),
+                    l1_signature: tx.l1_signature.clone(),
+                    expired_at: tx.expired_at,
+                    chain_id,
+                    is_enabled: _true,
                 },
                 &change_pub_key_message,
             );
         }
 
-        // Verify that there is at most one change pubkey tx in the block
+        // Verify that there is at most one change pubkey tx (of either scheme) with an L1 signature in the block
         let c_sq_minus_c = self.builder.mul_sub(count, count, count);
         self.builder.assert_zero(c_sq_minus_c);
 
@@ -825,6 +940,7 @@ impl BlockTxCircuit {
     fn handle_transfer(&mut self, chain_id: u32) {
         let l2_transfer = self.builder.constant_from_u8(TX_TYPE_L2_TRANSFER);
         let mut count = self.builder.zero();
+        let _true = self.builder._true();
 
         let mut transfer_message = TransferMessageTarget::empty(&mut self.builder);
 
@@ -832,19 +948,40 @@ impl BlockTxCircuit {
         for tx in self.target.txs.iter() {
             let is_transfer = self.builder.is_equal(tx.tx_type, l2_transfer);
             let is_same_master_account = self.builder.is_equal(
-                tx.accounts_before[0].master_account_index,
-                tx.accounts_before[1].master_account_index,
+                tx.accounts_before[SENDER_ACCOUNT_ID].master_account_index,
+                tx.accounts_before[RECEIVER_ACCOUNT_ID].master_account_index,
             );
-            let is_transfer_different_master_account =
-                self.builder.and_not(is_transfer, is_same_master_account);
+            // Transfers to public pools, insurance fund or staking pools require L1 signature
+            // even if the sender owns it, because anyone can mint shares in these pools.
+            let receiver_account_type = tx.accounts_before[RECEIVER_ACCOUNT_ID].account_type;
+            let is_receiver_public_pool = self
+                .builder
+                .is_equal_constant(receiver_account_type, PUBLIC_POOL_ACCOUNT_TYPE as u64);
+            let is_receiver_insurance_fund = self
+                .builder
+                .is_equal_constant(receiver_account_type, INSURANCE_FUND_ACCOUNT_TYPE as u64);
+            let is_receiver_staking_pool = self.builder.is_equal_constant(
+                receiver_account_type,
+                LIGHTER_STAKING_POOL_ACCOUNT_TYPE as u64,
+            );
+            let is_receiver_any_pool = self.builder.multi_or(&[
+                is_receiver_public_pool,
+                is_receiver_insurance_fund,
+                is_receiver_staking_pool,
+            ]);
+            let skip_l1_signature = self
+                .builder
+                .and_not(is_same_master_account, is_receiver_any_pool);
+            let is_transfer_with_l1_signature =
+                self.builder.and_not(is_transfer, skip_l1_signature);
 
             count = self
                 .builder
-                .add(is_transfer_different_master_account.target, count);
+                .add(is_transfer_with_l1_signature.target, count);
 
             transfer_message = TransferMessageTarget::select(
                 &mut self.builder,
-                is_transfer_different_master_account,
+                is_transfer_with_l1_signature,
                 &TransferMessageTarget {
                     from_account_index: tx.l2_transfer_tx_target.inner.from_account_index,
                     api_key_index: tx.l2_transfer_tx_target.inner.api_key_index,
@@ -860,6 +997,7 @@ impl BlockTxCircuit {
                     l1_address: tx.accounts_before[OWNER_ACCOUNT_ID].l1_address.clone(),
                     l1_pk: tx.l1_pub_key.clone(),
                     l1_signature: tx.l1_signature.clone(),
+                    is_enabled: _true,
                 },
                 &transfer_message,
             );
@@ -888,6 +1026,7 @@ impl BlockTxCircuit {
     fn handle_approve_integrator(&mut self, chain_id: u32) {
         let l2_approve_integrator = self.builder.constant_from_u8(TX_TYPE_L2_APPROVE_INTEGRATOR);
         let mut count = self.builder.zero();
+        let _true = self.builder._true();
 
         let mut approve_integrator_message =
             ApproveIntegratorMessageTarget::empty(&mut self.builder);
@@ -943,6 +1082,7 @@ impl BlockTxCircuit {
                     l1_address: tx.accounts_before[OWNER_ACCOUNT_ID].l1_address.clone(),
                     l1_pk: tx.l1_pub_key.clone(),
                     l1_signature: tx.l1_signature.clone(),
+                    is_enabled: _true,
                 },
                 &approve_integrator_message,
             );

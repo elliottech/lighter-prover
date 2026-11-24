@@ -10,7 +10,6 @@ use super::constants::{
 };
 use crate::bigint::biguint::BigUintTarget;
 use crate::byte::split::CircuitBuilderByteSplit;
-use crate::eddsa::gadgets::base_field::QuinticExtensionTarget;
 use crate::types::config::BIG_U64_LIMBS;
 use crate::types::constants::{MAX_EXCHANGE_USDC_BITS, MAX_TRANSFER_BITS};
 use crate::uint::u8::{CircuitBuilderU8, U8Target};
@@ -45,16 +44,9 @@ pub fn add_account_index_target(
     byte_size
 }
 
-pub fn add_pub_key_target(
-    builder: &mut Builder,
-    bytes: &mut Vec<U8Target>,
-    pub_key: &QuinticExtensionTarget,
-) -> usize {
-    for j in 0..pub_key.0.len() {
-        let limb_bytes = builder.split_bytes(pub_key.0[j], 8);
-        bytes.extend_from_slice(&limb_bytes);
-    }
-    pub_key.0.len() * 8
+pub fn add_pub_key_target(bytes: &mut Vec<U8Target>, pub_key: &[U8Target]) -> usize {
+    bytes.extend_from_slice(pub_key);
+    pub_key.len()
 }
 
 pub fn add_byte_target_unsafe(bytes: &mut Vec<U8Target>, target: Target) -> usize {

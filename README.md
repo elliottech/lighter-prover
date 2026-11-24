@@ -1,1 +1,0 @@
-# Lighter Prover and Circuits

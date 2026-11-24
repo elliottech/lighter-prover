@@ -287,7 +287,8 @@ where
         NonNativeMultipleAddsGenerator<F, D, CC::ScalarField>,
         NonNativeInverseGenerator<F, D, CC::ScalarField>,
         NonNativeAdditionGenerator<F, D, CC::ScalarField>,
-        P3Poseidon2Generator<F, D>
+        P3Poseidon2Generator<F, D>,
+        NonNativeDivisionGenerator<F, D, CC::BaseField>
     }
 }
 

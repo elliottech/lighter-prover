@@ -41,7 +41,7 @@ pub struct MarketDetails {
     pub interest_rate: u32, // 20 bits
 
     #[serde(rename = "ap", default)]
-    pub aggregate_premium_sum: i64, // 58 bits
+    pub aggregate_premium_sum: i64,
 
     // Warning: Witness names impact ask price as bid and vice versa
     #[serde(rename = "ia", default)]

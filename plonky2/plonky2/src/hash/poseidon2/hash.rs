@@ -1122,43 +1122,14 @@ impl<F: RichField + Poseidon2> AlgebraicHasher<F> for Poseidon2Hash {
 mod test {
     use anyhow::Result;
     use num::{BigUint, One};
-    use p3_field::{AbstractField, PrimeField64 as _};
-    use p3_goldilocks::Goldilocks;
     use rand::{thread_rng, RngCore};
 
     use super::*;
     use crate::field::types::PrimeField64;
     use crate::hash::hashing::hash_n_to_m_no_pad;
-    use crate::hash::poseidon2::p3::p3_poseidon2_hash_n_to_m_no_pad;
     use crate::iop::witness::{PartialWitness, WitnessWrite};
     use crate::plonk::circuit_data::CircuitConfig;
     use crate::plonk::config::PoseidonGoldilocksConfig;
-
-    #[test]
-    fn test_poseidon2_with_plonky3() {
-        let mut rng = thread_rng();
-
-        let input: [u32; 12] = core::array::from_fn(|_| rng.next_u32());
-
-        let input_f = input
-            .iter()
-            .map(|&x| F::from_canonical_u64((x as u64) + 1073741824))
-            .collect::<Vec<F>>();
-        let expected_output_f = hash_n_to_m_no_pad::<F, Poseidon2Permutation<F>>(&input_f, 12);
-
-        let input_f3 = input
-            .iter()
-            .map(|&x| Goldilocks::from_canonical_u64((x as u64) + 1073741824))
-            .collect::<Vec<Goldilocks>>();
-        let expected_output_f3 = p3_poseidon2_hash_n_to_m_no_pad(&input_f3, 12);
-
-        for i in 0..4 {
-            assert_eq!(
-                expected_output_f[i].to_canonical_u64(),
-                expected_output_f3[i].as_canonical_u64()
-            );
-        }
-    }
 
     #[test]
     fn test_poseidon2_gate() -> Result<()> {

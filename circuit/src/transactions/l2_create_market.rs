@@ -10,11 +10,11 @@ use serde::Deserialize;
 
 use crate::bigint::biguint::CircuitBuilderBiguint;
 use crate::bigint::comparison::CircuitBuilderBiguintSubtractiveComparison;
+use crate::bigint::div_rem::CircuitBuilderBiguintDivRem;
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::comparison::CircuitBuilderSubtractiveComparison;
 use crate::eddsa::gadgets::base_field::QuinticExtensionTarget;
 use crate::eddsa::schnorr::hash_to_quintic_extension_circuit;
-use crate::hints::CircuitBuilderHints;
 use crate::tx_interface::{Apply, TxHash, Verify};
 use crate::types::config::{Builder, F};
 use crate::types::constants::*;
@@ -308,9 +308,12 @@ impl Verify for L2CreateMarketTxTarget {
         builder.conditional_assert_lte(is_enabled, self.taker_fee, fee_tick, 24);
         builder.conditional_assert_lte(is_enabled, self.maker_fee, fee_tick, 24);
         // Fees scale by quote_extension_multiplier / FEE_TICK, which must be exact
-        let (_, quote_multiplier_fee_remainder) =
-            builder.div_rem(self.quote_extension_multiplier, fee_tick, FEE_BITS);
-        builder.conditional_assert_zero(is_enabled, quote_multiplier_fee_remainder);
+        let fee_tick_big = builder.target_to_biguint_single_limb_unsafe(fee_tick);
+        let quote_extension_multiplier_big =
+            builder.target_to_biguint(self.quote_extension_multiplier);
+        let quote_multiplier_fee_remainder =
+            builder.rem_biguint(&quote_extension_multiplier_big, &fee_tick_big);
+        builder.conditional_assert_zero_biguint(is_enabled, &quote_multiplier_fee_remainder);
 
         builder.conditional_assert_not_zero(is_enabled, self.min_base_amount);
         builder.conditional_assert_not_zero(is_enabled, self.min_quote_amount);

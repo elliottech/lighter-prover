@@ -325,6 +325,16 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
     // If pending trigger status is not NA, insert taker order
     {
         let flag = builder.and(update_status_flags, is_pending_trigger_status_not_na);
+        builder.conditional_assert_eq(
+            flag,
+            tx_state.account_order.index_0,
+            tx_state.register_stack[0].pending_order_index,
+        );
+        builder.conditional_assert_eq(
+            flag,
+            tx_state.account_order.index_1,
+            tx_state.register_stack[0].pending_client_order_index,
+        );
         insert_taker_order = builder.select_bool(flag, update_status_flags, insert_taker_order);
         update_status_flags = builder.select_bool(flag, _false, update_status_flags);
     }
@@ -470,6 +480,12 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
             update_status_flags,
             market_index,
             tx_state.market.market_index,
+        );
+
+        builder.conditional_assert_eq(
+            update_status_flags,
+            tx_state.account_order.is_ask.target,
+            is_taker_bid.target,
         );
     }
 
@@ -825,21 +841,19 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
         let price_diff_multiplier = builder.select(ask_taker_with_slippage, one, neg_one);
         let price_diff = builder.mul(taker_minus_maker_price, price_diff_multiplier);
 
-        let (mut allowed_trade_base, _) = builder.conditional_div_rem(
-            is_slippage,
-            tx_state.register_stack[0].generic_field_0,
-            price_diff,
-            ORDER_PRICE_BITS,
-        );
+        let slippage_accumulator_big =
+            builder.target_to_biguint(tx_state.register_stack[0].generic_field_0);
+        let price_diff_big = builder.target_to_biguint(price_diff);
+        let allowed_trade_base_big =
+            builder.div_biguint(&slippage_accumulator_big, &price_diff_big);
+        let mut allowed_trade_base = builder.biguint_to_target_unsafe(&allowed_trade_base_big);
         allowed_trade_base =
             builder.select(is_slippage, allowed_trade_base, optimistic_trade_amount);
 
         let is_allowed_trade_base_not_equal_to_optimistic_trade_amount =
             builder.is_not_equal(allowed_trade_base, optimistic_trade_amount);
-        let new_optimistic_trade_amount_check = builder.min(
-            &[allowed_trade_base, optimistic_trade_amount],
-            ORDER_SIZE_BITS,
-        );
+        let new_optimistic_trade_amount_check =
+            builder.min(&[allowed_trade_base, optimistic_trade_amount], 64);
         optimistic_trade_amount = builder.select(
             flag,
             new_optimistic_trade_amount_check,
@@ -1123,12 +1137,10 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
             let (price_diff_abs, _) = builder.abs(price_diff);
             let fee_tick = builder.constant_u64(FEE_TICK);
             let price_diff_tick = builder.mul(price_diff_abs, fee_tick);
-            let (price_diff_rate, _) = builder.conditional_div_rem(
-                liquidation_flag,
-                price_diff_tick,
-                tx_state.order.price_index,
-                ORDER_PRICE_BITS,
-            ); // 52 bits
+            let price_diff_tick_big = builder.target_to_biguint(price_diff_tick);
+            let maker_price_big = builder.target_to_biguint(tx_state.order.price_index);
+            let price_diff_rate_big = builder.div_biguint(&price_diff_tick_big, &maker_price_big);
+            let price_diff_rate = builder.biguint_to_target_unsafe(&price_diff_rate_big); // 52 bits
 
             let liquidation_fee = builder.select(
                 is_perps,
@@ -1566,6 +1578,28 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
         get_account_order_from_register(builder, &tx_state.register_stack[0]);
     tx_state.register_stack.pop_front(builder, pop_register);
 
+    // Cancel branches skip the owner check above, so bind the maker order owner to the
+    // account whose order count and locked balance get decremented.
+    {
+        let flag = builder.and(cancel_maker_order, is_account_index_equal);
+        builder.conditional_assert_eq(
+            flag,
+            tx_state.account_order.owner_account_index,
+            tx_state.accounts[TAKER_ACCOUNT_ID].account_index,
+        );
+        let flag = builder.and_not(cancel_maker_order, is_account_index_equal);
+        builder.conditional_assert_eq(
+            flag,
+            tx_state.account_order.owner_account_index,
+            tx_state.accounts[MAKER_ACCOUNT_ID].account_index,
+        );
+        builder.conditional_assert_not_eq(
+            flag,
+            tx_state.accounts[TAKER_ACCOUNT_ID].account_index,
+            tx_state.accounts[MAKER_ACCOUNT_ID].account_index,
+        );
+    }
+
     // Cancel maker order if needed
     let cancel_maker_order_from_first_account =
         builder.and(cancel_maker_order, is_account_index_equal);
@@ -1800,8 +1834,7 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
             let usdc_to_collateral_multiplier =
                 builder.target_to_biguint_single_limb_unsafe(usdc_to_collateral_multiplier);
 
-            let trade_quote =
-                builder.mul(trade_quote, tx_state.market_risk_details.quote_multiplier);
+            // trade_quote already carries the quote multiplier for perps
             let trade_quote_big = builder.target_to_biguint(trade_quote);
 
             let extended_taker_fee = builder.mul_biguint_non_carry(
@@ -1832,14 +1865,13 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
             route_type = builder.select(flag, route_type_spot, route_type);
 
             let fee_tick = builder.constant_u64(FEE_TICK);
+            let fee_tick_big = builder.target_to_biguint_single_limb_unsafe(fee_tick);
 
             let base_fee_amount_big = {
-                let (base_fee_multiplier, _) = builder.div_rem(
-                    tx_state.market.size_extension_multiplier,
-                    fee_tick,
-                    FEE_BITS,
-                );
-                let base_fee_multiplier = builder.target_to_biguint(base_fee_multiplier);
+                let size_extension_multiplier_big =
+                    builder.target_to_biguint(tx_state.market.size_extension_multiplier);
+                let base_fee_multiplier =
+                    builder.div_biguint(&size_extension_multiplier_big, &fee_tick_big);
                 let trade_base_big = builder.target_to_biguint(trade_base);
                 let trade_base_multiplied = builder.mul_biguint_non_carry(
                     &trade_base_big,
@@ -1865,12 +1897,10 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
             };
 
             let quote_fee_amount_big = {
-                let (quote_fee_multiplier, _) = builder.div_rem(
-                    tx_state.market.quote_extension_multiplier,
-                    fee_tick,
-                    FEE_BITS,
-                );
-                let quote_fee_multiplier = builder.target_to_biguint(quote_fee_multiplier);
+                let quote_extension_multiplier_big =
+                    builder.target_to_biguint(tx_state.market.quote_extension_multiplier);
+                let quote_fee_multiplier =
+                    builder.div_biguint(&quote_extension_multiplier_big, &fee_tick_big);
                 let trade_quote_big = builder.target_to_biguint(trade_quote);
                 let trade_quote_multiplied = builder.mul_biguint_non_carry(
                     &trade_quote_big,
@@ -1927,12 +1957,11 @@ pub fn execute_matching(builder: &mut Builder, tx_state: &mut TxState, timestamp
             route_type = builder.select(flag, route_type_spot, route_type);
 
             let fee_tick = builder.constant_u64(FEE_TICK);
-            let (quote_fee_multiplier, _) = builder.div_rem(
-                tx_state.market.quote_extension_multiplier,
-                fee_tick,
-                FEE_BITS,
-            );
-            let quote_fee_multiplier_big = builder.target_to_biguint(quote_fee_multiplier);
+            let fee_tick_big = builder.target_to_biguint_single_limb_unsafe(fee_tick);
+            let quote_extension_multiplier_big =
+                builder.target_to_biguint(tx_state.market.quote_extension_multiplier);
+            let quote_fee_multiplier_big =
+                builder.div_biguint(&quote_extension_multiplier_big, &fee_tick_big);
 
             let gated_trade_quote = builder.mul_bool(flag, trade_quote);
             let trade_quote_big = builder.target_to_biguint(gated_trade_quote);
@@ -3581,11 +3610,13 @@ fn get_impact_price(
 
     let remaining_quote_amount_for_leaf =
         builder.sub(impact_notional_amount, orders_before_quote_amount);
-    let leaf_included_base_amount = builder.ceil_div(
-        remaining_quote_amount_for_leaf,
-        order.price_index,
-        ORDER_PRICE_BITS,
-    );
+    let remaining_quote_amount_for_leaf_big =
+        builder.target_to_biguint(remaining_quote_amount_for_leaf);
+    let price_big = builder.target_to_biguint(order.price_index);
+    let leaf_included_base_amount_big =
+        builder.ceil_div_biguint(&remaining_quote_amount_for_leaf_big, &price_big);
+    let leaf_included_base_amount =
+        builder.biguint_to_target_unsafe(&leaf_included_base_amount_big);
     let leaf_included_quote_amount = builder.mul(leaf_included_base_amount, order.price_index);
 
     let total_included_base_amount =
@@ -3593,16 +3624,17 @@ fn get_impact_price(
     let total_included_quote_amount =
         builder.add(orders_before_quote_amount, leaf_included_quote_amount);
 
-    let (impact_price_div, _) = builder.div_rem(
-        total_included_quote_amount,
-        total_included_base_amount,
-        ORDER_BASE_AMOUNT_BITS,
+    let total_included_base_amount_big = builder.target_to_biguint(total_included_base_amount);
+    let total_included_quote_amount_big = builder.target_to_biguint(total_included_quote_amount);
+    let (impact_price_div_big, impact_price_rem_big) = builder.div_rem_biguint(
+        &total_included_quote_amount_big,
+        &total_included_base_amount_big,
     );
-    let impact_price_ceil_div = builder.ceil_div(
-        total_included_quote_amount,
-        total_included_base_amount,
-        ORDER_BASE_AMOUNT_BITS,
-    );
+    let impact_price_div = builder.biguint_to_target_unsafe(&impact_price_div_big);
+    let is_impact_price_rem_zero = builder.is_zero_biguint(&impact_price_rem_big);
+    let one = builder.one();
+    let impact_price_ceil_addend = builder.sub(one, is_impact_price_rem_zero.target);
+    let impact_price_ceil_div = builder.add(impact_price_div, impact_price_ceil_addend);
 
     let impact_price = builder.select(is_bid, impact_price_div, impact_price_ceil_div);
 

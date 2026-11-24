@@ -217,31 +217,6 @@ impl Verify for L1RegisterAssetTxTarget {
         );
         builder.conditional_assert_false(self.is_enabled, should_be_false);
 
-        // USDC checks
-        {
-            let is_usdc_asset = builder.is_equal_constant(self.asset_index, USDC_ASSET_INDEX);
-
-            // USDC must have margin index 0
-            let is_usdc_margin_index_zero = builder.is_equal_constant(
-                tx_state.next_margin_asset_index,
-                USDC_MARGIN_ASSET_INDEX as u64,
-            );
-            let is_usdc_margin_index_not_zero =
-                builder.and_not(is_usdc_asset, is_usdc_margin_index_zero);
-            builder.conditional_assert_false(self.is_enabled, is_usdc_margin_index_not_zero);
-
-            // USDC must have margin mode enabled
-            let is_usdc_margin_mode_disabled = builder.and_not(is_usdc_asset, self.margin_enabled);
-            builder.conditional_assert_false(self.is_enabled, is_usdc_margin_mode_disabled);
-
-            // USDC LTV = liq factor = LT = ASSET_MARGIN_TICK, liquidation fee = 0
-            let is_usdc_ltv_correct =
-                builder.is_equal_constant(self.loan_to_value, ASSET_MARGIN_TICK);
-            builder.conditional_assert_true(is_usdc_asset, is_usdc_ltv_correct);
-            let is_usdc_liquidation_fee_zero = builder.is_zero(self.liquidation_fee);
-            builder.conditional_assert_true(is_usdc_asset, is_usdc_liquidation_fee_zero);
-        }
-
         // Ensure that asset is empty
         let is_asset_empty = tx_state.assets[TX_ASSET_ID].is_empty(builder);
         self.success = builder.and(self.success, is_asset_empty);
@@ -254,6 +229,31 @@ impl Verify for L1RegisterAssetTxTarget {
         let invalid_margin_index_and_in_margin_list =
             builder.and(self.in_margin_list, is_margin_index_invalid);
         self.success = builder.and_not(self.success, invalid_margin_index_and_in_margin_list);
+
+        // USDC checks
+        {
+            let is_usdc_asset = builder.is_equal_constant(self.asset_index, USDC_ASSET_INDEX);
+
+            // USDC must have margin index 0
+            let is_usdc_margin_index_zero = builder.is_equal_constant(
+                tx_state.next_margin_asset_index,
+                USDC_MARGIN_ASSET_INDEX as u64,
+            );
+            let is_usdc_margin_index_not_zero =
+                builder.and_not(is_usdc_asset, is_usdc_margin_index_zero);
+            builder.conditional_assert_false(self.success, is_usdc_margin_index_not_zero);
+
+            // USDC must have margin mode enabled
+            let is_usdc_margin_mode_disabled = builder.and_not(is_usdc_asset, self.margin_enabled);
+            builder.conditional_assert_false(self.is_enabled, is_usdc_margin_mode_disabled);
+
+            // USDC LTV = liq factor = LT = ASSET_MARGIN_TICK, liquidation fee = 0
+            let is_usdc_ltv_correct =
+                builder.is_equal_constant(self.loan_to_value, ASSET_MARGIN_TICK);
+            builder.conditional_assert_true(is_usdc_asset, is_usdc_ltv_correct);
+            let is_usdc_liquidation_fee_zero = builder.is_zero(self.liquidation_fee);
+            builder.conditional_assert_true(is_usdc_asset, is_usdc_liquidation_fee_zero);
+        }
 
         // If the asset joins the margined asset list and margin index is not nil, check that margin index is empty
         let is_margin_index_empty = tx_state.margined_asset[TX_ASSET_ID].is_empty(builder);

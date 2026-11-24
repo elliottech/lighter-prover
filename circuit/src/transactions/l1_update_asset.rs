@@ -214,15 +214,6 @@ impl Verify for L1UpdateAssetTxTarget {
         {
             let is_usdc_asset = builder.is_equal_constant(self.asset_index, USDC_ASSET_INDEX);
 
-            // USDC must have margin index 0
-            let is_usdc_margin_index_zero = builder.is_equal_constant(
-                tx_state.next_margin_asset_index,
-                USDC_MARGIN_ASSET_INDEX as u64,
-            );
-            let is_usdc_margin_index_not_zero =
-                builder.and_not(is_usdc_asset, is_usdc_margin_index_zero);
-            builder.conditional_assert_false(self.is_enabled, is_usdc_margin_index_not_zero);
-
             // USDC must have margin mode enabled
             let is_usdc_margin_mode_disabled = builder.and_not(is_usdc_asset, self.margin_enabled);
             builder.conditional_assert_false(self.is_enabled, is_usdc_margin_mode_disabled);
@@ -255,11 +246,6 @@ impl Verify for L1UpdateAssetTxTarget {
         let invalid_margin_index_and_enabling_margin =
             builder.and(is_margin_index_invalid, self.enabling_margin);
         self.success = builder.and_not(self.success, invalid_margin_index_and_enabling_margin);
-
-        // Enabling margin requires margin index to be empty
-        let success_and_enabling_margin = builder.and(self.success, self.enabling_margin);
-        let is_margin_index_empty = builder.is_zero(tx_state.assets[TX_ASSET_ID].margin_index);
-        builder.conditional_assert_true(success_and_enabling_margin, is_margin_index_empty);
     }
 }
 
